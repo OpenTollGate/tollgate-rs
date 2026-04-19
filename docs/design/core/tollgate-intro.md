@@ -30,6 +30,8 @@ TollGate operates on a single principle: **the forwarder charges for forwarding*
     B charges B's rate (B is doing the work)
 ```
 
+![Pricing Direction](../diagrams/pricing-direction.svg)
+
 Prices can be positive, zero, or negative. A well-connected node (e.g., one with direct internet access) charges a positive price because its forwarding is valuable. A leaf node willing to pay for inbound traffic can accept a negative price from its peer — effectively paying the peer to forward traffic *to* the leaf. A pair of peers owned by the same operator can set zero prices in both directions, skipping payment entirely. Pricing naturally reflects network topology, resource scarcity, and the economic relationship between each pair of peers.
 
 Payment flows through **Cashu Spilman channels** — unidirectional payment channels where the sender locks ecash in a 2-of-2 multisig and signs incremental balance updates as traffic is metered. The receiver can settle at any time by submitting the latest update to a Cashu mint. Two channels per peer pair (one per direction) enable bidirectional payment.
@@ -112,6 +114,8 @@ tollgate-core (lib)              ← Pure logic, no platform code
 The main binary targets Linux, macOS, Windows, and OpenWrt with feature flags for OS-specific differences. OpenWrt is Linux — the differences are config paths (UCI vs. XDG), packaging (ipk vs. deb/brew), and resource constraints. ESP32 is fundamentally different (different runtime, different toolchain, possibly `no_std`) and lives in its own project.
 
 ### Core Components
+
+![Core Components](../diagrams/core-components.svg)
 
 ```
 ┌────────────────────────────────────────────────────────────┐

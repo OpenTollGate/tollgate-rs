@@ -22,6 +22,10 @@ Spilman channels enable **streaming micropayments**: the sender locks ecash in a
 
 At each settlement interval, both sides exchange metering reports. The net debtor (whichever side owes more) signs a single balance update on their channel for the net amount. Only one signature per interval, and only the delta moves.
 
+### Settlement with Netting
+
+![Settlement with Netting](../diagrams/settlement-netting.svg)
+
 ---
 
 ## Channel Pair Lifecycle
@@ -71,6 +75,8 @@ A channel approaches exhaustion (default: 80% capacity used). The sender (channe
 5. Old channel is settled by the receiver when mint connectivity allows
 
 Both the old (draining) and new channel are active simultaneously during the overlap period.
+
+![Channel Rollover Timeline](../diagrams/channel-rollover.svg)
 
 ### Settling
 

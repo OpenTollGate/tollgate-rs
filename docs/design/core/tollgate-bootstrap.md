@@ -126,6 +126,8 @@ A smart peer monitors the MeteringReports from the forwarder and sends a new tok
 
 ## Upgrade to Spilman
 
+![Bootstrap to Spilman Upgrade](../diagrams/bootstrap-upgrade.svg)
+
 Once a peer has mint connectivity (gained through the bootstrap-funded connection), it can upgrade to Spilman channels:
 
 ```

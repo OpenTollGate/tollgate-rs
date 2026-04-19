@@ -36,6 +36,8 @@ Suspended --> Active (new channel funded)
 Any --> None (disconnect)
 ```
 
+![Access Level State Machine](../diagrams/access-level-states.svg)
+
 ### None (Default)
 
 Every newly connected peer starts at `None`. The peer can exchange TollGate protocol messages — Announce, PriceSheet, Accept, BootstrapToken — but **no traffic is forwarded** for or through this peer.

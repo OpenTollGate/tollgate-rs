@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 360" font-family="monospace" font-size="12">
+  <style>
+    text          { fill: #e0e0e0; }
+    text.title    { font-size: 16px; font-weight: bold; }
+    text.subtitle { font-size: 12px; fill: #909090; }
+    text.alabel   { font-size: 11px; }
+    text.annot    { font-size: 10px; fill: #909090; font-style: italic; }
+    text.elabel   { font-size: 9px; fill: #b0b0b0; }
+    text.caption  { font-size: 11px; fill: #707080; font-style: italic; }
+  </style>
+
+  <!-- Background -->
+  <rect width="780" height="360" fill="#0d1117" rx="8"/>
+
+  <!-- Title -->
+  <text x="390" y="28" text-anchor="middle" class="title">Channel Rollover</text>
+  <text x="390" y="46" text-anchor="middle" class="subtitle">New channel opens before old exhausts — no service interruption</text>
+
+  <!-- Time axis -->
+  <line x1="80" y1="280" x2="720" y2="280" stroke="#404060" stroke-width="1.5"/>
+  <text x="400" y="300" text-anchor="middle" class="elabel">time &#8594;</text>
+
+  <!-- Tick marks -->
+  <line x1="120" y1="275" x2="120" y2="285" stroke="#404060" stroke-width="1"/>
+  <text x="120" y="310" text-anchor="middle" class="elabel">0%</text>
+
+  <line x1="330" y1="275" x2="330" y2="285" stroke="#404060" stroke-width="1"/>
+  <text x="330" y="310" text-anchor="middle" class="elabel">80%</text>
+  <text x="330" y="325" text-anchor="middle" class="annot">rollover</text>
+  <text x="330" y="338" text-anchor="middle" class="annot">trigger</text>
+
+  <line x1="560" y1="275" x2="560" y2="285" stroke="#404060" stroke-width="1"/>
+  <text x="560" y="310" text-anchor="middle" class="elabel">100%</text>
+  <text x="560" y="325" text-anchor="middle" class="annot">old</text>
+  <text x="560" y="338" text-anchor="middle" class="annot">exhausted</text>
+
+  <!-- Old channel bar -->
+  <rect x="120" y="100" width="440" height="40" rx="4" fill="#2e3a5e" stroke="#5080c0" stroke-width="1.5"/>
+
+  <!-- Old channel: filled portion (draining) -->
+  <rect x="120" y="100" width="440" height="40" rx="4" fill="#5080c0" opacity="0.3"/>
+
+  <!-- Old channel: 0-80% solid fill -->
+  <rect x="120" y="100" width="210" height="40" rx="4" fill="#5080c0" opacity="0.5"/>
+
+  <!-- Old channel: 80-100% drained portion -->
+  <rect x="330" y="100" width="230" height="40" rx="4" fill="#5080c0" opacity="0.15"/>
+  <!-- Diagonal hatch pattern to indicate draining -->
+  <line x1="350" y1="100" x2="350" y2="140" stroke="#5080c0" stroke-width="0.5" opacity="0.3"/>
+  <line x1="380" y1="100" x2="380" y2="140" stroke="#5080c0" stroke-width="0.5" opacity="0.3"/>
+  <line x1="410" y1="100" x2="410" y2="140" stroke="#5080c0" stroke-width="0.5" opacity="0.3"/>
+  <line x1="440" y1="100" x2="440" y2="140" stroke="#5080c0" stroke-width="0.5" opacity="0.3"/>
+  <line x1="470" y1="100" x2="470" y2="140" stroke="#5080c0" stroke-width="0.5" opacity="0.3"/>
+  <line x1="500" y1="100" x2="500" y2="140" stroke="#5080c0" stroke-width="0.5" opacity="0.3"/>
+  <line x1="530" y1="100" x2="530" y2="140" stroke="#5080c0" stroke-width="0.5" opacity="0.3"/>
+
+  <text x="225" y="125" text-anchor="middle" class="alabel" fill="#80b0e0">Old Channel</text>
+
+  <!-- New channel bar -->
+  <rect x="330" y="170" width="390" height="40" rx="4" fill="#1a2e1a" stroke="#50c050" stroke-width="1.5"/>
+
+  <!-- New channel: inactive portion (waiting) -->
+  <rect x="330" y="170" width="230" height="40" rx="4" fill="#50c050" opacity="0.1"/>
+
+  <!-- New channel: active portion (after old exhausts) -->
+  <rect x="560" y="170" width="160" height="40" rx="4" fill="#50c050" opacity="0.3"/>
+
+  <text x="525" y="195" text-anchor="middle" class="alabel" fill="#80e080">New Channel</text>
+
+  <!-- Overlap region bracket -->
+  <line x1="330" y1="72" x2="330" y2="85" stroke="#d0a040" stroke-width="1"/>
+  <line x1="560" y1="72" x2="560" y2="85" stroke="#d0a040" stroke-width="1"/>
+  <line x1="330" y1="78" x2="560" y2="78" stroke="#d0a040" stroke-width="1.5"/>
+  <text x="445" y="70" text-anchor="middle" class="alabel" fill="#d0a040">overlap period</text>
+
+  <!-- Trigger line -->
+  <line x1="330" y1="88" x2="330" y2="220" stroke="#d0a040" stroke-width="1" stroke-dasharray="4,3"/>
+
+  <!-- Exhaustion line -->
+  <line x1="560" y1="88" x2="560" y2="220" stroke="#c05050" stroke-width="1" stroke-dasharray="4,3"/>
+
+  <!-- Annotations -->
+  <text x="225" y="90" text-anchor="middle" class="annot">active, draining</text>
+  <text x="445" y="155" text-anchor="middle" class="annot">draining to 100%</text>
+  <text x="445" y="230" text-anchor="middle" class="annot">funded, waiting</text>
+  <text x="650" y="230" text-anchor="middle" class="annot">charging</text>
+
+  <!-- Carryover example -->
+  <text x="560" y="255" text-anchor="middle" class="elabel">e.g. 2 sats remain + 5 sat settlement</text>
+  <text x="560" y="268" text-anchor="middle" class="elabel">= 2 to old, 3 to new</text>
+</svg>

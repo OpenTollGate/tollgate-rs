@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 380" font-family="monospace" font-size="12">
+  <style>
+    text          { fill: #e0e0e0; }
+    text.title    { font-size: 16px; font-weight: bold; }
+    text.subtitle { font-size: 12px; fill: #909090; }
+    text.mlabel   { font-size: 11px; font-weight: bold; }
+    text.mdesc    { font-size: 9px; fill: #909090; }
+    text.tlabel   { font-size: 10px; fill: #b0b0b0; }
+    text.caption  { font-size: 11px; fill: #707080; font-style: italic; }
+  </style>
+
+  <!-- Background -->
+  <rect width="700" height="380" fill="#0d1117" rx="8"/>
+
+  <!-- Title -->
+  <text x="350" y="28" text-anchor="middle" class="title">tollgate-core Components</text>
+  <text x="350" y="46" text-anchor="middle" class="subtitle">Pure logic — no platform code, no network specifics</text>
+
+  <!-- Outer border -->
+  <rect x="40" y="60" width="620" height="230" rx="6" fill="none" stroke="#404060" stroke-width="1.5"/>
+  <text x="350" y="80" text-anchor="middle" class="mlabel" fill="#707080">tollgate-core</text>
+
+  <!-- Row 1 -->
+  <!-- Spilman Channel Manager -->
+  <rect x="60" y="95" width="185" height="55" rx="5" fill="#1a2e2e" stroke="#50a0c0" stroke-width="1.5"/>
+  <text x="152" y="118" text-anchor="middle" class="mlabel" fill="#80c0e0">Spilman Channel</text>
+  <text x="152" y="133" text-anchor="middle" class="mdesc">lifecycle, rollover, netting</text>
+
+  <!-- Product Catalog & Pricing -->
+  <rect x="258" y="95" width="185" height="55" rx="5" fill="#1a2e1a" stroke="#50c050" stroke-width="1.5"/>
+  <text x="350" y="118" text-anchor="middle" class="mlabel" fill="#80e080">Product &amp; Pricing</text>
+  <text x="350" y="133" text-anchor="middle" class="mdesc">catalog, dynamic adjustment</text>
+
+  <!-- Access Control -->
+  <rect x="456" y="95" width="185" height="55" rx="5" fill="#2e1a1a" stroke="#c05050" stroke-width="1.5"/>
+  <text x="548" y="118" text-anchor="middle" class="mlabel" fill="#f08080">Access Control</text>
+  <text x="548" y="133" text-anchor="middle" class="mdesc">gate, 5 access levels</text>
+
+  <!-- Row 2 -->
+  <!-- Metering -->
+  <rect x="60" y="165" width="185" height="55" rx="5" fill="#1a1a2e" stroke="#8080c0" stroke-width="1.5"/>
+  <text x="152" y="188" text-anchor="middle" class="mlabel" fill="#a0a0e0">Metering</text>
+  <text x="152" y="203" text-anchor="middle" class="mdesc">per-peer outbound bytes</text>
+
+  <!-- Protocol Messages -->
+  <rect x="258" y="165" width="185" height="55" rx="5" fill="#1a1a2e" stroke="#8080c0" stroke-width="1.5"/>
+  <text x="350" y="188" text-anchor="middle" class="mlabel" fill="#a0a0e0">Protocol</text>
+  <text x="350" y="203" text-anchor="middle" class="mdesc">CBOR messages, codec</text>
+
+  <!-- Peer State Machine -->
+  <rect x="456" y="165" width="185" height="55" rx="5" fill="#1a1a2e" stroke="#8080c0" stroke-width="1.5"/>
+  <text x="548" y="188" text-anchor="middle" class="mlabel" fill="#a0a0e0">Peer State</text>
+  <text x="548" y="203" text-anchor="middle" class="mdesc">lifecycle state machine</text>
+
+  <!-- Traits bar at bottom -->
+  <rect x="60" y="240" width="581" height="35" rx="4" fill="#151520" stroke="#d0a040" stroke-width="1.5"/>
+  <text x="350" y="262" text-anchor="middle" class="mlabel" fill="#d0a040">Traits: Wallet    NetworkAdapter</text>
+
+  <!-- Implementation row -->
+  <text x="350" y="310" text-anchor="middle" class="tlabel">Implementation provides:</text>
+
+  <rect x="80" y="320" width="150" height="30" rx="4" fill="#151520" stroke="#404060" stroke-width="1"/>
+  <text x="155" y="340" text-anchor="middle" class="mdesc" fill="#909090">Cashu Wallet</text>
+
+  <rect x="275" y="320" width="150" height="30" rx="4" fill="#151520" stroke="#404060" stroke-width="1"/>
+  <text x="350" y="340" text-anchor="middle" class="mdesc" fill="#909090">FIPS / IP Adapter</text>
+
+  <rect x="470" y="320" width="150" height="30" rx="4" fill="#151520" stroke="#404060" stroke-width="1"/>
+  <text x="545" y="340" text-anchor="middle" class="mdesc" fill="#909090">Operator Config</text>
+
+  <!-- Connection lines from traits to impl -->
+  <line x1="155" y1="275" x2="155" y2="320" stroke="#404060" stroke-width="0.5" stroke-dasharray="3,3"/>
+  <line x1="350" y1="275" x2="350" y2="320" stroke="#404060" stroke-width="0.5" stroke-dasharray="3,3"/>
+  <line x1="545" y1="275" x2="545" y2="320" stroke="#404060" stroke-width="0.5" stroke-dasharray="3,3"/>
+</svg>

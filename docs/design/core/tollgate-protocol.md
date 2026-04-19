@@ -327,6 +327,8 @@ Orderly teardown of the entire TollGate relationship.
 
 ### Normal Connection (Peer Already Online)
 
+![Normal Connection Sequence](../diagrams/connection-sequence.svg)
+
 ```
 Peer B connects to Node A (already authenticated by network layer)
 
