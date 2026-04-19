@@ -73,7 +73,7 @@ Not all devices support full Spilman channels. A constrained device may only be 
 A TollGate node can lose mint connectivity at any moment — power loss, network partition, upstream failure. The design accounts for this:
 
 - **Balance updates don't need the mint** — they are signed between peers without mint involvement. Payment continues normally during outages.
-- **Core buffers bootstrap tokens** — when a peer sends a bootstrap token while the node is offline, the token is buffered. It cannot be verified as unspent without the mint, so it enters a pending state. Once mint connectivity returns, buffered tokens are verified and spent tokens discarded. This means accepting some risk during offline operation — a peer could send already-spent tokens — but limits exposure to the bootstrap amount.
+- **Pre-stored bootstrap tokens** — a node starting without connectivity can carry pre-funded Cashu proofs (e.g., loaded via QR code). When it connects to a peer, it sends these as bootstrap tokens. The provider always verifies each token with the mint before granting service. If a token has already been spent, the provider rejects it and the sender tries the next proof in its set. This avoids any trust-before-verification — the sender bears the cost of carrying potentially-spent proofs, not the provider.
 - **Channels survive outages** — the receiver holds the latest signed update and settles when the mint returns.
 - **Spilman's time-locked refund** — if the receiver disappears, the sender reclaims funds after expiry.
 - **Channel expiry management** — nodes monitor channel expiry and trigger settlement before the refund timelock activates, even if the mint was temporarily unavailable.
@@ -233,6 +233,8 @@ TollGate assumes that peers are authenticated by the underlying network (FIPS No
 **Offline exploitation**: A peer exploits a mint outage to receive service without settlement. Mitigated by channel expiry management — the receiver settles before the refund timelock activates, even if the mint was temporarily unavailable.
 
 **Mint collusion**: A malicious mint could refuse to honor tokens. Mitigated by supporting multiple mints and per-mint pricing — operators choose which mints to trust.
+
+**Mint outage**: A mint going offline blocks channel funding, rollover, and settlement. Operators should aim to maintain overlapping channels across at least two mints (three preferred) so that if one mint goes down, channels on the remaining mint(s) continue operating. Diversifying across mints reduces the impact of correlated failures. *Future: automated inter-mint fund movement to rebalance when a mint becomes unavailable.*
 
 ### Privacy
 

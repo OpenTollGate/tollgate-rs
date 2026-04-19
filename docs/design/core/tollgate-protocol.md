@@ -157,7 +157,7 @@ Both peers send ChannelReady for their respective channel directions. Resource m
 
 When a session starts (both ChannelReady messages exchanged), both sides reset their metering counters to zero. This establishes a shared baseline — if either node restarted, its counters were already at zero; if neither restarted, both agree to start fresh from this point.
 
-All MeteringReport values are **deltas since the last report**, not cumulative from some epoch. The first MeteringReport after ChannelReady covers the interval from baseline to the first settlement tick. This means node restarts are transparent — the Spilman channel's cumulative balance is the authoritative payment record, and metering counters only need to be consistent within the current session.
+All MeteringReport values are **cumulative since session start** (the ChannelReady baseline). Each side computes the interval delta as `current_cumulative - previous_cumulative`. This makes the protocol self-healing: if a MeteringReport is lost, duplicated, or delivered out of order, the next report still carries the correct totals — no data is lost and no sequence numbers are needed. The Spilman channel's cumulative balance is the authoritative payment record, and metering counters only need to be consistent within the current session.
 
 ### 0x04 MeteringReport
 
@@ -166,17 +166,17 @@ Sent by both peers at each settlement interval. Contains **unsigned** resource s
 ```cbor
 {
   0: 0x04,                         // type: MeteringReport
-  1: <elapsed_ms>,                 // u64 — milliseconds since last settlement
-  2: <delivered>,                   // u64 — units we delivered TO this peer this interval
-  3: <received>,                    // u64 — units we received FROM this peer this interval
+  1: <elapsed_ms>,                 // u64 — milliseconds since session start (cumulative)
+  2: <delivered>,                   // u64 — cumulative units we delivered TO this peer since session start
+  3: <received>,                    // u64 — cumulative units we received FROM this peer since session start
   4: <new_product_id>,             // bytes(32) | null — updated product ID for next interval
   5: <new_pricing>,                // array | null — updated pricing if product_id changed
 }
 ```
 
-Both peers send MeteringReport. Once both reports are received, each side independently computes:
-1. Cost A owes B = B's pricing applied to A's delivered units + elapsed time
-2. Cost B owes A = A's pricing applied to B's delivered units + elapsed time
+Both peers send MeteringReport. Each side computes the interval delta (`current_cumulative - previous_cumulative`) for delivered and received units. Once both reports are received, each side independently computes:
+1. Cost A owes B = B's pricing × units B delivered to A this interval + B's time price × elapsed
+2. Cost B owes A = A's pricing × units A delivered to B this interval + A's time price × elapsed
 3. Net = cost A owes B - cost B owes A
 4. If net > 0: A is the debtor (sends BalanceUpdate on A→B channel)
 5. If net < 0: B is the debtor (sends BalanceUpdate on B→A channel)
@@ -347,8 +347,8 @@ Orderly teardown of the entire TollGate relationship.
      A → B: ChannelReady (A→B)
 
   4. Settle (repeat every 5s)
-     A → B: MeteringReport (units delivered, received)
-     B → A: MeteringReport (units delivered, received)
+     A → B: MeteringReport (cumulative delivered, received)
+     B → A: MeteringReport (cumulative delivered, received)
      [both compute net]
      debtor → creditor: BalanceUpdate (signed)
      creditor → debtor: SettlementAck
@@ -371,8 +371,8 @@ A → B: ChannelReady (A→B channel)
 [metering begins — both channels active]
 
 every <interval>:
-  A → B: MeteringReport (units delivered, units received, elapsed)
-  B → A: MeteringReport (units delivered, units received, elapsed)
+  A → B: MeteringReport (cumulative delivered, received, elapsed)
+  B → A: MeteringReport (cumulative delivered, received, elapsed)
 
   [both compute net: who owes whom and how much]
 
@@ -490,6 +490,7 @@ These are infrequent messages (every 5s for settlement, one-time for setup). CBO
 | Message discrimination | Integer `type` field (key 0) | Simple, extensible |
 | First message | Announce (protocol version + pubkey) | Identifies TollGate capability before negotiation |
 | Mint option ID | SHA256(mint_url \| mint_unit) | Unambiguous reference to chosen pricing option |
+| Metering counters | Cumulative since session start, not deltas | Self-healing: lost/duplicated reports don't corrupt accounting |
 | Settlement flow | MeteringReport (both) → BalanceUpdate (net debtor only) → Ack | Deterministic netting, only net amount moves |
 | Price changes | Piggybacked on MeteringReport (fields 4-5) | No extra round-trips |
 | Zero-price mode | Accept without funding, skip metering | Simplest path for free peering |

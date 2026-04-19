@@ -34,6 +34,7 @@ In unauthenticated mode:
 - Any device can connect and start the TollGate protocol
 - The peer's pubkey comes from the Announce message (self-declared)
 - Risk is limited to the payment amount — no pay, no service
+- A peer cannot impersonate another peer's payment channels — Spilman balance updates require a valid signature from the channel funder's private key, which an impersonator does not possess. However, a malicious peer could cause confusion during session setup by claiming a pubkey that already has an active session. Implementations should reject duplicate pubkey connections or require proof of key ownership (e.g., a challenge-response signed with the claimed key) in high-risk deployments
 
 ### Future: Authenticated Transports
 

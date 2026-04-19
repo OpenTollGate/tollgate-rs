@@ -36,13 +36,14 @@ At each settlement interval, both sides exchange metering reports. The net debto
 <details><summary>Text version</summary>
 
 ```
-  Phase 1 — Metering
-    A → B: MeteringReport (delivered 500 units to B, received 200 units)
-    B → A: MeteringReport (delivered 200 units to A, received 500 units)
+  Phase 1 — Metering (cumulative since session start)
+    A → B: MeteringReport (cumulative delivered 500, received 200)
+    B → A: MeteringReport (cumulative delivered 200, received 500)
+    Both compute interval deltas from previous cumulative values.
 
   Phase 2 — Compute (both sides, deterministic)
-    A owes B: 200 units × B's price = 2 sats
-    B owes A: 500 units × A's price = 5 sats
+    A owes B: units B delivered to A × B's price = 2 sats
+    B owes A: units A delivered to B × A's price = 5 sats
     Net: B owes A 3 sats
 
   Phase 3 — Settle
@@ -267,8 +268,8 @@ Danger zone:      expiry - safety_margin (e.g., expiry - 60 seconds)
 Each settlement interval, both sides owe each other independently:
 
 ```
-A owes B: B's pricing × (seconds + units A delivered to B)
-B owes A: A's pricing × (seconds + units B delivered to A)
+A owes B: B's pricing × (elapsed seconds + units B delivered to A)
+B owes A: A's pricing × (elapsed seconds + units A delivered to B)
 Net: A_owes - B_owes
 ```
 

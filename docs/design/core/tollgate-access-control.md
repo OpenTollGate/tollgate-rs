@@ -134,16 +134,18 @@ Node A delivers 1000 units to Peer B this interval
 A's metering: units_delivered_to_B += 1000
 ```
 
-Both sides meter independently. At each settlement interval, both exchange MeteringReports containing:
-- `units_delivered`: units we delivered TO this peer
-- `units_received`: units we received FROM this peer
-- `elapsed_ms`: milliseconds since last report
+Both sides meter independently. At each settlement interval, both exchange MeteringReports containing cumulative values since session start:
+- `units_delivered`: cumulative units we delivered TO this peer
+- `units_received`: cumulative units we received FROM this peer
+- `elapsed_ms`: milliseconds since session start
+
+Each side computes the interval delta as `current_cumulative - previous_cumulative`. Cumulative counters make the protocol self-healing — lost or duplicated reports don't corrupt accounting.
 
 ### Calibration
 
 Both sides report what they sent and what they received. This allows calibration:
-- A says: "I delivered 1000 units to you" (`units_delivered = 1000`)
-- B says: "I received 980 units from you" (`units_received = 980`)
+- A says: "I delivered 1000 units to you this interval" (delta from cumulative counters)
+- B says: "I received 980 units from you this interval" (delta from cumulative counters)
 - Transit loss = |1000 - 980| / 1000 = 2% (within default 5% tolerance)
 
 ### Transit Loss Resolution

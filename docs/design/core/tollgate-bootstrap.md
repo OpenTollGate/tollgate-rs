@@ -168,7 +168,7 @@ A smart peer monitors the MeteringReports from the provider and sends a new toke
      B → A: ChannelReady
      A → B: ChannelReady
 
-     Spilman channels active — bootstrap balance abandoned
+     Spilman channels active — remaining bootstrap balance credited
 ```
 </details>
 
@@ -182,13 +182,17 @@ A → B: Accept (product_id, option_id, channel funding)
 B → A: ChannelReady
 A → B: ChannelReady
 
-[Spilman channels now active — bootstrap balance becomes irrelevant]
+[Spilman channels now active — remaining bootstrap balance applied as credit]
 ```
 
-The remaining bootstrap balance is effectively abandoned — the provider keeps it. This is acceptable because:
-- The bootstrap amount is small (ideally just enough for channel setup)
-- The peer chose to upgrade, meaning the bootstrap served its purpose
-- No protocol complexity for refunding unused bootstrap balance
+The remaining bootstrap balance is **carried over as a credit** toward the first Spilman settlement intervals. The provider tracks the remaining bootstrap balance internally and applies it before charging the Spilman channel:
+
+1. At upgrade time, the provider notes the remaining bootstrap balance (e.g., 40 sats remaining)
+2. Spilman channels are established and metering begins
+3. For the first N settlement intervals, the provider deducts costs from the bootstrap credit before signing BalanceUpdates on the Spilman channel
+4. Once the credit is consumed, normal Spilman settlement proceeds
+
+This is purely internal bookkeeping on the provider side — no protocol change is needed. The peer benefits from not losing pre-paid value, and the provider's accounting remains consistent.
 
 ---
 
@@ -276,8 +280,8 @@ If the provider loses mint connectivity after accepting a token:
 | Balance tracking | Provider tracks internally, same pricing formula as Spilman | Consistent metering across payment modes |
 | Usage reporting | Bidirectional MeteringReport, pricing applied one direction only | Both sides calibrate; pay-only peer delivers for free |
 | Top-up | Additive — new token value added to current balance | Simple, no negotiation needed |
-| Upgrade path | Peer sends Accept with Spilman funding when ready | Seamless transition, remaining bootstrap balance abandoned |
-| Change | No refund of unused bootstrap balance | Keeps protocol simple, bootstrap amounts are small |
+| Upgrade path | Peer sends Accept with Spilman funding when ready | Seamless transition, remaining bootstrap balance credited |
+| Bootstrap credit | Remaining balance carried over as credit toward first Spilman settlements | No value lost, pure internal bookkeeping |
 | Pay-only pricing | Peer's delivery price must be zero or negative | Provider can't pay peer without receiving channel |
 | Exhaustion signal | Reject (balance exhausted) | Reuses existing message type |
 | Offline provider | Existing balance continues, new tokens rejected until mint returns | Already-verified balance is safe to use |
