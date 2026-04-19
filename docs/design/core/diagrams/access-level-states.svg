@@ -26,7 +26,7 @@
 
   <!-- Title -->
   <text x="400" y="28" text-anchor="middle" class="title">Access Level State Machine</text>
-  <text x="400" y="46" text-anchor="middle" class="subtitle">Per-peer payment status determines forwarding access</text>
+  <text x="400" y="46" text-anchor="middle" class="subtitle">Per-peer payment status determines delivery access</text>
 
   <!-- ═══ NONE — center top ═══ -->
   <rect x="310" y="75" width="180" height="55" rx="8" fill="#2e1a1a" stroke="#c05050" stroke-width="2"/>
@@ -91,10 +91,10 @@
 
   <!-- ═══ Legend ═══ -->
   <line x1="200" y1="462" x2="230" y2="462" stroke="#c05050" stroke-width="2"/>
-  <text x="238" y="466" class="elabel">blocked (no forwarding)</text>
+  <text x="238" y="466" class="elabel">blocked (no delivery)</text>
 
   <line x1="410" y1="462" x2="440" y2="462" stroke="#50c050" stroke-width="2"/>
-  <text x="448" y="466" class="elabel">allowed (forwarding active)</text>
+  <text x="448" y="466" class="elabel">allowed (delivery active)</text>
 
   <line x1="200" y1="482" x2="230" y2="482" stroke="#50a0c0" stroke-width="2"/>
   <text x="238" y="486" class="elabel">bootstrap (token-metered)</text>

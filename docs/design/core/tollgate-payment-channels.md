@@ -6,43 +6,43 @@ Bootstrap tokens and pay-only mode are documented separately in [tollgate-bootst
 
 ## Overview
 
-Each pair of TollGate peers maintains **two unidirectional Spilman channels** — one per forwarding direction. Each channel is funded by the party that owes payment (the peer receiving the forwarding service).
+Each pair of TollGate peers maintains **two unidirectional Spilman channels** — one per delivery direction. Each channel is funded by the party that owes payment (the peer receiving the delivery service).
 
-![Channel Pair Structure](../diagrams/channel-pair.svg)
+![Channel Pair Structure](diagrams/channel-pair.svg)
 <details><summary>Text version</summary>
 
 ```
   Peer A                                          Peer B
   ┌──────────┐                              ┌──────────┐
-  │ sender   │── A forwards to B ──────────→│ receiver │
+  │ sender   │── A delivers to B ──────────→│ receiver │
   │ on A→B   │╌╌ Channel A→B: A pays B ───→│ on A→B   │
   │          │                              │          │
-  │ receiver │←────────── B forwards to A ──│ sender   │
+  │ receiver │←────────── B delivers to A ──│ sender   │
   │ on B→A   │←╌╌ Channel B→A: B pays A ╌╌╌│ on B→A   │
   └──────────┘                              └──────────┘
 
-  ── traffic    ╌╌ payment (Spilman channel)
-  The forwarder charges — the peer receiving the service pays.
+  ── resource   ╌╌ payment (Spilman channel)
+  The provider charges — the peer receiving the service pays.
 ```
 </details>
 
-Spilman channels enable **streaming micropayments**: the sender locks ecash in a 2-of-2 multisig with a time-locked refund path, then signs incremental balance updates as traffic is metered. The receiver holds the latest signed update and can settle with the mint at any time.
+Spilman channels enable **streaming micropayments**: the sender locks ecash in a 2-of-2 multisig with a time-locked refund path, then signs incremental balance updates as resource is metered. The receiver holds the latest signed update and can settle with the mint at any time.
 
 At each settlement interval, both sides exchange metering reports. The net debtor (whichever side owes more) signs a single balance update on their channel for the net amount. Only one signature per interval, and only the delta moves.
 
 ### Settlement with Netting
 
-![Settlement with Netting](../diagrams/settlement-netting.svg)
+![Settlement with Netting](diagrams/settlement-netting.svg)
 <details><summary>Text version</summary>
 
 ```
   Phase 1 — Metering
-    A → B: MeteringReport (forwarded 500B to B, received 200B)
-    B → A: MeteringReport (forwarded 200B to A, received 500B)
+    A → B: MeteringReport (delivered 500 units to B, received 200 units)
+    B → A: MeteringReport (delivered 200 units to A, received 500 units)
 
   Phase 2 — Compute (both sides, deterministic)
-    A owes B: 200B × B's price = 2 sats
-    B owes A: 500B × A's price = 5 sats
+    A owes B: 200 units × B's price = 2 sats
+    B owes A: 500 units × A's price = 5 sats
     Net: B owes A 3 sats
 
   Phase 3 — Settle
@@ -74,8 +74,8 @@ The Spilman channel lifecycle begins after peers have exchanged Announce and Pri
 ### Funding
 
 Both peers can reach a mint. They exchange Accept messages containing Spilman funding proofs. Each side creates a channel where they are the sender (funder):
-- B creates and funds the B→A channel (B pays for A's forwarding to B)
-- A creates and funds the A→B channel (A pays for B's forwarding to A)
+- B creates and funds the B→A channel (B pays for A's delivery to B)
+- A creates and funds the A→B channel (A pays for B's delivery to A)
 
 The funding process follows the Cashu Spilman protocol:
 1. Sender creates a 2-of-2 multisig token: `P2PK: (Sender AND Receiver) OR (Sender after expiry)`
@@ -87,7 +87,7 @@ The funding process follows the Cashu Spilman protocol:
 
 ### Active
 
-Both channels are funded and verified. Traffic metering and settlement proceed:
+Both channels are funded and verified. Metering and settlement proceed:
 - Every settlement interval, both sides send MeteringReport
 - Net debtor sends BalanceUpdate (signed Spilman balance update)
 - Net creditor sends SettlementAck
@@ -103,7 +103,7 @@ A channel approaches exhaustion (default: 80% capacity used). The sender (channe
 
 Both the old (draining) and new channel are active simultaneously during the overlap period.
 
-![Channel Rollover Timeline](../diagrams/channel-rollover.svg)
+![Channel Rollover Timeline](diagrams/channel-rollover.svg)
 <details><summary>Text version</summary>
 
 ```
@@ -137,7 +137,7 @@ Settlement complete. Proofs distributed. Channel is done.
 
 ### Zero-Price Shortcut
 
-When both sides set all prices to zero, the pair goes directly to Active with no funding, no channels, no metering, and no settlement. Forwarding is free.
+When both sides set all prices to zero, the pair goes directly to Active with no funding, no channels, no metering, and no settlement. Delivery is free.
 
 ---
 
@@ -186,7 +186,7 @@ The balance update at each settlement interval uses whichever channel has remain
 If mint connectivity is lost during rollover:
 - Balance updates on the old channel continue (they don't need the mint)
 - The new channel cannot be funded until mint returns
-- If the old channel exhausts before the new one is funded, forwarding pauses for that direction. After a configurable timeout (default: 60 seconds), the session is considered stale and closed.
+- If the old channel exhausts before the new one is funded, delivery pauses for that direction. After a configurable timeout (default: 60 seconds), the session is considered stale and closed.
 - Once mint returns: new channel is funded, old channel is settled by the receiver
 
 ---
@@ -267,8 +267,8 @@ Danger zone:      expiry - safety_margin (e.g., expiry - 60 seconds)
 Each settlement interval, both sides owe each other independently:
 
 ```
-A owes B: B's pricing × (seconds + bytes A forwarded to B)
-B owes A: A's pricing × (seconds + bytes B forwarded to A)
+A owes B: B's pricing × (seconds + units A delivered to B)
+B owes A: A's pricing × (seconds + units B delivered to A)
 Net: A_owes - B_owes
 ```
 
@@ -294,7 +294,7 @@ With netting:
   Drain rate = |A's cost - B's cost| per interval
 ```
 
-For peers with similar traffic in both directions, netting dramatically extends channel life.
+For peers with similar resource flow in both directions, netting dramatically extends channel life.
 
 ---
 
@@ -305,7 +305,7 @@ For peers with similar traffic in both directions, netting dramatically extends 
 Channel capacity starts **small** because the session may not last long. A new peer connection doesn't warrant a large upfront commitment.
 
 Factors:
-- **Estimated traffic**: Based on selected product's bandwidth limit and pricing
+- **Estimated usage**: Based on selected product's pricing and expected consumption
 - **Expected session duration**: Short for mobile peers, longer for infrastructure
 - **Operator configuration**: Minimum and maximum channel capacity settings
 - **Available balance**: Can't fund more than the wallet holds
@@ -381,7 +381,7 @@ pub trait Wallet: Send + Sync {
 ```rust
 pub struct ChannelFundParams {
     pub mint_url: String,
-    pub unit: String,
+    pub mint_unit: String,
     pub capacity: Amount,
     pub sender_pubkey: [u8; 33],
     pub receiver_pubkey: [u8; 33],
@@ -425,19 +425,19 @@ If a received BalanceUpdate fails signature verification:
 - Log the failure for operator review
 - If repeated failures: close the channel
 
-### Drift Tolerance Exceeded
+### Transit Loss Tolerance Exceeded
 
 If metering reports diverge beyond the agreed tolerance (default 5%):
 
-**Resolution rule: use the higher value.** When the two sides disagree on bytes forwarded, the higher measurement is accepted as the billable amount. Rationale: the forwarder (who measured higher) claims they did more work. The receiver may have dropped packets they never saw — but the forwarder still expended resources sending them. Using the higher value is conservative (favors the forwarder) and deterministic (both sides know the rule).
+**Resolution rule: use the higher value.** When the two sides disagree on units delivered, the higher measurement is accepted as the billable amount. Rationale: the provider (who measured higher) claims they did more work. The receiver may not have seen everything — but the provider still expended resources delivering. Using the higher value is conservative (favors the provider) and deterministic (both sides know the rule).
 
-If drift is within tolerance:
+If transit loss is within tolerance:
 - Use the higher value for billing
 - Both sides note the discrepancy for their counters
 
-If drift exceeds tolerance:
+If transit loss exceeds tolerance:
 - Still use the higher value for this interval
-- Send a warning (Reject with reason: drift tolerance exceeded)
+- Send a warning (Reject with reason: transit loss tolerance exceeded)
 - Both sides recalibrate
 - If persistent (e.g., 3 consecutive intervals over tolerance): close and renegotiate — something is wrong with the link or metering
 
@@ -453,7 +453,7 @@ If drift exceeds tolerance:
 | Rollover drain | Old channel drains to 100%, then new channel continues | No wasted capacity |
 | Stale session timeout | 60 seconds (configurable) | Close if rollover can't complete |
 | Netting | Only net debtor signs per interval | Fewer signatures, slower channel drain |
-| Drift resolution | Use the higher value | Favors forwarder (did the work), deterministic |
+| Transit loss resolution | Use the higher value | Favors provider (did the work), deterministic |
 | Channel capacity | Start small, grow with relationship | Don't over-commit to new peers |
 | Channel TTL | 1 hour default, configurable | Balance between overhead and capital lockup |
 | Safety margin | max(60s, 2×interval) before expiry — triggers rollover | Create new channel, settle old before expiry |

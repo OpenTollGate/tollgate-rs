@@ -1,6 +1,6 @@
 # TollGate Peering: FIPS Mesh Networks
 
-This document describes how TollGate integrates with [FIPS](https://github.com/nicobao/fips) (Free Internetworking Peering System) — the primary deployment target. It covers the FIPS-specific NetworkAdapter implementation, how TollGate hooks into FIPS internals, and what FIPS modifications are required.
+This document describes how TollGate integrates with [FIPS](https://github.com/nicobao/fips) (Free Internetworking Peering System) — the primary deployment target. It covers the FIPS-specific ResourceAdapter implementation, how TollGate hooks into FIPS internals, and what FIPS modifications are required.
 
 ## Overview
 
@@ -19,7 +19,7 @@ TollGate integrates with FIPS at **compile time** as native Rust code — not as
 
 TollGate hooks into FIPS at five points:
 
-![FIPS Integration Points](../diagrams/fips-integration.svg)
+![FIPS Integration Points](diagrams/fips-integration.svg)
 <details><summary>Text version</summary>
 
 ```
@@ -108,7 +108,7 @@ This approach works today without any FIPS modifications to the session layer.
 
 ---
 
-## NetworkAdapter Implementation
+## ResourceAdapter Implementation
 
 ### set_peer_access()
 
@@ -136,27 +136,27 @@ fn set_peer_access(&self, peer: &Pubkey, access: AccessLevel) -> Result<(), Adap
 
 FIPS enforces the policy in its existing forwarding path. `LocalOnly` means only traffic addressed to this node is accepted from the peer; all transit is dropped.
 
-### subscribe_traffic()
+### subscribe_meter()
 
-FIPS tracks per-peer forwarding stats. The adapter wraps these as a `TrafficStream`:
+FIPS tracks per-peer link stats. The adapter wraps these as a `MeterStream`:
 
 ```rust
-fn subscribe_traffic(&self, peer: &Pubkey) -> Result<TrafficStream, AdapterError> {
+fn subscribe_meter(&self, peer: &Pubkey) -> Result<MeterStream, AdapterError> {
     let node_addr = NodeAddr::from_pubkey(peer);
 
     // FIPS tracks per-peer forwarded bytes
     // Expose as watch channels that update on each forwarded packet
-    let outbound = self.node.peer_outbound_bytes_watch(node_addr);
-    let inbound = self.node.peer_inbound_bytes_watch(node_addr);
+    let delivered = self.node.peer_outbound_bytes_watch(node_addr);
+    let received = self.node.peer_inbound_bytes_watch(node_addr);
 
-    Ok(TrafficStream {
-        outbound_bytes: outbound,
-        inbound_bytes: inbound,
+    Ok(MeterStream {
+        delivered,
+        received,
     })
 }
 ```
 
-**Required FIPS change**: Per-peer byte counters (outbound and inbound) exposed as watchable values. FIPS currently tracks aggregate `ForwardingStats` — this needs per-peer granularity.
+**Required FIPS change**: Per-peer byte counters (delivered and received) exposed as watchable values. FIPS already tracks per-peer `LinkStats` — just needs to be exposed.
 
 ### peer_metrics()
 
@@ -262,7 +262,7 @@ The following FIPS modifications are required for TollGate integration. Full det
 | Integration | Native compile-time | External (firewall rules, counters) |
 | Forwarding policy | FIPS per-peer `local_only`/`full` | nftables/iptables rules |
 | Bloom filters | Controlled by TollGate | N/A |
-| Traffic counters | Direct from FIPS per-peer stats | Firewall accounting |
+| Metering counters | Direct from FIPS per-peer stats | Firewall accounting |
 | Metrics | MMP (SRTT, loss, ETX, goodput, jitter) | None / coarse |
 | Peer discovery | Automatic (FIPS mesh protocol) | Dynamic probing / static |
 | Authentication | Noise IK (automatic) | Unauthenticated (default) |
@@ -279,7 +279,7 @@ The following FIPS modifications are required for TollGate integration. Full det
 | Forwarding policy | Per-peer `local_only` or `full`, enforced by FIPS | Simple data-plane policy, not a control-plane hook |
 | Default new-peer policy | `local_only` | Closes race window between FIPS auth and TollGate detection |
 | Bloom filter control | Inferred from forwarding policy, with 30s removal delay | Prevents flapping on temporary balance exhaustion |
-| Traffic counters | Per-peer watch channels from FIPS | Continuous push, snapshot at settlement |
+| Metering counters | Per-peer watch channels from FIPS | Continuous push, snapshot at settlement |
 | Metrics | Direct MMP state read | No control socket overhead |
 | Message transport (initial) | HTTP over FIPS IPv6 adapter | Works today, no FIPS session layer changes needed |
 | Message transport (future) | Native FSP port | Optimization, eliminates HTTP overhead |

@@ -40,7 +40,7 @@
   <!-- Metering -->
   <rect x="60" y="165" width="185" height="55" rx="5" fill="#1a1a2e" stroke="#8080c0" stroke-width="1.5"/>
   <text x="152" y="188" text-anchor="middle" class="mlabel" fill="#a0a0e0">Metering</text>
-  <text x="152" y="203" text-anchor="middle" class="mdesc">per-peer outbound bytes</text>
+  <text x="152" y="203" text-anchor="middle" class="mdesc">per-peer delivered</text>
 
   <!-- Protocol Messages -->
   <rect x="258" y="165" width="185" height="55" rx="5" fill="#1a1a2e" stroke="#8080c0" stroke-width="1.5"/>

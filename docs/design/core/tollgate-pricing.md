@@ -1,19 +1,19 @@
 # TollGate Pricing
 
-This document specifies how TollGate peers communicate, negotiate, and dynamically adjust prices for forwarding services.
+This document specifies how TollGate peers communicate, negotiate, and dynamically adjust prices for delivery services.
 
 ## Overview
 
-Each TollGate peer charges its own rate for forwarding packets to other peers. Every forwarding relationship is independently priced — there is no global price. Prices are always mint-specific, can be positive, zero, or negative, and can change dynamically based on network conditions, demand, or operator policy.
+Each TollGate peer charges its own rate for delivering resources to other peers. Every delivery relationship is independently priced — there is no global price. Prices are always mint-specific, can be positive, zero, or negative, and can change dynamically based on conditions, demand, or operator policy.
 
 Pricing has two dimensions, both always present:
-- **Time** — price per second of being an active forwarding peer
-- **Bytes** — price per byte forwarded
+- **Time** — price per second of being an active peer
+- **Units** — price per unit delivered
 
 The operator sets either dimension to zero for simpler models. The cost for each settlement interval is:
 
 ```
-cost_scaled = (elapsed_seconds × price_per_second) + (bytes_forwarded × price_per_byte)
+cost_scaled = (elapsed_seconds × price_per_second) + (units_delivered × price_per_unit)
 cost = ceil(cost_scaled / pricing_scale)
 ```
 
@@ -21,7 +21,7 @@ cost = ceil(cost_scaled / pricing_scale)
 
 ## Pricing Scale
 
-Prices can be very small — forwarding a single byte might cost a fraction of a sat. To handle sub-unit precision without floating-point arithmetic, all prices are stored as integers with a shared **pricing scale** divisor.
+Prices can be very small — delivering a single unit might cost a fraction of a sat. To handle sub-unit precision without floating-point arithmetic, all prices are stored as integers with a shared **pricing scale** divisor.
 
 ```
 actual_price = integer_price / pricing_scale
@@ -31,15 +31,15 @@ With `pricing_scale = 1000`:
 
 | Field | Integer value | Actual price |
 |-------|--------------|--------------|
-| `price_per_byte = 10` | 10 | 0.01 sat/byte |
-| `price_per_byte = 1` | 1 | 0.001 sat/byte |
+| `price_per_unit = 10` | 10 | 0.01 sat/unit |
+| `price_per_unit = 1` | 1 | 0.001 sat/unit |
 | `price_per_second = 500` | 500 | 0.5 sat/second |
 | `price_per_second = 1000` | 1000 | 1.0 sat/second |
 
 The accumulated cost is computed entirely with integer arithmetic:
 
 ```
-cost_scaled = (seconds × price_per_second) + (bytes × price_per_byte)
+cost_scaled = (seconds × price_per_second) + (units × price_per_unit)
 cost = ceil(cost_scaled / pricing_scale)
 ```
 
@@ -49,110 +49,114 @@ The `pricing_scale` is part of the product definition and included in the produc
 
 ## Products
 
-A product defines the structural terms of a forwarding service. Each peer subscribes to **exactly one product** at a time. To switch, the peer renegotiates.
+A product defines the structural terms of a delivery service. Each peer subscribes to **exactly one product** at a time. To switch, the peer renegotiates.
 
 ### Product Structure
 
 ```rust
 struct Product {
-    id: ProductId,                     // SHA256(bandwidth_limit | pricing_scale | pricing)
-    bandwidth_limit: u64,              // bytes/sec, 0 = unlimited
+    id: ProductId,                     // SHA256(pricing_scale | pricing | extensions)
     pricing_scale: u64,                // divisor for sub-unit precision (default: 1000)
     pricing: Vec<MintPricing>,         // per-mint pricing
+    extensions: Vec<u8>,               // opaque, implementation-specific parameters
 }
 
 struct MintPricing {
     mint_url: String,
     price_per_second: i64,             // scaled integer, signed (negative = node pays peer)
-    price_per_byte: i64,               // scaled integer, signed
-    unit: String,                      // "sat", "msat", "usd"
+    price_per_unit: i64,               // scaled integer, signed
+    mint_unit: String,                 // "sat", "msat", "usd"
 }
 ```
+
+The `extensions` field carries implementation-specific parameters (e.g., bandwidth limits for network resources, quality tiers for compute resources). The core protocol treats extensions as opaque bytes — only the implementation interprets them.
 
 ### Product Identity
 
 ```
-product_id = SHA256(bandwidth_limit | pricing_scale | pricing)
+product_id = SHA256(pricing_scale | pricing | extensions)
 ```
 
-The product ID includes **all** fields — structure and prices. Any change (bandwidth, scale, or price) produces a new ID. The peer compares IDs to instantly detect whether renegotiation is needed. This is cheap (one hash comparison) and unambiguous — no need to diff individual fields.
+The product ID includes **all** fields — pricing and extensions. Any change (scale, price, or extension parameters) produces a new ID. The peer compares IDs to instantly detect whether renegotiation is needed. This is cheap (one hash comparison) and unambiguous — no need to diff individual fields.
 
 ### Examples
+
+> The examples below show network-specific configurations (sat/unit where units are bytes). These are implementation-specific — the core protocol treats units and extensions as opaque.
 
 **Internet gateway (pure usage-based):**
 ```yaml
 id: "a1b2c3..."
-bandwidth_limit: 0                             # unlimited
 pricing_scale: 1000
 pricing:
-  - mint: "https://mint.example.com"
+  - mint_url: "https://mint.example.com"
     price_per_second: 0                        # no time charge
-    price_per_byte: 10                         # 0.01 sat per byte
-    unit: "sat"
+    price_per_unit: 10                         # 0.01 sat per unit
+    mint_unit: "sat"
+extensions: []                                 # no constraints
 ```
 
-**Always-on presence (flat rate, capped bandwidth):**
+**Always-on presence (flat rate, capped):**
 ```yaml
 id: "d4e5f6..."
-bandwidth_limit: 10000                         # 10 KB/s cap
 pricing_scale: 1000
 pricing:
-  - mint: "https://mint.example.com"
+  - mint_url: "https://mint.example.com"
     price_per_second: 100                      # 0.1 sat per second
-    price_per_byte: 0                          # no usage charge
-    unit: "sat"
+    price_per_unit: 0                          # no usage charge
+    mint_unit: "sat"
+extensions: [bandwidth_limit: 10000]           # implementation-specific: 10 KB/s cap
 ```
 
 **Premium tier (base + usage):**
 ```yaml
 id: "e5f6g7..."
-bandwidth_limit: 0                             # unlimited
 pricing_scale: 1000
 pricing:
-  - mint: "https://mint.example.com"
+  - mint_url: "https://mint.example.com"
     price_per_second: 50                       # 0.05 sat/sec base
-    price_per_byte: 5                          # 0.005 sat/byte on top
-    unit: "sat"
+    price_per_unit: 5                          # 0.005 sat/unit on top
+    mint_unit: "sat"
+extensions: []
 ```
 
-**Negative pricing (attract traffic):**
+**Negative pricing (attract resources):**
 ```yaml
 id: "g7h8i9..."
-bandwidth_limit: 0
 pricing_scale: 1000
 pricing:
-  - mint: "https://mint.example.com"
+  - mint_url: "https://mint.example.com"
     price_per_second: 0
-    price_per_byte: -2                         # node PAYS peer 0.002 sat/byte
-    unit: "sat"
+    price_per_unit: -2                         # node PAYS peer 0.002 sat/unit
+    mint_unit: "sat"
+extensions: []
 ```
 
 **Multi-mint with currency discount:**
 ```yaml
 id: "j1k2l3..."
-bandwidth_limit: 0
 pricing_scale: 1000
 pricing:
-  - mint: "https://mint.example.com"
+  - mint_url: "https://mint.example.com"
     price_per_second: 0
-    price_per_byte: 10                         # 0.01 sat/byte
-    unit: "sat"
-  - mint: "https://mint.eu"
+    price_per_unit: 10                         # 0.01 sat/unit
+    mint_unit: "sat"
+  - mint_url: "https://mint.eu"
     price_per_second: 0
-    price_per_byte: 8                          # 0.008 sat/byte — discount for preferred mint
-    unit: "sat"
+    price_per_unit: 8                          # 0.008 sat/unit — discount for preferred mint
+    mint_unit: "sat"
+extensions: []
 ```
 
 ---
 
 ## Price Communication
 
-![Price Communication Flow](../diagrams/price-communication.svg)
+![Price Communication Flow](diagrams/price-communication.svg)
 <details><summary>Text version</summary>
 
 ```
   A → B: PriceSheet (products + per-peer prices)
-         multiple products, each with per-mint pricing options
+         multiple products, each with per-mint pricing and extensions
 
          B picks one product + one mint option
 
@@ -163,7 +167,7 @@ pricing:
          B continues = accepts new price
          B sends ChannelClose = rejects
 
-  Take-it-or-leave-it: peer accepts or finds a different forwarder
+  Take-it-or-leave-it: peer accepts or finds a different provider
 ```
 </details>
 
@@ -174,7 +178,7 @@ Each node publishes a **base catalog** of its products with base prices. This is
 ### Per-Peer Price Sheet
 
 When a peer connects, the node sends a **peer-specific price sheet** derived from the base catalog. The price sheet may adjust prices up or down based on:
-- Link quality metrics (ETX, loss rate, latency)
+- Quality metrics (implementation-specific)
 - Operator-configured peer overrides
 - Dynamic pricing strategy
 - Current load/congestion
@@ -196,7 +200,7 @@ The adjustment can be the identity function (no change) for simple deployments �
 
 ## Price Negotiation
 
-**Take-it-or-leave-it.** The forwarder sets the price. The peer accepts or finds a different peer. The mesh provides alternatives — if a node's prices are too high, traffic routes around it.
+**Take-it-or-leave-it.** The provider sets the price. The peer accepts or finds a different peer. The system provides alternatives — if a node's prices are too high, resources route around it.
 
 ```
 A → B: "Price sheet: [product, prices per mint]"
@@ -218,7 +222,7 @@ If the ranges don't overlap, negotiation fails. This is deterministic — both s
 
 ### Price Changes
 
-Prices can change at each settlement interval. The forwarder includes updated prices in the settlement message. The peer must:
+Prices can change at each settlement interval. The provider includes updated prices in the settlement message. The peer must:
 - **Accept** — continue with new prices at the next interval
 - **Reject** — close the channel (can renegotiate or disconnect)
 
@@ -233,24 +237,39 @@ There is no grace period. The new price takes effect at the next interval. Each 
 The pricing function maps available inputs to per-peer prices:
 
 ```
-price(peer, product) → (price_per_second, price_per_byte)
+price(peer, product) → (price_per_second, price_per_unit)
 ```
 
 Available inputs:
 
-**Peer metrics** (from FIPS MMP or NetworkAdapter):
-| Metric | Type | Pricing relevance |
-|--------|------|-------------------|
-| `srtt_ms` | f64 | Higher latency = more buffering cost |
-| `loss_rate` | f64 | Higher loss = wasted forwarding effort |
-| `etx` | f64 | Direct measure of retransmission cost |
-| `goodput_bps` | f64 | Capacity utilization indicator |
-| `jitter` | u32 | Service quality indicator |
-| Trend (rising/falling/stable) | enum | Predict near-future conditions |
+**Peer metrics** (from ResourceAdapter):
+
+Peer metrics are an opaque map of key-value pairs. The core protocol does not define specific metric keys — the implementation provides whatever metrics are relevant for its resource type.
+
+```rust
+pub type PeerMetrics = HashMap<String, MetricValue>;
+
+enum MetricValue {
+    Float(f64),
+    Int(i64),
+    Text(String),
+    Bool(bool),
+}
+```
+
+Example metric keys (implementation-specific):
+| Key | Type | Pricing relevance |
+|-----|------|-------------------|
+| `"srtt_ms"` | Float | Higher latency = more buffering cost |
+| `"loss_rate"` | Float | Higher loss = wasted delivery effort |
+| `"etx"` | Float | Direct measure of retransmission cost |
+| `"goodput_bps"` | Float | Capacity utilization indicator |
+| `"jitter"` | Int | Service quality indicator |
+| `"trend"` | Text | Predict near-future conditions |
 
 **Node state:**
 - Number of active paying peers (load)
-- Total forwarding throughput (capacity utilization)
+- Total delivery throughput (capacity utilization)
 - Available channel balance (liquidity)
 
 **Operator config:**
@@ -266,9 +285,9 @@ Available inputs:
 price = base_price
 ```
 
-**Cost-plus** (mirrors FIPS link cost formula):
+**Cost-plus** (example using network metrics):
 ```
-price = base_price × etx × (1 + srtt_ms / 100)
+price = base_price × metric('etx') × (1 + metric('srtt_ms') / 100)
 ```
 
 **Demand-based:**
@@ -278,16 +297,16 @@ price = base_price × (1 + active_peers / max_peers)
 
 **Quality-tiered:**
 ```
-if loss_rate < 0.01 and srtt_ms < 10:
+if metric('loss_rate') < 0.01 and metric('srtt_ms') < 10:
     price = premium_price
-elif loss_rate < 0.05 and srtt_ms < 50:
+elif metric('loss_rate') < 0.05 and metric('srtt_ms') < 50:
     price = standard_price
 else:
     price = discount_price
 ```
 
 **Operator-scripted:**
-Custom function (config DSL, Lua, WASM) computes price from all available inputs.
+Custom function (config DSL, Lua, WASM) computes price from all available inputs. Metric keys are implementation-specific — the pricing function accesses them via `metric('key')` lookups.
 
 ### When Prices Change
 
@@ -302,26 +321,27 @@ Prices update **at settlement intervals** (default: every 5 seconds). The update
 ```yaml
 products:
   - name: "standard"
-    bandwidth_limit: 0
     pricing_scale: 1000
     base_pricing:
-      - mint: "https://mint.example.com"
+      - mint_url: "https://mint.example.com"
         base_price_per_second: 0
-        base_price_per_byte: 10
-        unit: "sat"
-        price_per_byte_floor: 5       # never go below
-        price_per_byte_ceiling: 50    # never go above
+        base_price_per_unit: 10
+        mint_unit: "sat"
+        price_per_unit_floor: 5       # never go below
+        price_per_unit_ceiling: 50    # never go above
+    extensions: []
 
   - name: "always-on"
-    bandwidth_limit: 10000
     pricing_scale: 1000
     base_pricing:
-      - mint: "https://mint.example.com"
+      - mint_url: "https://mint.example.com"
         base_price_per_second: 100
-        base_price_per_byte: 0
-        unit: "sat"
+        base_price_per_unit: 0
+        mint_unit: "sat"
         price_per_second_floor: 0
         price_per_second_ceiling: 1000
+    extensions:                        # implementation-specific
+      bandwidth_limit: 10000
 ```
 
 ### Dynamic Pricing Rules
@@ -330,10 +350,10 @@ products:
 dynamic_pricing:
   enabled: true
   strategy: "cost_plus"
-  factors:
-    etx_weight: 1.0
-    latency_weight: 0.01
-    congestion_weight: 0.5
+  metric_weights:                      # keys are opaque metric names from ResourceAdapter
+    "etx": 1.0
+    "srtt_ms": 0.01
+    "congestion": 0.5
 ```
 
 ### Peer Policies
@@ -357,7 +377,7 @@ settlement:
 
 | Decision | Resolution | Rationale |
 |----------|-----------|-----------|
-| Pricing dimensions | Always both: price/second + price/byte | Operator sets either to 0 for simpler models |
+| Pricing dimensions | Always both: price/second + price/unit | Operator sets either to 0 for simpler models |
 | Pricing precision | Integer with pricing_scale divisor (default 1000) | Avoids floating-point, supports sub-unit prices |
 | Products per peer | One at a time | Keeps metering simple, no product interaction |
 | Price communication | Base catalog + per-peer price sheet | Public base, private adjustments |
@@ -367,6 +387,6 @@ settlement:
 | Price discovery | Direct peers only, no propagation | Future: profit-aware routing |
 | Currency arbitrage | Feature — operators discount preferred mints | Market efficiency |
 | Negative pricing | Signed price fields from day one | Core economic mechanism |
-| Unlimited bandwidth | `bandwidth_limit = 0` | Simple sentinel value |
+| Product extensions | Opaque CBOR blob for implementation-specific fields | Core hashes but doesn't interpret |
 | Settlement interval | Both peers send acceptable range; actual = average of overlap | Deterministic, no extra round-trip, both sides agree |
-| Product identity | `SHA256(bandwidth_limit \| pricing_scale \| pricing)` | Any change detected with one hash comparison |
+| Product identity | `SHA256(pricing_scale \| pricing \| extensions)` | Any change detected with one hash comparison |

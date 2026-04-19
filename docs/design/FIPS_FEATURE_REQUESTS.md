@@ -16,7 +16,7 @@ This document consolidates all FIPS modifications required for TollGate v2 integ
 
 **Default for new peers must be `local_only`** — closes the race window between FIPS authenticating a peer and TollGate setting the access level. No traffic is forwarded for a peer until TollGate explicitly allows it.
 
-**Referenced in**: [peering-fips.md](peering/peering-fips.md), [tollgate-access-control.md](core/tollgate-access-control.md)
+**Referenced in**: [peering-fips.md](network-peering/peering-fips.md), [tollgate-access-control.md](core/tollgate-access-control.md)
 
 ---
 
@@ -32,7 +32,7 @@ This document consolidates all FIPS modifications required for TollGate v2 integ
 
 **Why**: If an unpaid peer appears in bloom filters, other nodes may route traffic through it, only to have it dropped at the gate — wasting bandwidth and causing delivery failures.
 
-**Referenced in**: [peering-fips.md](peering/peering-fips.md), [tollgate-access-control.md](core/tollgate-access-control.md)
+**Referenced in**: [peering-fips.md](network-peering/peering-fips.md), [tollgate-access-control.md](core/tollgate-access-control.md)
 
 ---
 
@@ -46,7 +46,7 @@ This document consolidates all FIPS modifications required for TollGate v2 integ
 
 **Complexity**: Low — the data already exists, just needs to be exposed.
 
-**Referenced in**: [peering-fips.md](peering/peering-fips.md), [tollgate-access-control.md](core/tollgate-access-control.md)
+**Referenced in**: [peering-fips.md](network-peering/peering-fips.md), [tollgate-access-control.md](core/tollgate-access-control.md)
 
 ---
 
@@ -60,7 +60,7 @@ This document consolidates all FIPS modifications required for TollGate v2 integ
 
 **Why**: TollGate needs to create peer state on connect (set initial `local_only` policy, begin protocol exchange) and clean up on disconnect (close channels, queue settlement).
 
-**Referenced in**: [peering-fips.md](peering/peering-fips.md)
+**Referenced in**: [peering-fips.md](network-peering/peering-fips.md)
 
 ---
 
@@ -80,7 +80,7 @@ This document consolidates all FIPS modifications required for TollGate v2 integ
 
 **Current state**: These metrics exist in FIPS and are queryable via the control socket (`show_mmp`). TollGate needs native Rust access (not JSON over control socket) for performance — metrics are read at every settlement interval for dynamic pricing.
 
-**Referenced in**: [peering-fips.md](peering/peering-fips.md), [tollgate-pricing.md](core/tollgate-pricing.md)
+**Referenced in**: [peering-fips.md](network-peering/peering-fips.md), [tollgate-pricing.md](core/tollgate-pricing.md)
 
 ---
 
@@ -94,7 +94,7 @@ This document consolidates all FIPS modifications required for TollGate v2 integ
 
 **Priority**: Low — the IPv6 adapter approach works today. This is a performance optimization.
 
-**Referenced in**: [peering-fips.md](peering/peering-fips.md)
+**Referenced in**: [peering-fips.md](network-peering/peering-fips.md)
 
 ---
 
@@ -108,7 +108,7 @@ This document consolidates all FIPS modifications required for TollGate v2 integ
 
 **Priority**: Low — not needed for initial deployment. Requires careful design to avoid routing instability.
 
-**Referenced in**: [tollgate-pricing.md](core/tollgate-pricing.md), [peering-fips.md](peering/peering-fips.md)
+**Referenced in**: [tollgate-pricing.md](core/tollgate-pricing.md), [peering-fips.md](network-peering/peering-fips.md)
 
 ---
 

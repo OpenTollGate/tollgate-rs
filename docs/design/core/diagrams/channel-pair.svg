@@ -38,29 +38,29 @@
   <text x="570" y="155" text-anchor="middle" class="annot">sender on B&#8594;A</text>
   <text x="570" y="170" text-anchor="middle" class="annot">receiver on A&#8594;B</text>
 
-  <!-- Top: A forwards to B (traffic) -->
+  <!-- Top: A delivers to B (delivery) -->
   <line x1="200" y1="115" x2="493" y2="115" stroke="#5080c0" stroke-width="2" marker-end="url(#cpR)"/>
-  <text x="350" y="108" text-anchor="middle" class="alabel" fill="#5080c0">A forwards packets to B</text>
+  <text x="350" y="108" text-anchor="middle" class="alabel" fill="#5080c0">A delivers to B</text>
 
-  <!-- Top: payment goes B→A (below traffic arrow) -->
+  <!-- Top: payment goes B→A (below delivery arrow) -->
   <line x1="500" y1="135" x2="207" y2="135" stroke="#d0a040" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#cpL)"/>
   <text x="350" y="132" text-anchor="middle" class="annot" fill="#d0a040">Channel B&#8594;A: B pays A (B funds)</text>
 
-  <!-- Bottom: B forwards to A (traffic) -->
+  <!-- Bottom: B delivers to A (delivery) -->
   <line x1="500" y1="180" x2="207" y2="180" stroke="#d0a040" stroke-width="2" marker-end="url(#cpL)"/>
-  <text x="350" y="173" text-anchor="middle" class="alabel" fill="#d0a040">B forwards packets to A</text>
+  <text x="350" y="173" text-anchor="middle" class="alabel" fill="#d0a040">B delivers to A</text>
 
-  <!-- Bottom: payment goes A→B (below traffic arrow) -->
+  <!-- Bottom: payment goes A→B (below delivery arrow) -->
   <line x1="200" y1="200" x2="493" y2="200" stroke="#5080c0" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#cpR)"/>
   <text x="350" y="197" text-anchor="middle" class="annot" fill="#5080c0">Channel A&#8594;B: A pays B (A funds)</text>
 
   <!-- Legend -->
   <line x1="170" y1="255" x2="210" y2="255" stroke="#e0e0e0" stroke-width="2"/>
-  <text x="218" y="259" class="annot">traffic (packets forwarded)</text>
+  <text x="218" y="259" class="annot">resource delivery</text>
 
   <line x1="400" y1="255" x2="440" y2="255" stroke="#e0e0e0" stroke-width="1.5" stroke-dasharray="6,3"/>
   <text x="448" y="259" class="annot">payment (Spilman channel)</text>
 
   <!-- Caption -->
-  <text x="350" y="290" text-anchor="middle" class="caption">The forwarder charges — the peer receiving the service pays via their Spilman channel</text>
+  <text x="350" y="290" text-anchor="middle" class="caption">The provider charges — the peer receiving the service pays via their Spilman channel</text>
 </svg>

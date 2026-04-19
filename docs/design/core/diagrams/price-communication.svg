@@ -31,7 +31,7 @@
   <!-- Node headers -->
   <rect x="80" y="65" width="120" height="42" fill="#2e3a5e" stroke="#5080c0" stroke-width="2" rx="6"/>
   <text x="140" y="85" text-anchor="middle" class="nlabel">Node A</text>
-  <text x="140" y="98" text-anchor="middle" class="nrole">Forwarder</text>
+  <text x="140" y="98" text-anchor="middle" class="nrole">Provider</text>
 
   <rect x="500" y="65" width="120" height="42" fill="#2e3a5e" stroke="#d0a040" stroke-width="2" rx="6"/>
   <text x="560" y="85" text-anchor="middle" class="nlabel">Peer B</text>
@@ -69,5 +69,5 @@
   <text x="560" y="330" text-anchor="middle" class="annot">B sends ChannelClose = rejects</text>
 
   <!-- Caption -->
-  <text x="350" y="365" text-anchor="middle" class="caption">Peer accepts the price or finds a different forwarder — no negotiation</text>
+  <text x="350" y="365" text-anchor="middle" class="caption">Peer accepts the price or finds a different provider — no negotiation</text>
 </svg>

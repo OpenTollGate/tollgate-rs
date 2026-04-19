@@ -4,7 +4,7 @@ This document specifies the wire protocol for communication between TollGate pee
 
 ## Overview
 
-The TollGate protocol is a set of messages exchanged between authenticated peers to negotiate pricing, establish payment channels, meter traffic, and settle balances. It is **transport-agnostic** — messages can travel over any bidirectional channel between peers (FIPS session, TCP socket, HTTP, custom transport). The implementation provides the transport; the protocol defines the messages.
+The TollGate protocol is a set of messages exchanged between authenticated peers to negotiate pricing, establish payment channels, meter resource delivery, and settle balances. It is **transport-agnostic** — messages can travel over any bidirectional channel between peers (FIPS session, TCP socket, HTTP, custom transport). The implementation provides the transport; the protocol defines the messages.
 
 **No handshake.** Peers are already authenticated out-of-band (by FIPS Noise IK, WireGuard, etc.). The TollGate protocol begins with an Announce message.
 
@@ -57,11 +57,11 @@ When carried over a stream transport (TCP, FIPS session), each message is prefix
 | 0x01 | PriceSheet | Bidirectional | Offer products and per-peer pricing (each side sends) |
 | 0x02 | Accept | Bidirectional | Accept price sheet, provide Spilman funding |
 | 0x03 | ChannelReady | Bidirectional | Confirm Spilman channel funded and active |
-| 0x04 | MeteringReport | Bidirectional | Unsigned traffic stats for this interval |
+| 0x04 | MeteringReport | Bidirectional | Unsigned resource stats for this interval |
 | 0x05 | BalanceUpdate | Net debtor → creditor | Signed Spilman update for the net amount owed |
 | 0x06 | SettlementAck | Net creditor → debtor | Confirm balance update accepted |
-| 0x07 | BootstrapToken | Peer → Forwarder | Regular Cashu token (pre-channel bootstrap) |
-| 0x08 | BootstrapAck | Forwarder → Peer | Acknowledge bootstrap token |
+| 0x07 | BootstrapToken | Peer → Provider | Regular Cashu token (pre-channel bootstrap) |
+| 0x08 | BootstrapAck | Provider → Peer | Acknowledge bootstrap token |
 | 0x09 | RolloverInit | Leader → Follower | New channel alongside exhausting one |
 | 0x0A | RolloverReady | Follower → Leader | New channel funded, ready |
 | 0x0B | ChannelClose | Either → Either | Request cooperative close |
@@ -82,6 +82,7 @@ First message sent by each peer after network-layer authentication. Identifies t
   0: 0x00,                         // type: Announce
   1: <protocol_version>,           // u8 — current: 1
   2: <pubkey>,                     // bytes(33) — sender's compressed secp256k1 public key
+  3: <unit>,                       // text — "bytes", "wh", "ml", etc.
 }
 ```
 
@@ -97,15 +98,15 @@ Sent by each peer after Announce. Contains one or more product offerings with pe
   1: [                             // array of products
     {
       1: <product_id>,             // bytes(32) — SHA256 of full product (including pricing)
-      2: <bandwidth_limit>,        // u64 — bytes/sec, 0 = unlimited
+      2: <extensions>,              // bytes — CBOR-encoded implementation-specific fields
       3: <pricing_scale>,          // u64 — default 1000
       4: [                         // array of mint options
         {
-          1: <option_id>,          // bytes(32) — SHA256(mint_url | unit)
+          1: <option_id>,          // bytes(32) — SHA256(mint_url | mint_unit)
           2: <mint_url>,           // text — mint URL
           3: <price_per_second>,   // i64 — scaled integer
-          4: <price_per_byte>,     // i64 — scaled integer
-          5: <unit>,               // text — "sat", "msat", "usd"
+          4: <price_per_unit>,          // i64 — scaled integer
+          5: <mint_unit>,          // text — "sat", "msat", "usd"
         },
         ...
       ],
@@ -150,7 +151,7 @@ Sent after the receiver verifies funding proofs and the channel is active.
 }
 ```
 
-Both peers send ChannelReady for their respective channel directions. Traffic metering begins when both channels are ready.
+Both peers send ChannelReady for their respective channel directions. Resource metering begins when both channels are ready.
 
 ### Metering Baseline
 
@@ -160,22 +161,22 @@ All MeteringReport values are **deltas since the last report**, not cumulative f
 
 ### 0x04 MeteringReport
 
-Sent by both peers at each settlement interval. Contains **unsigned** traffic stats only — no balance signature. This exchange allows both sides to compute the same cost and determine the net.
+Sent by both peers at each settlement interval. Contains **unsigned** resource stats only — no balance signature. This exchange allows both sides to compute the same cost and determine the net.
 
 ```cbor
 {
   0: 0x04,                         // type: MeteringReport
   1: <elapsed_ms>,                 // u64 — milliseconds since last settlement
-  2: <bytes_forwarded>,            // u64 — bytes we forwarded TO this peer this interval
-  3: <bytes_received>,             // u64 — bytes we received FROM this peer this interval
+  2: <delivered>,                   // u64 — units we delivered TO this peer this interval
+  3: <received>,                    // u64 — units we received FROM this peer this interval
   4: <new_product_id>,             // bytes(32) | null — updated product ID for next interval
   5: <new_pricing>,                // array | null — updated pricing if product_id changed
 }
 ```
 
 Both peers send MeteringReport. Once both reports are received, each side independently computes:
-1. Cost A owes B = B's pricing applied to A's forwarded bytes + elapsed time
-2. Cost B owes A = A's pricing applied to B's forwarded bytes + elapsed time
+1. Cost A owes B = B's pricing applied to A's delivered units + elapsed time
+2. Cost B owes A = A's pricing applied to B's delivered units + elapsed time
 3. Net = cost A owes B - cost B owes A
 4. If net > 0: A is the debtor (sends BalanceUpdate on A→B channel)
 5. If net < 0: B is the debtor (sends BalanceUpdate on B→A channel)
@@ -183,7 +184,7 @@ Both peers send MeteringReport. Once both reports are received, each side indepe
 
 This is deterministic — both sides compute the same result from the same inputs.
 
-**Fields 4-5** are the price renegotiation mechanism. If the forwarder wants to change prices, it includes the new product_id and pricing. The peer must accept (by continuing with next MeteringReport) or reject (by sending ChannelClose).
+**Fields 4-5** are the price renegotiation mechanism. If the provider wants to change prices, it includes the new product_id and pricing. The peer must accept (by continuing with next MeteringReport) or reject (by sending ChannelClose).
 
 ### 0x05 BalanceUpdate
 
@@ -232,7 +233,7 @@ Sent when a peer can't reach a mint and needs to pay with a regular Cashu token 
 }
 ```
 
-When offline, the forwarder accepts the token into a pending buffer (status=0) but cannot verify it until mint connectivity returns.
+When offline, the provider accepts the token into a pending buffer (status=0) but cannot verify it until mint connectivity returns.
 
 ### 0x09 RolloverInit
 
@@ -305,7 +306,7 @@ General-purpose rejection for any proposal.
 | 0x04 | Settlement interval out of range |
 | 0x05 | Channel funding invalid |
 | 0x06 | Balance verification failed |
-| 0x07 | Drift tolerance exceeded |
+| 0x07 | Transit loss tolerance exceeded |
 | 0x08 | Product changed, renegotiation required |
 | 0x09 | Protocol version unsupported |
 | 0xFF | Other (see reason_text) |
@@ -327,7 +328,7 @@ Orderly teardown of the entire TollGate relationship.
 
 ### Normal Connection (Peer Already Online)
 
-![Normal Connection Sequence](../diagrams/connection-sequence.svg)
+![Normal Connection Sequence](diagrams/connection-sequence.svg)
 <details><summary>Text version</summary>
 
 ```
@@ -346,8 +347,8 @@ Orderly teardown of the entire TollGate relationship.
      A → B: ChannelReady (A→B)
 
   4. Settle (repeat every 5s)
-     A → B: MeteringReport
-     B → A: MeteringReport
+     A → B: MeteringReport (units delivered, received)
+     B → A: MeteringReport (units delivered, received)
      [both compute net]
      debtor → creditor: BalanceUpdate (signed)
      creditor → debtor: SettlementAck
@@ -370,8 +371,8 @@ A → B: ChannelReady (A→B channel)
 [metering begins — both channels active]
 
 every <interval>:
-  A → B: MeteringReport (bytes forwarded, bytes received, elapsed)
-  B → A: MeteringReport (bytes forwarded, bytes received, elapsed)
+  A → B: MeteringReport (units delivered, units received, elapsed)
+  B → A: MeteringReport (units delivered, units received, elapsed)
 
   [both compute net: who owes whom and how much]
 
@@ -391,7 +392,7 @@ A → B: PriceSheet
 B → A: BootstrapToken (regular Cashu token)
 A → B: BootstrapAck (status=accepted, pending verification)
 
-[A grants B limited connectivity — enough to reach a mint]
+[A grants B limited resource — enough to reach a mint]
 
 B reaches mint, creates Spilman funding:
 B → A: PriceSheet
@@ -443,7 +444,7 @@ B → A: PriceSheet (all prices = 0)
 B → A: Accept (no Spilman funding — zero price)
 A → B: Accept (no Spilman funding — zero price)
 
-[forwarding active, no metering, no settlement messages]
+[delivery active, no metering, no settlement messages]
 ```
 
 ---
@@ -475,7 +476,7 @@ Typical message sizes (CBOR encoded):
 | ChannelClose | ~110 bytes |
 | Disconnect | ~10 bytes |
 
-These are infrequent messages (every 5s for settlement, one-time for setup). CBOR overhead is negligible compared to traffic being metered.
+These are infrequent messages (every 5s for settlement, one-time for setup). CBOR overhead is negligible compared to the resource being metered.
 
 ---
 
@@ -488,7 +489,7 @@ These are infrequent messages (every 5s for settlement, one-time for setup). CBO
 | Field keys | Small integers, not strings | Compact, avoids string overhead in CBOR |
 | Message discrimination | Integer `type` field (key 0) | Simple, extensible |
 | First message | Announce (protocol version + pubkey) | Identifies TollGate capability before negotiation |
-| Mint option ID | SHA256(mint_url \| unit) | Unambiguous reference to chosen pricing option |
+| Mint option ID | SHA256(mint_url \| mint_unit) | Unambiguous reference to chosen pricing option |
 | Settlement flow | MeteringReport (both) → BalanceUpdate (net debtor only) → Ack | Deterministic netting, only net amount moves |
 | Price changes | Piggybacked on MeteringReport (fields 4-5) | No extra round-trips |
 | Zero-price mode | Accept without funding, skip metering | Simplest path for free peering |

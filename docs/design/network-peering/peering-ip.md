@@ -46,7 +46,7 @@ These are additive — they don't change the TollGate protocol, only the transpo
 
 ---
 
-## NetworkAdapter Implementation
+## ResourceAdapter Implementation
 
 ### Access Control
 
@@ -61,15 +61,15 @@ On IP networks, access control is enforced via **firewall rules** (nftables, ipt
 
 The implementation maps `set_peer_access()` to firewall rule changes. The peer's IP address (from the TollGate protocol connection) is the identifier for firewall rules.
 
-### Traffic Counters
+### Metering Counters
 
-Per-peer traffic counters are available from:
+Per-peer metering counters are available from:
 - **nftables/iptables accounting rules**: Per-peer byte/packet counts on the FORWARD chain, matching on source/destination IP
 - **Interface-level counters**: If each peer has a dedicated interface (e.g., VLAN, tunnel), use interface rx/tx bytes
 
-The implementation pushes cumulative byte counts via `TrafficStream`:
-- `outbound_bytes`: Bytes forwarded to this peer's IP
-- `inbound_bytes`: Bytes received from this peer's IP
+The implementation pushes cumulative counters via `MeterStream`:
+- `delivered`: Units delivered to this peer's IP
+- `received`: Units received from this peer's IP
 
 For a simple deployment, per-IP nftables accounting rules are sufficient. The implementation adds a counter rule when a peer connects and reads it at each settlement interval.
 
@@ -222,7 +222,7 @@ Static and dynamic discovery can coexist — static peers are always attempted, 
 |----------|-----------|-----------|
 | Authentication | Unauthenticated by default | Open access is the primary use case; payment is the gatekeeper |
 | Access control | Firewall rules (nftables/iptables) | Standard IP mechanism, per-peer by IP |
-| Traffic counters | Firewall accounting or interface stats | Per-peer granularity via nftables rules |
+| Metering counters | Firewall accounting or interface stats | Per-peer granularity via nftables rules |
 | Peer metrics | None by default | No MMP equivalent; optional coarse metrics |
 | Bloom filters | N/A (no-op) | Only exists in FIPS |
 | Peer discovery | Dynamic probing, static config, or open access | Local network probing, not multi-hop |

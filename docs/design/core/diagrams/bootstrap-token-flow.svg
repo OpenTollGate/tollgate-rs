@@ -45,7 +45,7 @@
 
   <rect x="295" y="62" width="100" height="42" fill="#2e3a5e" stroke="#5080c0" stroke-width="2" rx="6"/>
   <text x="345" y="82" text-anchor="middle" class="nlabel">Node A</text>
-  <text x="345" y="95" text-anchor="middle" class="nrole">Forwarder</text>
+  <text x="345" y="95" text-anchor="middle" class="nrole">Provider</text>
 
   <rect x="535" y="62" width="100" height="42" fill="#151520" stroke="#404060" stroke-width="1.5" rx="6"/>
   <text x="585" y="82" text-anchor="middle" class="nlabel" fill="#909090">Mint</text>
@@ -86,9 +86,9 @@
 
   <line x1="335" y1="290" x2="127" y2="290" stroke="#5080c0" stroke-width="1.5" marker-end="url(#btR)"/>
   <text x="230" y="283" text-anchor="middle" class="alabel" fill="#5080c0">MeteringReport</text>
-  <text x="230" y="307" text-anchor="middle" class="annot">remaining balance, bytes used</text>
+  <text x="230" y="307" text-anchor="middle" class="annot">remaining balance, units used</text>
 
-  <text x="230" y="335" text-anchor="middle" class="annot">traffic flows, balance decreases...</text>
+  <text x="230" y="335" text-anchor="middle" class="annot">delivery active, balance decreases...</text>
 
   <rect x="295" y="345" width="130" height="18" rx="3" fill="#151520" stroke="#d0a040" stroke-width="1"/>
   <text x="360" y="358" text-anchor="middle" class="annot" fill="#d0a040">balance: 12 sats</text>
@@ -120,7 +120,7 @@
 
   <line x1="335" y1="528" x2="127" y2="528" stroke="#c05050" stroke-width="1.5" marker-end="url(#btRed)"/>
   <text x="230" y="521" text-anchor="middle" class="alabel" fill="#c05050">Reject (balance exhausted)</text>
-  <text x="230" y="545" text-anchor="middle" class="annot">forwarding stops — peer must top up or upgrade to Spilman</text>
+  <text x="230" y="545" text-anchor="middle" class="annot">delivery stops — peer must top up or upgrade to Spilman</text>
 
   <!-- Caption -->
   <text x="360" y="585" text-anchor="middle" class="caption">Smart peers top up before exhaustion (phase 3) to avoid service interruption</text>

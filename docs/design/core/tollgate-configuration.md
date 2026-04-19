@@ -74,37 +74,41 @@ Each product defines what the node sells and at what price. Multiple products ca
 ```yaml
 products:
   - name: "standard"                       # human-readable name (not sent over protocol)
-    bandwidth_limit: 0                     # bytes/sec, 0 = unlimited
     pricing_scale: 1000                    # sub-unit precision divisor
     pricing:
-      - mint: "https://mint.example.com"
+      - mint_url: "https://mint.example.com"
         price_per_second: 0                # scaled integer
-        price_per_byte: 10                 # scaled integer (0.01 sat/byte with scale=1000)
-        unit: "sat"
+        price_per_unit: 10                 # scaled integer (0.01 sat/unit with scale=1000)
+        mint_unit: "sat"
 
-      - mint: "https://mint.eu"
+      - mint_url: "https://mint.eu"
         price_per_second: 0
-        price_per_byte: 8                  # discount for preferred mint
-        unit: "sat"
+        price_per_unit: 8                  # discount for preferred mint
+        mint_unit: "sat"
+
+    # Implementation-specific fields (opaque to core, included in product_id hash)
+    extensions:
+      bandwidth_limit: 0                   # network: bytes/sec, 0 = unlimited
 
   - name: "always-on"
-    bandwidth_limit: 10000                 # 10 KB/s cap
     pricing_scale: 1000
     pricing:
-      - mint: "https://mint.example.com"
+      - mint_url: "https://mint.example.com"
         price_per_second: 100              # 0.1 sat/sec
-        price_per_byte: 0
-        unit: "sat"
+        price_per_unit: 0
+        mint_unit: "sat"
+    extensions:
+      bandwidth_limit: 10000              # network: 10 KB/s cap
 ```
 
 ### Defaults
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `bandwidth_limit` | `0` (unlimited) | Max bytes/sec for this product |
 | `pricing_scale` | `1000` | Sub-unit precision divisor |
+| `extensions` | `{}` | Implementation-specific product fields (opaque to core) |
 
-If no products are defined, the node operates as a **consumer only** — it pays peers but does not sell forwarding. A node with no products and no funds is effectively passive (zero-price peering with any peer that allows it).
+If no products are defined, the node operates as a **consumer only** — it pays peers but does not sell. A node with no products and no funds is effectively passive (zero-price peering with any peer that allows it).
 
 ---
 
@@ -113,27 +117,18 @@ If no products are defined, the node operates as a **consumer only** — it pays
 ```yaml
 pricing:
   enabled: false                           # enable dynamic price adjustments
-  strategy: "fixed"                        # pricing strategy name
 
-  # Strategy: "cost_plus" — scale by link quality metrics
-  # price = base x etx x (1 + srtt_ms / 100)
-  cost_plus:
-    etx_weight: 1.0
-    latency_weight: 0.01
+  # Formula expression — core evaluates against opaque metrics from the implementation.
+  # Core doesn't know what the metric keys mean; it just plugs values into the formula.
+  # Available: base (base price), metric('key') (lookup from implementation metrics)
+  formula: "fixed"                         # "fixed" = use base prices as-is
 
-  # Strategy: "demand" — scale by peer count
-  # price = base x (1 + active_peers / max_peers)
-  demand:
-    max_peers: 10
+  # Examples (set by implementation):
+  # Network:     "base * metric('etx') * (1 + metric('srtt_ms') / 100)"
+  # Electricity: "base * (1 + metric('demand_ratio'))"
+  # Water:       "base * metric('scarcity_index')"
 
-  # Strategy: "quality_tiered" — discrete tiers based on metrics
-  quality_tiered:
-    premium_multiplier: 2.0               # loss < 1%, SRTT < 10ms
-    standard_multiplier: 1.0              # loss < 5%, SRTT < 50ms
-    economy_multiplier: 0.5               # loss < 10%, SRTT < 200ms
-    degraded_multiplier: 0.1              # everything else
-
-  # Price bounds (applied after strategy computation)
+  # Price bounds (applied after formula computation)
   price_floor_multiplier: 0.1            # never below 10% of base
   price_ceiling_multiplier: 10.0         # never above 10x base
 ```
@@ -143,7 +138,7 @@ pricing:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `pricing.enabled` | `false` | Dynamic pricing disabled by default |
-| `pricing.strategy` | `"fixed"` | Use base prices as-is |
+| `pricing.formula` | `"fixed"` | Use base prices as-is |
 | `price_floor_multiplier` | `0.1` | Min price = 10% of base |
 | `price_ceiling_multiplier` | `10.0` | Max price = 10x base |
 
@@ -184,9 +179,9 @@ channels:
 settlement:
   interval_range: [3000, 10000]           # acceptable settlement interval range [min_ms, max_ms]
   default_interval_ms: 5000               # preferred interval (used if peer accepts)
-  drift_tolerance: 0.05                   # 5% metering drift tolerance
-  drift_max_consecutive: 3                # close after this many consecutive over-tolerance intervals
-  drift_unacceptable: 0.50               # immediately close if drift exceeds this (50%)
+  transit_loss_tolerance: 0.05                   # 5% transit loss tolerance
+  transit_loss_max_consecutive: 3                # close after this many consecutive over-tolerance intervals (transit loss)
+  transit_loss_unacceptable: 0.50               # immediately close if transit loss exceeds this (50%)
 ```
 
 ### Defaults
@@ -195,9 +190,9 @@ settlement:
 |-----------|---------|-------------|
 | `interval_range` | `[3000, 10000]` | Acceptable interval in ms |
 | `default_interval_ms` | `5000` | Preferred settlement interval |
-| `drift_tolerance` | `0.05` | 5% drift tolerance |
-| `drift_max_consecutive` | `3` | Close after 3 consecutive over-tolerance intervals |
-| `drift_unacceptable` | `0.50` | Immediately close if drift exceeds 50% |
+| `transit_loss_tolerance` | `0.05` | 5% transit loss tolerance |
+| `transit_loss_max_consecutive` | `3` | Close after 3 consecutive over-tolerance intervals (transit loss) |
+| `transit_loss_unacceptable` | `0.50` | Immediately close if transit loss exceeds 50% |
 
 ---
 
@@ -225,9 +220,9 @@ bootstrap:
 ```yaml
 mints:
   - url: "https://mint.example.com"
-    units: ["sat", "msat"]
+    mint_units: ["sat", "msat"]
   - url: "https://mint.eu"
-    units: ["sat", "eur"]
+    mint_units: ["sat", "eur"]
 ```
 
 Only mints listed here are accepted for both bootstrap tokens and Spilman channel funding. If a peer offers a product priced in a mint not on this list, the node rejects it.
@@ -273,29 +268,28 @@ identity:
 
 products:
   - name: "standard"
-    bandwidth_limit: 0
     pricing_scale: 1000
     pricing:
-      - mint: "https://mint.example.com"
+      - mint_url: "https://mint.example.com"
         price_per_second: 0
-        price_per_byte: 10
-        unit: "sat"
+        price_per_unit: 10
+        mint_unit: "sat"
+    extensions:
+      bandwidth_limit: 0
 
   - name: "budget"
-    bandwidth_limit: 50000
     pricing_scale: 1000
     pricing:
-      - mint: "https://mint.example.com"
+      - mint_url: "https://mint.example.com"
         price_per_second: 50
-        price_per_byte: 0
-        unit: "sat"
+        price_per_unit: 0
+        mint_unit: "sat"
+    extensions:
+      bandwidth_limit: 50000
 
 pricing:
   enabled: true
-  strategy: "cost_plus"
-  cost_plus:
-    etx_weight: 1.0
-    latency_weight: 0.01
+  formula: "base * metric('etx') * (1 + metric('srtt_ms') / 100)"
   price_floor_multiplier: 0.1
   price_ceiling_multiplier: 10.0
 
@@ -308,7 +302,7 @@ channels:
 settlement:
   interval_range: [3000, 10000]
   default_interval_ms: 5000
-  drift_tolerance: 0.05
+  transit_loss_tolerance: 0.05
 
 bootstrap:
   enabled: true
@@ -316,7 +310,7 @@ bootstrap:
 
 mints:
   - url: "https://mint.example.com"
-    units: ["sat"]
+    mint_units: ["sat"]
 
 peers:
   "02abc...":
@@ -352,7 +346,8 @@ The implementation watches the config file for changes and applies runtime-chang
 | Defaults | Every parameter has a sensible default | Minimal config for simple deployments |
 | Products | Array of named products | Multiple offerings per node |
 | No products | Node is consumer-only | Pay peers but don't sell |
-| Pricing | Separate from products, applied as multiplier | Dynamic pricing doesn't change product structure |
+| Pricing | Formula expression evaluated against opaque metrics | Core doesn't interpret metrics — implementation sets policy, core executes |
+| Product extensions | Opaque CBOR blob for implementation-specific fields | Core hashes but doesn't interpret |
 | Peer overrides | By pubkey | Per-peer pricing, blocking, zero-price |
 | Runtime changes | Pricing and peer overrides are hot-reloadable | Operator can adjust without downtime |
 | OpenWrt | YAML directly, UCI integration future | Keep it simple initially |

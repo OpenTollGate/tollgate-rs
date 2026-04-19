@@ -33,11 +33,11 @@
   <!-- Node headers -->
   <rect x="120" y="65" width="100" height="42" class="node"/>
   <text x="170" y="85" text-anchor="middle" class="nlabel">Peer A</text>
-  <text x="170" y="98" text-anchor="middle" class="nrole">Forwarder</text>
+  <text x="170" y="98" text-anchor="middle" class="nrole">Provider</text>
 
   <rect x="500" y="65" width="100" height="42" class="node"/>
   <text x="550" y="85" text-anchor="middle" class="nlabel">Peer B</text>
-  <text x="550" y="98" text-anchor="middle" class="nrole">Forwarder</text>
+  <text x="550" y="98" text-anchor="middle" class="nrole">Provider</text>
 
   <!-- Lifelines -->
   <line x1="170" y1="107" x2="170" y2="530" class="life"/>
@@ -51,13 +51,13 @@
   <line x1="180" y1="155" x2="538" y2="155" class="meter"/>
   <polygon points="536,150 546,155 536,160" class="meter"/>
   <text x="360" y="148" text-anchor="middle" class="alabel" fill="#5080c0">MeteringReport</text>
-  <text x="360" y="172" text-anchor="middle" class="annot">forwarded 500B to B, received 200B from B</text>
+  <text x="360" y="172" text-anchor="middle" class="annot">delivered 500 units to B, received 200 units from B</text>
 
   <!-- B → A MeteringReport -->
   <line x1="540" y1="198" x2="182" y2="198" class="meter"/>
   <polygon points="184,193 174,198 184,203" class="meter"/>
   <text x="360" y="191" text-anchor="middle" class="alabel" fill="#5080c0">MeteringReport</text>
-  <text x="360" y="215" text-anchor="middle" class="annot">forwarded 200B to A, received 500B from A</text>
+  <text x="360" y="215" text-anchor="middle" class="annot">delivered 200 units to A, received 500 units from A</text>
 
   <!-- Phase separator -->
   <line x1="70" y1="240" x2="660" y2="240" class="sep"/>
@@ -68,8 +68,8 @@
 
   <rect x="175" y="255" width="370" height="72" class="compute"/>
   <text x="360" y="274" text-anchor="middle" class="clabel" fill="#d0a040">Both sides compute independently (deterministic):</text>
-  <text x="360" y="292" text-anchor="middle" class="clabel">A owes B: 200B x B's price/byte = 2 sats</text>
-  <text x="360" y="306" text-anchor="middle" class="clabel">B owes A: 500B x A's price/byte = 5 sats</text>
+  <text x="360" y="292" text-anchor="middle" class="clabel">A owes B: 200 units x B's price = 2 sats</text>
+  <text x="360" y="306" text-anchor="middle" class="clabel">B owes A: 500 units x A's price = 5 sats</text>
   <text x="360" y="321" text-anchor="middle" class="alabel" fill="#d0a040" font-weight="bold">Net: B owes A 3 sats</text>
 
   <!-- Phase separator -->
