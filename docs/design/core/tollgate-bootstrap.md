@@ -1,0 +1,237 @@
+# TollGate Bootstrap Tokens
+
+This document specifies how TollGate handles regular Cashu token payments — the bootstrap mechanism that exists before (or instead of) Spilman payment channels.
+
+## Overview
+
+Bootstrap tokens are regular Cashu ecash tokens (not Spilman channels) used in two scenarios:
+
+1. **Channel setup**: A peer needs to pay to get online and reach a mint so it can fund a Spilman channel. The bootstrap token is a one-time payment to establish connectivity.
+2. **Pay-only mode**: A constrained peer runs its entire session on regular tokens, never upgrading to Spilman channels. The peer sends tokens to top up as balance is consumed.
+
+In both cases, the same mechanism applies: the peer sends a token, the forwarder verifies it with the mint, and grants metered service until the token value is consumed.
+
+**No service without verification.** The forwarder must be able to reach the mint to verify the token. If the forwarder is offline, it cannot accept bootstrap tokens — the peer must wait or find another route.
+
+---
+
+## When Bootstrap is Needed
+
+Bootstrap is needed when the connecting peer **cannot fund a Spilman channel** — either because it has no mint connectivity, or because it doesn't support Spilman channels at all.
+
+| Scenario | Bootstrap needed? | Notes |
+|----------|-------------------|-------|
+| Peer has mint connectivity through other peers | No | Proceed directly to Spilman channel funding |
+| Peer's first connection, no other peers | Yes | Bootstrap token gets peer online |
+| All other peer connections have failed | Yes | Bootstrap token is the only payment option |
+| Peer doesn't support Spilman (pay-only device) | Yes | Entire session runs on bootstrap tokens |
+| Both peers have mint connectivity | No | Proceed directly to Spilman |
+
+---
+
+## Token Flow
+
+### Sending a Bootstrap Token
+
+```
+Peer B sends a BootstrapToken to Node A:
+
+B → A: BootstrapToken { token: <raw Cashu token> }
+A verifies token with mint
+A → B: BootstrapAck { status: accepted } or { status: rejected, reason: "..." }
+```
+
+The token is a standard Cashu ecash token in NUT-00 format. The forwarder:
+1. Decodes the token
+2. Checks that the mint is in the accepted mints list (from the PriceSheet)
+3. Submits the token to the mint for verification/redemption
+4. If valid: credits the token value to the peer's balance, sends BootstrapAck (accepted)
+5. If invalid (spent, malformed, wrong mint): sends BootstrapAck (rejected) with reason
+
+### Verification Requirement
+
+The forwarder **must** be able to reach the mint to verify the token. There is no "pending" or "trust on faith" mode. If the forwarder cannot reach the mint:
+- BootstrapAck is sent with status: rejected, reason: "mint unreachable"
+- The peer must wait for mint connectivity to return, or find an alternative peer
+
+This is a strict policy: **no pay, no service**. The forwarder does not grant access based on unverified tokens.
+
+---
+
+## Balance Tracking
+
+Once a bootstrap token is accepted, the forwarder tracks the peer's balance internally **at scaled precision** (not whole sats). The balance is stored in scaled units (milli-sats with pricing_scale=1000) so that sub-unit costs accumulate correctly across settlement intervals without rounding away small amounts.
+
+```
+token_value_scaled = token_value_sats x pricing_scale
+
+each settlement interval:
+  cost_scaled = (elapsed_seconds x price_per_second) + (bytes_forwarded x price_per_byte)
+  balance_scaled = balance_scaled - cost_scaled
+
+balance exhausted when: balance_scaled <= 0
+```
+
+For example, with pricing_scale=1000 and price_per_byte=1 (0.001 sat/byte):
+- Token value: 10 sats -> balance_scaled = 10,000
+- Each interval forwarding 1000 bytes: cost_scaled = 1000 -> balance_scaled decreases by 1000
+- After 10 intervals: balance_scaled = 0 (exhausted)
+
+The balance never rounds to whole sats between intervals — sub-sat costs accumulate precisely. The pricing comes from the product the peer accepted in the PriceSheet.
+
+### Usage Reporting
+
+Both sides send **MeteringReport** at each settlement interval — traffic flows in both directions even in bootstrap mode. The forwarder reports bytes forwarded to the peer (what the peer is being charged for), and the peer reports bytes forwarded to the forwarder (for calibration).
+
+However, only the forwarder's direction has pricing applied against the bootstrap balance. The pay-only peer's forwarding price **must be zero** (or negative) — because the forwarder has no way to pay the peer (the peer can't receive Spilman channels). This means pay-only mode is only viable for peers that provide forwarding for free — typically leaf nodes / consumers that just want internet access, not relay nodes charging for transit.
+
+### Balance Exhaustion
+
+When the balance reaches zero:
+1. The forwarder stops forwarding for this peer
+2. The forwarder sends Reject (reason code: 0x09 — balance exhausted)
+3. The peer can send another BootstrapToken to top up
+
+The Reject message signals the peer that it needs to pay more. The peer's options:
+- Send another BootstrapToken (top up)
+- If the peer now has mint connectivity: upgrade to Spilman channels (send Accept with channel funding)
+- Disconnect
+
+---
+
+## Token Renewal (Top-Up)
+
+The peer can send additional BootstrapTokens at any time — before or after balance exhaustion. Each accepted token's value is **added** to the current balance (at scaled precision).
+
+```
+B → A: BootstrapToken { token: 100 sats }
+A → B: BootstrapAck { accepted }
+[balance_scaled: 100,000]
+
+... traffic metered, balance decreases ...
+[balance_scaled: 20,000]
+
+B → A: BootstrapToken { token: 50 sats }
+A → B: BootstrapAck { accepted }
+[balance_scaled: 70,000]
+```
+
+There is no negotiation for top-ups — the pricing was already agreed in the PriceSheet. The peer just sends more tokens when their balance runs low.
+
+### Proactive Top-Up
+
+A smart peer monitors the MeteringReports from the forwarder and sends a new token *before* balance exhaustion to avoid service interruption. The forwarder never stops service if the balance is positive.
+
+---
+
+## Upgrade to Spilman
+
+Once a peer has mint connectivity (gained through the bootstrap-funded connection), it can upgrade to Spilman channels:
+
+```
+[Bootstrap session active, peer is online]
+
+B → A: Accept (product_id, option_id, channel funding)
+A → B: Accept (product_id, option_id, channel funding)
+B → A: ChannelReady
+A → B: ChannelReady
+
+[Spilman channels now active — bootstrap balance becomes irrelevant]
+```
+
+The remaining bootstrap balance is effectively abandoned — the forwarder keeps it. This is acceptable because:
+- The bootstrap amount is small (ideally just enough for channel setup)
+- The peer chose to upgrade, meaning the bootstrap served its purpose
+- No protocol complexity for refunding unused bootstrap balance
+
+---
+
+## Pay-Only Mode
+
+Some devices only support sending regular Cashu tokens — no Spilman channel management, no ECDH, no balance signing. These are **pay-only** clients.
+
+In pay-only mode:
+- The peer never sends Accept with channel funding
+- The entire session runs on BootstrapToken messages
+- The peer sends tokens to top up as balance is consumed
+- The forwarder tracks balance and sends MeteringReports
+- No settlement interval signatures, no netting, no rollover
+- **The pay-only peer's forwarding price must be zero or negative** — the forwarder cannot pay the peer (no receiving channel), so the peer must forward for free. This limits pay-only mode to leaf/consumer nodes, not relay nodes.
+
+### Pay-Only Limitations
+
+| Aspect | Spilman channels | Pay-only (bootstrap) |
+|--------|-----------------|---------------------|
+| Payment overhead | One signature per interval | Full token per payment |
+| Granularity | Streaming (per-interval) | Chunked (per-token) |
+| Change | Sender gets remaining balance back | No change — forwarder keeps remainder |
+| Bidirectional payment | Yes (netting) | No — one direction only |
+| Offline operation | Balance updates continue | No — each token needs mint verification |
+| Min. device capability | Spilman signing, ECDH | Just create Cashu tokens |
+
+Pay-only is strictly inferior in efficiency but serves constrained devices that can't participate in channel management.
+
+---
+
+## Bootstrap Token Amount
+
+### For Spilman Setup
+
+The ideal bootstrap token covers just enough to:
+1. Fund a Spilman channel (minimum channel capacity)
+2. Cover mint fees for channel creation
+3. Cover the brief period of traffic while setting up the channel
+
+A reasonable default: **2x minimum channel capacity** — enough for the channel plus setup overhead.
+
+### For Pay-Only Sessions
+
+Pay-only peers should send tokens sized for practical usage periods. Too small = frequent top-ups with high overhead. Too large = more wasted change if the session ends early.
+
+Guidance for pay-only peers:
+- Estimate session duration x pricing rate
+- Add a small buffer (10-20%)
+- Send tokens in practical chunks (e.g., 5-10 minutes of expected usage)
+
+---
+
+## Error Cases
+
+### Token Rejected
+
+| Reason | Forwarder action | Peer action |
+|--------|-----------------|-------------|
+| Mint not in accepted list | Reject: mint not accepted | Use a different mint |
+| Token already spent | Reject: token spent | Send a fresh token |
+| Token malformed | Reject: invalid token | Fix token encoding |
+| Mint unreachable | Reject: mint unreachable | Wait and retry, or find another peer |
+| Wrong unit | Reject: unit not accepted | Use the unit from PriceSheet |
+
+### Balance Exhausted
+
+The forwarder sends Reject (0x09: balance exhausted). Forwarding stops immediately. The peer must top up or upgrade to Spilman.
+
+### Forwarder Goes Offline
+
+If the forwarder loses mint connectivity after accepting a token:
+- Service continues normally — the balance was already verified and credited
+- The peer's balance continues to decrease as traffic is metered
+- If the peer tries to send a new token while the forwarder is offline, it will be rejected (mint unreachable)
+- When mint returns, the peer can send new tokens again
+
+---
+
+## Design Decisions
+
+| Decision | Resolution | Rationale |
+|----------|-----------|-----------|
+| Verification | Always verify with mint before granting service | No pay, no service — no risk of spent tokens |
+| Balance precision | Tracked at scaled units (milli-sats), not whole sats | Sub-sat costs accumulate correctly without rounding |
+| Balance tracking | Forwarder tracks internally, same pricing formula as Spilman | Consistent metering across payment modes |
+| Usage reporting | Bidirectional MeteringReport, pricing applied one direction only | Both sides calibrate; pay-only peer forwards for free |
+| Top-up | Additive — new token value added to current balance | Simple, no negotiation needed |
+| Upgrade path | Peer sends Accept with Spilman funding when ready | Seamless transition, remaining bootstrap balance abandoned |
+| Change | No refund of unused bootstrap balance | Keeps protocol simple, bootstrap amounts are small |
+| Pay-only pricing | Peer's forwarding price must be zero or negative | Forwarder can't pay peer without receiving channel |
+| Exhaustion signal | Reject (balance exhausted) | Reuses existing message type |
+| Offline forwarder | Existing balance continues, new tokens rejected until mint returns | Already-verified balance is safe to use |

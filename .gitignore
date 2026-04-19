@@ -1,0 +1,32 @@
+# macOS
+.DS_Store
+
+# Build
+/target
+
+# Editor/IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# AI Agents
+.claude/
+AGENTS.md
+CLAUDE.md
+agents/
+
+deploy/
+
+reference/
+
+dist/
+*.ipk
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+
