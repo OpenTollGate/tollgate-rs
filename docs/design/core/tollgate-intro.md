@@ -31,6 +31,20 @@ TollGate operates on a single principle: **the forwarder charges for forwarding*
 ```
 
 ![Pricing Direction](../diagrams/pricing-direction.svg)
+<details><summary>Text version</summary>
+
+```
+    A ──────[forwards to B]──────→ B
+    A charges A's rate (A is doing the work)
+    Channel B→A: B pays A (B funds)
+
+    B ──────[forwards to A]──────→ A
+    B charges B's rate (B is doing the work)
+    Channel A→B: A pays B (A funds)
+
+    ── traffic (packets)    ╌╌ payment (Spilman channel)
+```
+</details>
 
 Prices can be positive, zero, or negative. A well-connected node (e.g., one with direct internet access) charges a positive price because its forwarding is valuable. A leaf node willing to pay for inbound traffic can accept a negative price from its peer — effectively paying the peer to forward traffic *to* the leaf. A pair of peers owned by the same operator can set zero prices in both directions, skipping payment entirely. Pricing naturally reflects network topology, resource scarcity, and the economic relationship between each pair of peers.
 
@@ -69,6 +83,22 @@ A TollGate node can lose mint connectivity at any moment — power loss, network
 - **Hop-by-hop payment** — Each peer pays its direct neighbor. No knowledge of the full path is needed. Payment relationships are strictly between adjacent peers.
 
 ![Hop-by-Hop Payment](../diagrams/hop-by-hop.svg)
+<details><summary>Text version</summary>
+
+```
+                 10 sat/MB            3 sat/MB
+  Client ──────────────→ Relay ──────────────→ Gateway ──→ internet
+    │    ←══ download ══   │   ←══ download ══   │
+    │    ── upload ───────→│   ── upload ───────→│
+    │    ╌╌ pays 10/MB ──→ │   ╌╌ pays 3/MB ──→ │
+    │                      │                     │
+    └── independent ───────┘── independent ──────┘
+
+  Relay margin: 10 - 3 = 7 sat/MB profit
+  Client doesn't know about Gateway. Gateway doesn't know about Client.
+```
+</details>
+
 - **Per-peer pricing** — Every peer relationship has its own price. Prices can differ per peer, per product, per mint, and can change dynamically.
 - **Dynamic pricing** — Prices adjust based on network metrics (congestion, demand, link quality), operator policy, or any other signal the implementation provides.
 - **Metering accuracy** — Per-peer traffic accounting with configurable drift tolerance (default: 5%) to account for packet loss between measurement points.
@@ -118,6 +148,7 @@ The main binary targets Linux, macOS, Windows, and OpenWrt with feature flags fo
 ### Core Components
 
 ![Core Components](../diagrams/core-components.svg)
+<details><summary>Text version</summary>
 
 ```
 ┌────────────────────────────────────────────────────────────┐
@@ -137,7 +168,10 @@ The main binary targets Linux, macOS, Windows, and OpenWrt with feature flags fo
 │                                                            │
 │  Traits: Wallet, NetworkAdapter                            │
 └────────────────────────────────────────────────────────────┘
+
+  Implementation provides: Cashu Wallet | FIPS/IP Adapter | Operator Config
 ```
+</details>
 
 - **Spilman Channel Manager**: Manages bi-directional channel pairs per peer. Handles the full lifecycle: bootstrap token → channel funding → active payments → rollover → settlement. Delegates cryptographic operations to the Wallet trait. Manages channel leadership (lowest peer ID leads). Handles offline scenarios gracefully.
 

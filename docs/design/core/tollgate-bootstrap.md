@@ -32,6 +32,29 @@ Bootstrap is needed when the connecting peer **cannot fund a Spilman channel** �
 ## Token Flow
 
 ![Bootstrap Token Flow](../diagrams/bootstrap-token-flow.svg)
+<details><summary>Text version</summary>
+
+```
+  1. Verify
+     B → A: BootstrapToken (100 sats)
+     A → Mint: verify/redeem
+     Mint → A: valid
+     A → B: BootstrapAck (accepted)         balance: 100 sats
+
+  2. Meter (every 5s)
+     A → B: MeteringReport (remaining balance, bytes used)
+     traffic flows, balance decreases...     balance: 12 sats
+
+  3. Top-up (proactive, before exhaustion)
+     B → A: BootstrapToken (50 sats)
+     A → B: BootstrapAck (accepted)         balance: 62 sats (additive)
+
+  4. Exhaust (if no top-up)
+     balance: 0
+     A → B: Reject (balance exhausted)
+     forwarding stops — peer must top up or upgrade to Spilman
+```
+</details>
 
 ### Sending a Bootstrap Token
 
@@ -129,6 +152,25 @@ A smart peer monitors the MeteringReports from the forwarder and sends a new tok
 ## Upgrade to Spilman
 
 ![Bootstrap to Spilman Upgrade](../diagrams/bootstrap-upgrade.svg)
+<details><summary>Text version</summary>
+
+```
+  1. Bootstrap (peer offline, no mint path)
+     B → A: BootstrapToken
+     A → Mint: verify → valid
+     A → B: BootstrapAck (accepted)
+     B now has connectivity — can reach the mint
+
+  2. Upgrade to Spilman
+     B creates Spilman funding via mint
+     B → A: Accept + Spilman funding
+     A → B: Accept + Spilman funding
+     B → A: ChannelReady
+     A → B: ChannelReady
+
+     Spilman channels active — bootstrap balance abandoned
+```
+</details>
 
 Once a peer has mint connectivity (gained through the bootstrap-funded connection), it can upgrade to Spilman channels:
 

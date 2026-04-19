@@ -37,6 +37,31 @@ Any --> None (disconnect)
 ```
 
 ![Access Level State Machine](../diagrams/access-level-states.svg)
+<details><summary>Text version</summary>
+
+```
+                       ┌──────────────┐
+                       │     None     │ (blocked, hidden)
+                       └──┬────┬────┬┘
+            token verified│    │    │zero-price
+                          ▼    │    ▼
+  ┌───────────┐  upgrade  ┌────▼─────┐      ┌───────────┐
+  │ Bootstrap ├──────────→│  Active  │      │ ZeroPrice │
+  │           │           │          │      │           │
+  └─────┬─────┘           └────┬─────┘      └───────────┘
+        │balance=0              │exhausted+timeout
+        │                       │
+        ▼                       ▼
+  ┌─────┴───────────────────────┴──┐
+  │          Suspended             │ (blocked, hidden)
+  │   new token→Bootstrap          │
+  │   new channel→Active           │
+  └────────────────────────────────┘
+
+  Red = blocked    Green = allowed    Blue = bootstrap
+  Dashed = recovery    Any state → None on disconnect
+```
+</details>
 
 ### None (Default)
 

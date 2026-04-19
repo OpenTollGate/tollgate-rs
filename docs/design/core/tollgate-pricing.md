@@ -148,6 +148,24 @@ pricing:
 ## Price Communication
 
 ![Price Communication Flow](../diagrams/price-communication.svg)
+<details><summary>Text version</summary>
+
+```
+  A → B: PriceSheet (products + per-peer prices)
+         multiple products, each with per-mint pricing options
+
+         B picks one product + one mint option
+
+  B → A: Accept (product_id, option_id, funding)
+
+  ─── at each settlement interval ───
+  A → B: MeteringReport (+ optional new prices)
+         B continues = accepts new price
+         B sends ChannelClose = rejects
+
+  Take-it-or-leave-it: peer accepts or finds a different forwarder
+```
+</details>
 
 ### Base Catalog
 

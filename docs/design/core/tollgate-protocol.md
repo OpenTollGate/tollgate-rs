@@ -328,6 +328,31 @@ Orderly teardown of the entire TollGate relationship.
 ### Normal Connection (Peer Already Online)
 
 ![Normal Connection Sequence](../diagrams/connection-sequence.svg)
+<details><summary>Text version</summary>
+
+```
+  1. Identity
+     A → B: Announce (v1, pubkey_A)
+     B → A: Announce (v1, pubkey_B)
+
+  2. Pricing
+     A → B: PriceSheet (products, prices)
+     B → A: PriceSheet (products, prices)
+
+  3. Channels
+     B → A: Accept + funding (B→A channel)
+     A → B: Accept + funding (A→B channel)
+     B → A: ChannelReady (B→A)
+     A → B: ChannelReady (A→B)
+
+  4. Settle (repeat every 5s)
+     A → B: MeteringReport
+     B → A: MeteringReport
+     [both compute net]
+     debtor → creditor: BalanceUpdate (signed)
+     creditor → debtor: SettlementAck
+```
+</details>
 
 ```
 Peer B connects to Node A (already authenticated by network layer)

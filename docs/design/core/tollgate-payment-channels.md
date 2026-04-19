@@ -9,6 +9,22 @@ Bootstrap tokens and pay-only mode are documented separately in [tollgate-bootst
 Each pair of TollGate peers maintains **two unidirectional Spilman channels** — one per forwarding direction. Each channel is funded by the party that owes payment (the peer receiving the forwarding service).
 
 ![Channel Pair Structure](../diagrams/channel-pair.svg)
+<details><summary>Text version</summary>
+
+```
+  Peer A                                          Peer B
+  ┌──────────┐                              ┌──────────┐
+  │ sender   │── A forwards to B ──────────→│ receiver │
+  │ on A→B   │╌╌ Channel A→B: A pays B ───→│ on A→B   │
+  │          │                              │          │
+  │ receiver │←────────── B forwards to A ──│ sender   │
+  │ on B→A   │←╌╌ Channel B→A: B pays A ╌╌╌│ on B→A   │
+  └──────────┘                              └──────────┘
+
+  ── traffic    ╌╌ payment (Spilman channel)
+  The forwarder charges — the peer receiving the service pays.
+```
+</details>
 
 Spilman channels enable **streaming micropayments**: the sender locks ecash in a 2-of-2 multisig with a time-locked refund path, then signs incremental balance updates as traffic is metered. The receiver holds the latest signed update and can settle with the mint at any time.
 
@@ -17,6 +33,25 @@ At each settlement interval, both sides exchange metering reports. The net debto
 ### Settlement with Netting
 
 ![Settlement with Netting](../diagrams/settlement-netting.svg)
+<details><summary>Text version</summary>
+
+```
+  Phase 1 — Metering
+    A → B: MeteringReport (forwarded 500B to B, received 200B)
+    B → A: MeteringReport (forwarded 200B to A, received 500B)
+
+  Phase 2 — Compute (both sides, deterministic)
+    A owes B: 200B × B's price = 2 sats
+    B owes A: 500B × A's price = 5 sats
+    Net: B owes A 3 sats
+
+  Phase 3 — Settle
+    B → A: BalanceUpdate (channel B→A, +3 sats, signed)
+    A → B: SettlementAck
+
+  Result: Channel B→A drained by 3 sats. Channel A→B unchanged.
+```
+</details>
 
 ---
 
@@ -69,6 +104,24 @@ A channel approaches exhaustion (default: 80% capacity used). The sender (channe
 Both the old (draining) and new channel are active simultaneously during the overlap period.
 
 ![Channel Rollover Timeline](../diagrams/channel-rollover.svg)
+<details><summary>Text version</summary>
+
+```
+  0%              80% (rollover)         100% (exhausted)
+  │                    │                      │
+  │   Old Channel      │    draining...       │
+  │████████████████████│░░░░░░░░░░░░░░░░░░░░░░│
+  │                    │                      │
+  │                    │   New Channel        │         charging...
+  │                    │▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒│████████████████████
+  │                    │                      │
+  │                    ├──── overlap period ───┤
+  │                                           │
+  │                    e.g. 2 sats remain + 5 sat settlement
+  │                        = 2 to old, 3 to new
+  ├──────────────────── time ─────────────────────────────→
+```
+</details>
 
 ### Settling
 
