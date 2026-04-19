@@ -31,6 +31,8 @@ Bootstrap is needed when the connecting peer **cannot fund a Spilman channel** â
 
 ## Token Flow
 
+![Bootstrap Token Flow](../diagrams/bootstrap-token-flow.svg)
+
 ### Sending a Bootstrap Token
 
 ```

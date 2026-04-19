@@ -147,6 +147,8 @@ pricing:
 
 ## Price Communication
 
+![Price Communication Flow](../diagrams/price-communication.svg)
+
 ### Base Catalog
 
 Each node publishes a **base catalog** of its products with base prices. This is the default offering visible to all peers before any per-peer adjustment.

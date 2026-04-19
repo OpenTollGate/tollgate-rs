@@ -8,15 +8,7 @@ Bootstrap tokens and pay-only mode are documented separately in [tollgate-bootst
 
 Each pair of TollGate peers maintains **two unidirectional Spilman channels** — one per forwarding direction. Each channel is funded by the party that owes payment (the peer receiving the forwarding service).
 
-```
-A ──────[forwards to B]──────→ B
-Channel: B→A (B is sender, A is receiver)
-B funds this channel, signs balance updates as A forwards traffic to B
-
-B ──────[forwards to A]──────→ A
-Channel: A→B (A is sender, B is receiver)
-A funds this channel, signs balance updates as B forwards traffic to A
-```
+![Channel Pair Structure](../diagrams/channel-pair.svg)
 
 Spilman channels enable **streaming micropayments**: the sender locks ecash in a 2-of-2 multisig with a time-locked refund path, then signs incremental balance updates as traffic is metered. The receiver holds the latest signed update and can settle with the mint at any time.
 

@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 310" font-family="monospace" font-size="12">
+  <style>
+    text          { fill: #e0e0e0; }
+    text.title    { font-size: 16px; font-weight: bold; }
+    text.subtitle { font-size: 12px; fill: #909090; }
+    text.nlabel   { font-size: 14px; font-weight: bold; }
+    text.nrole    { font-size: 10px; fill: #909090; }
+    text.alabel   { font-size: 11px; }
+    text.annot    { font-size: 10px; fill: #909090; font-style: italic; }
+    text.caption  { font-size: 11px; fill: #707080; font-style: italic; }
+  </style>
+
+  <defs>
+    <marker id="cpR" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0,0 8,3 0,6" fill="#5080c0"/>
+    </marker>
+    <marker id="cpL" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0,0 8,3 0,6" fill="#d0a040"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="700" height="310" fill="#0d1117" rx="8"/>
+
+  <!-- Title -->
+  <text x="350" y="28" text-anchor="middle" class="title">Channel Pair Structure</text>
+  <text x="350" y="46" text-anchor="middle" class="subtitle">Two unidirectional Spilman channels per peer pair</text>
+
+  <!-- Peer A -->
+  <rect x="60" y="85" width="140" height="130" rx="8" fill="#2e3a5e" stroke="#5080c0" stroke-width="2"/>
+  <text x="130" y="115" text-anchor="middle" class="nlabel">Peer A</text>
+  <text x="130" y="155" text-anchor="middle" class="annot">sender on A&#8594;B</text>
+  <text x="130" y="170" text-anchor="middle" class="annot">receiver on B&#8594;A</text>
+
+  <!-- Peer B -->
+  <rect x="500" y="85" width="140" height="130" rx="8" fill="#2e3a5e" stroke="#d0a040" stroke-width="2"/>
+  <text x="570" y="115" text-anchor="middle" class="nlabel">Peer B</text>
+  <text x="570" y="155" text-anchor="middle" class="annot">sender on B&#8594;A</text>
+  <text x="570" y="170" text-anchor="middle" class="annot">receiver on A&#8594;B</text>
+
+  <!-- Top: A forwards to B (traffic) -->
+  <line x1="200" y1="115" x2="493" y2="115" stroke="#5080c0" stroke-width="2" marker-end="url(#cpR)"/>
+  <text x="350" y="108" text-anchor="middle" class="alabel" fill="#5080c0">A forwards packets to B</text>
+
+  <!-- Top: payment goes B→A (below traffic arrow) -->
+  <line x1="500" y1="135" x2="207" y2="135" stroke="#d0a040" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#cpL)"/>
+  <text x="350" y="132" text-anchor="middle" class="annot" fill="#d0a040">Channel B&#8594;A: B pays A (B funds)</text>
+
+  <!-- Bottom: B forwards to A (traffic) -->
+  <line x1="500" y1="180" x2="207" y2="180" stroke="#d0a040" stroke-width="2" marker-end="url(#cpL)"/>
+  <text x="350" y="173" text-anchor="middle" class="alabel" fill="#d0a040">B forwards packets to A</text>
+
+  <!-- Bottom: payment goes A→B (below traffic arrow) -->
+  <line x1="200" y1="200" x2="493" y2="200" stroke="#5080c0" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#cpR)"/>
+  <text x="350" y="197" text-anchor="middle" class="annot" fill="#5080c0">Channel A&#8594;B: A pays B (A funds)</text>
+
+  <!-- Legend -->
+  <line x1="170" y1="255" x2="210" y2="255" stroke="#e0e0e0" stroke-width="2"/>
+  <text x="218" y="259" class="annot">traffic (packets forwarded)</text>
+
+  <line x1="400" y1="255" x2="440" y2="255" stroke="#e0e0e0" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <text x="448" y="259" class="annot">payment (Spilman channel)</text>
+
+  <!-- Caption -->
+  <text x="350" y="290" text-anchor="middle" class="caption">The forwarder charges — the peer receiving the service pays via their Spilman channel</text>
+</svg>

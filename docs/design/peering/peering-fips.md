@@ -19,27 +19,7 @@ TollGate integrates with FIPS at **compile time** as native Rust code — not as
 
 TollGate hooks into FIPS at five points:
 
-```
-+---------------------------------------------+
-|                FIPS Node                     |
-|                                              |
-|  +----------+  +----------+  +-----------+  |
-|  |Forwarding|  |  Bloom   |  |   MMP     |  |
-|  | Handler  |  |  Filter  |  |  Metrics  |  |
-|  |          |  |  Compute |  |           |  |
-|  +----+-----+  +----+-----+  +-----+-----+  |
-|       |1            |2             |3        |
-|  +----+-------------+--------------+-----+   |
-|  |         TollGate FIPS Adapter         |   |
-|  +----+--------------------------+-------+   |
-|       |4                         |5          |
-|  +----+-----+              +-----+------+    |
-|  |  Peer    |              |   IPv6     |    |
-|  | Lifecycle|              |  Adapter   |    |
-|  | Events   |              | (HTTP/WS)  |    |
-|  +----------+              +------------+    |
-+----------------------------------------------+
-```
+![FIPS Integration Points](../diagrams/fips-integration.svg)
 
 ### 1. Per-Peer Forwarding Policy
 

@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 400" font-family="monospace" font-size="12">
+  <style>
+    text          { fill: #e0e0e0; }
+    text.title    { font-size: 16px; font-weight: bold; }
+    text.subtitle { font-size: 12px; fill: #909090; }
+    text.mlabel   { font-size: 11px; font-weight: bold; }
+    text.mdesc    { font-size: 9px; fill: #909090; }
+    text.num      { font-size: 13px; font-weight: bold; fill: #d0a040; }
+    text.caption  { font-size: 11px; fill: #707080; font-style: italic; }
+  </style>
+
+  <!-- Background -->
+  <rect width="700" height="400" fill="#0d1117" rx="8"/>
+
+  <!-- Title -->
+  <text x="350" y="28" text-anchor="middle" class="title">FIPS Integration Points</text>
+  <text x="350" y="46" text-anchor="middle" class="subtitle">Native compile-time hooks into FIPS node internals</text>
+
+  <!-- FIPS Node outer box -->
+  <rect x="40" y="60" width="620" height="310" rx="6" fill="none" stroke="#404060" stroke-width="1.5"/>
+  <text x="350" y="80" text-anchor="middle" class="mlabel" fill="#707080">FIPS Node</text>
+
+  <!-- Row 1: FIPS modules -->
+  <!-- Forwarding Handler -->
+  <rect x="70" y="95" width="160" height="55" rx="5" fill="#2e3a5e" stroke="#5080c0" stroke-width="1.5"/>
+  <text x="150" y="118" text-anchor="middle" class="mlabel" fill="#80b0e0">Forwarding</text>
+  <text x="150" y="133" text-anchor="middle" class="mdesc">per-peer policy</text>
+
+  <!-- Bloom Filter -->
+  <rect x="270" y="95" width="160" height="55" rx="5" fill="#2e3a5e" stroke="#5080c0" stroke-width="1.5"/>
+  <text x="350" y="118" text-anchor="middle" class="mlabel" fill="#80b0e0">Bloom Filter</text>
+  <text x="350" y="133" text-anchor="middle" class="mdesc">peer exclusion</text>
+
+  <!-- MMP Metrics -->
+  <rect x="470" y="95" width="160" height="55" rx="5" fill="#2e3a5e" stroke="#5080c0" stroke-width="1.5"/>
+  <text x="550" y="118" text-anchor="middle" class="mlabel" fill="#80b0e0">MMP Metrics</text>
+  <text x="550" y="133" text-anchor="middle" class="mdesc">SRTT, loss, ETX</text>
+
+  <!-- Numbered connection lines -->
+  <line x1="150" y1="150" x2="150" y2="195" stroke="#d0a040" stroke-width="1.5"/>
+  <text x="140" y="178" text-anchor="end" class="num">1</text>
+
+  <line x1="350" y1="150" x2="350" y2="195" stroke="#d0a040" stroke-width="1.5"/>
+  <text x="340" y="178" text-anchor="end" class="num">2</text>
+
+  <line x1="550" y1="150" x2="550" y2="195" stroke="#d0a040" stroke-width="1.5"/>
+  <text x="540" y="178" text-anchor="end" class="num">3</text>
+
+  <!-- TollGate FIPS Adapter (center bar) -->
+  <rect x="70" y="195" width="560" height="45" rx="5" fill="#1a2e1a" stroke="#50c050" stroke-width="2"/>
+  <text x="350" y="222" text-anchor="middle" class="mlabel" fill="#80e080">TollGate FIPS Adapter</text>
+
+  <!-- Numbered connections down -->
+  <line x1="180" y1="240" x2="180" y2="280" stroke="#d0a040" stroke-width="1.5"/>
+  <text x="170" y="265" text-anchor="end" class="num">4</text>
+
+  <line x1="520" y1="240" x2="520" y2="280" stroke="#d0a040" stroke-width="1.5"/>
+  <text x="510" y="265" text-anchor="end" class="num">5</text>
+
+  <!-- Row 3: Lower modules -->
+  <!-- Peer Lifecycle -->
+  <rect x="70" y="280" width="220" height="55" rx="5" fill="#151520" stroke="#404060" stroke-width="1.5"/>
+  <text x="180" y="303" text-anchor="middle" class="mlabel" fill="#b0b0b0">Peer Lifecycle</text>
+  <text x="180" y="318" text-anchor="middle" class="mdesc">connect / disconnect events</text>
+
+  <!-- IPv6 Adapter -->
+  <rect x="410" y="280" width="220" height="55" rx="5" fill="#151520" stroke="#404060" stroke-width="1.5"/>
+  <text x="520" y="303" text-anchor="middle" class="mlabel" fill="#b0b0b0">IPv6 Adapter</text>
+  <text x="520" y="318" text-anchor="middle" class="mdesc">HTTP / WebSocket transport</text>
+
+  <!-- Legend -->
+  <text x="100" y="372" class="caption">1 Per-peer forwarding policy</text>
+  <text x="100" y="387" class="caption">2 Bloom filter exclusion</text>
+  <text x="350" y="372" class="caption">3 MMP metrics for dynamic pricing</text>
+  <text x="350" y="387" class="caption">4 Peer connect/disconnect callbacks</text>
+  <text x="570" y="372" class="caption">5 TollGate message transport</text>
+</svg>

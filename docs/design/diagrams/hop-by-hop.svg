@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 340" font-family="monospace" font-size="12">
+  <style>
+    text          { fill: #e0e0e0; }
+    text.title    { font-size: 16px; font-weight: bold; }
+    text.subtitle { font-size: 12px; fill: #909090; }
+    text.nlabel   { font-size: 14px; font-weight: bold; }
+    text.nrole    { font-size: 10px; fill: #909090; }
+    text.annot    { font-size: 10px; fill: #909090; font-style: italic; }
+    text.caption  { font-size: 11px; fill: #707080; font-style: italic; }
+  </style>
+
+  <defs>
+    <marker id="hhDl" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0,0 7,2.5 0,5" fill="#40a060"/>
+    </marker>
+    <marker id="hhUl" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0,0 7,2.5 0,5" fill="#5080c0"/>
+    </marker>
+    <marker id="hhPay" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0,0 7,2.5 0,5" fill="#d0a040"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="340" fill="#0d1117" rx="8"/>
+
+  <!-- Title -->
+  <text x="400" y="28" text-anchor="middle" class="title">Hop-by-Hop Payment</text>
+  <text x="400" y="46" text-anchor="middle" class="subtitle">Each peer pays its direct neighbor — no path knowledge needed</text>
+
+  <!-- Nodes -->
+  <rect x="40" y="80" width="130" height="70" rx="8" fill="#2e3a5e" stroke="#5080c0" stroke-width="2"/>
+  <text x="105" y="108" text-anchor="middle" class="nlabel">Client</text>
+  <text x="105" y="135" text-anchor="middle" class="nrole">wants internet</text>
+
+  <rect x="310" y="80" width="130" height="70" rx="8" fill="#2e3a5e" stroke="#d0a040" stroke-width="2"/>
+  <text x="375" y="108" text-anchor="middle" class="nlabel">Relay</text>
+  <text x="375" y="125" text-anchor="middle" class="nrole">charges 10 sat/MB</text>
+  <text x="375" y="138" text-anchor="middle" class="nrole">pays 3 sat/MB</text>
+
+  <rect x="580" y="80" width="130" height="70" rx="8" fill="#2e3a5e" stroke="#40a060" stroke-width="2"/>
+  <text x="645" y="108" text-anchor="middle" class="nlabel">Gateway</text>
+  <text x="645" y="125" text-anchor="middle" class="nrole">charges 3 sat/MB</text>
+  <text x="645" y="138" text-anchor="middle" class="nrole">has direct internet</text>
+
+  <!-- Internet symbol -->
+  <text x="745" y="115" text-anchor="middle" class="nlabel" fill="#40a060">&#9729;</text>
+
+  <!-- Download: Gateway → Relay → Client (thick, dominant) -->
+  <line x1="573" y1="98" x2="447" y2="98" stroke="#40a060" stroke-width="3" marker-end="url(#hhDl)"/>
+  <line x1="303" y1="98" x2="177" y2="98" stroke="#40a060" stroke-width="3" marker-end="url(#hhDl)"/>
+
+  <text x="510" y="88" text-anchor="middle" class="annot" fill="#40a060">download</text>
+  <text x="240" y="88" text-anchor="middle" class="annot" fill="#40a060">download</text>
+
+  <!-- Upload: Client → Relay → Gateway (thin) -->
+  <line x1="170" y1="115" x2="303" y2="115" stroke="#5080c0" stroke-width="1" marker-end="url(#hhUl)"/>
+  <line x1="440" y1="115" x2="573" y2="115" stroke="#5080c0" stroke-width="1" marker-end="url(#hhUl)"/>
+
+  <text x="240" y="128" text-anchor="middle" class="annot" fill="#5080c0">upload</text>
+  <text x="510" y="128" text-anchor="middle" class="annot" fill="#5080c0">upload</text>
+
+  <!-- Payment: Client → Relay (net payment) -->
+  <line x1="170" y1="142" x2="303" y2="142" stroke="#d0a040" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#hhPay)"/>
+  <text x="240" y="156" text-anchor="middle" class="annot" fill="#d0a040">net: Client pays 10 sat/MB</text>
+
+  <!-- Payment: Relay → Gateway (net payment) -->
+  <line x1="440" y1="142" x2="573" y2="142" stroke="#d0a040" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#hhPay)"/>
+  <text x="510" y="156" text-anchor="middle" class="annot" fill="#d0a040">net: Relay pays 3 sat/MB</text>
+
+  <!-- Independent relationship boxes -->
+  <rect x="120" y="180" width="230" height="30" rx="4" fill="none" stroke="#303040" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="235" y="200" text-anchor="middle" class="annot">independent relationship</text>
+
+  <rect x="400" y="180" width="230" height="30" rx="4" fill="none" stroke="#303040" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="515" y="200" text-anchor="middle" class="annot">independent relationship</text>
+
+  <!-- Margin callout -->
+  <rect x="240" y="230" width="270" height="42" rx="4" fill="#151520" stroke="#d0a040" stroke-width="1"/>
+  <text x="375" y="248" text-anchor="middle" class="annot" fill="#d0a040">Relay's margin: 10 - 3 = 7 sat/MB profit</text>
+  <text x="375" y="263" text-anchor="middle" class="annot" fill="#909090">markup covers relay cost + operator profit</text>
+
+  <!-- Caption -->
+  <text x="400" y="300" text-anchor="middle" class="caption">Client doesn't know about Gateway. Gateway doesn't know about Client.</text>
+  <text x="400" y="317" text-anchor="middle" class="caption">Each hop prices independently. Relay profits from the spread.</text>
+</svg>

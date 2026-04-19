@@ -67,6 +67,8 @@ A TollGate node can lose mint connectivity at any moment — power loss, network
 ## Specific Design Goals
 
 - **Hop-by-hop payment** — Each peer pays its direct neighbor. No knowledge of the full path is needed. Payment relationships are strictly between adjacent peers.
+
+![Hop-by-Hop Payment](../diagrams/hop-by-hop.svg)
 - **Per-peer pricing** — Every peer relationship has its own price. Prices can differ per peer, per product, per mint, and can change dynamically.
 - **Dynamic pricing** — Prices adjust based on network metrics (congestion, demand, link quality), operator policy, or any other signal the implementation provides.
 - **Metering accuracy** — Per-peer traffic accounting with configurable drift tolerance (default: 5%) to account for packet loss between measurement points.
