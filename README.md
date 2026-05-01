@@ -18,6 +18,8 @@ This repo contains:
 A constrained-device variant (`tollgate-net-esp32`) lives in a separate
 project and consumes the same `tollgate-core`.
 
+→ **Start here:** [tollgate-intro.md](docs/design/core/tollgate-intro.md) — goals, architecture, payment model, security.
+
 > tollgate-rs is in the design phase. The protocol and design documents
 > are being finalized before implementation begins.
 
@@ -86,14 +88,14 @@ tollgate-rs/
 
 ## Design Documents
 
-Start with the introduction, then follow the reading order in the
-[design README](docs/design/README.MD).
+Start with the [introduction](docs/design/core/tollgate-intro.md), then
+follow the reading order in the [design README](docs/design/README.MD).
 
 | Document | Description |
 | -------- | ----------- |
 | [tollgate-intro.md](docs/design/core/tollgate-intro.md) | Goals, architecture, payment model, security |
 | [tollgate-pricing.md](docs/design/core/tollgate-pricing.md) | Dual pricing (time + units), products, dynamic adjustment |
-| [tollgate-protocol.md](docs/design/core/tollgate-protocol.md) | CBOR wire protocol, settlement flow, negotiation |
+| [tollgate-protocol.md](docs/design/core/tollgate-protocol.md) | CBOR wire protocol, interval flow, negotiation |
 | [tollgate-payment-channels.md](docs/design/core/tollgate-payment-channels.md) | Spilman channel lifecycle, rollover, netting |
 | [tollgate-bootstrap.md](docs/design/core/tollgate-bootstrap.md) | Bootstrap tokens, bootstrap-only mode |
 | [tollgate-access-control.md](docs/design/core/tollgate-access-control.md) | Access gates, access levels, FIPS bloom filter visibility |
