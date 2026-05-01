@@ -10,6 +10,23 @@
     text.caption  { font-size: 11px; fill: #707080; font-style: italic; }
     line.sep      { stroke: #303040; stroke-width: 1; stroke-dasharray: 6,4; }
     line.life     { stroke: #303040; stroke-width: 1; stroke-dasharray: 2,3; }
+
+    .bg           { fill: #0d1117; }
+    .callout      { fill: #151520; }
+    .node         { fill: #2e3a5e; stroke: #5080c0; }
+
+    @media (prefers-color-scheme: light) {
+      text          { fill: #1f2328; }
+      text.subtitle, text.nrole, text.plabel, text.annot, text.altlabel,
+      text.elabel, text.mdesc, text.tlabel { fill: #656d76; }
+      text.caption  { fill: #7c8186; }
+      line.sep, line.life { stroke: #d1d9e0; }
+      rect.alt      { stroke: #d1d9e0; }
+      .bg           { fill: #ffffff; }
+      .callout      { fill: #f6f8fa; }
+      .node, rect.node { fill: #ddf4ff; stroke: #0969da; }
+      rect.compute, rect.result { fill: #f6f8fa; }
+    }
   </style>
 
   <defs>
@@ -22,18 +39,18 @@
   </defs>
 
   <!-- Background -->
-  <rect width="700" height="380" fill="#0d1117" rx="8"/>
+  <rect width="700" height="380" rx="8" class="bg"/>
 
   <!-- Title -->
   <text x="350" y="28" text-anchor="middle" class="title">Price Communication Flow</text>
   <text x="350" y="46" text-anchor="middle" class="subtitle">Base catalog + per-peer adjustment + take-it-or-leave-it</text>
 
   <!-- Node headers -->
-  <rect x="80" y="65" width="120" height="42" fill="#2e3a5e" stroke="#5080c0" stroke-width="2" rx="6"/>
+  <rect x="80" y="65" width="120" height="42" class="node" stroke-width="2" rx="6"/>
   <text x="140" y="85" text-anchor="middle" class="nlabel">Node A</text>
   <text x="140" y="98" text-anchor="middle" class="nrole">Provider</text>
 
-  <rect x="500" y="65" width="120" height="42" fill="#2e3a5e" stroke="#d0a040" stroke-width="2" rx="6"/>
+  <rect x="500" y="65" width="120" height="42" class="node" stroke="#d0a040" stroke-width="2" rx="6"/>
   <text x="560" y="85" text-anchor="middle" class="nlabel">Peer B</text>
   <text x="560" y="98" text-anchor="middle" class="nrole">Connecting</text>
 
@@ -47,7 +64,7 @@
   <text x="350" y="152" text-anchor="middle" class="annot">multiple products, each with per-mint pricing options</text>
 
   <!-- Step 2: B chooses -->
-  <rect x="415" y="168" width="280" height="22" rx="3" fill="#151520" stroke="#404060" stroke-width="1"/>
+  <rect x="415" y="168" width="280" height="22" rx="3" class="callout" stroke="#404060" stroke-width="1"/>
   <text x="555" y="183" text-anchor="middle" class="annot">B picks one product + one mint option</text>
 
   <!-- Step 3: Accept -->

@@ -13,7 +13,7 @@ details live in the network-peering section.
 
 Start with the introduction for the full architecture overview, then read
 the core protocol documents in order. Network-peering documents are
-specific to this implementation and can be read independently.
+specific to `tollgate-net` and can be read independently.
 
 ### Core Protocol (Resource-Agnostic)
 
@@ -21,10 +21,11 @@ specific to this implementation and can be read independently.
 | -------- | ----------- |
 | [tollgate-intro.md](core/tollgate-intro.md) | Introduction: goals, architecture, payment model, security |
 | [tollgate-pricing.md](core/tollgate-pricing.md) | Pricing: dual dimensions (time + units), products, dynamic adjustment |
-| [tollgate-protocol.md](core/tollgate-protocol.md) | Wire protocol: CBOR messages, settlement flow, negotiation |
+| [tollgate-protocol.md](core/tollgate-protocol.md) | Wire protocol: CBOR messages, interval flow, negotiation |
 | [tollgate-payment-channels.md](core/tollgate-payment-channels.md) | Spilman channels: lifecycle, rollover, netting, wallet trait |
-| [tollgate-bootstrap.md](core/tollgate-bootstrap.md) | Bootstrap tokens: verification, pay-only mode, upgrade path |
-| [tollgate-access-control.md](core/tollgate-access-control.md) | Access control: delivery gates, metering, transit loss resolution |
+| [tollgate-bootstrap.md](core/tollgate-bootstrap.md) | Bootstrap tokens: verification, bootstrap-only mode, upgrade path |
+| [tollgate-access-control.md](core/tollgate-access-control.md) | Access control: delivery gates, access levels, FIPS bloom filter visibility |
+| [tollgate-metering.md](core/tollgate-metering.md) | Metering: counters, calibration, transit loss resolution, peer metrics |
 
 ### Configuration
 
@@ -32,7 +33,7 @@ specific to this implementation and can be read independently.
 | -------- | ----------- |
 | [tollgate-configuration.md](core/tollgate-configuration.md) | YAML configuration reference: products, pricing, channels, peers |
 
-### Network Integration (This Implementation)
+### Network Integration (tollgate-net)
 
 | Document | Description |
 | -------- | ----------- |

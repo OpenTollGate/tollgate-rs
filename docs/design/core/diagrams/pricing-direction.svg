@@ -8,6 +8,23 @@
     text.alabel   { font-size: 11px; }
     text.annot    { font-size: 10px; fill: #909090; font-style: italic; }
     text.caption  { font-size: 11px; fill: #707080; font-style: italic; }
+
+    .bg           { fill: #0d1117; }
+    .callout      { fill: #151520; }
+    .node         { fill: #2e3a5e; stroke: #5080c0; }
+
+    @media (prefers-color-scheme: light) {
+      text          { fill: #1f2328; }
+      text.subtitle, text.nrole, text.plabel, text.annot, text.altlabel,
+      text.elabel, text.mdesc, text.tlabel { fill: #656d76; }
+      text.caption  { fill: #7c8186; }
+      line.sep, line.life { stroke: #d1d9e0; }
+      rect.alt      { stroke: #d1d9e0; }
+      .bg           { fill: #ffffff; }
+      .callout      { fill: #f6f8fa; }
+      .node, rect.node { fill: #ddf4ff; stroke: #0969da; }
+      rect.compute, rect.result { fill: #f6f8fa; }
+    }
   </style>
 
   <defs>
@@ -20,19 +37,19 @@
   </defs>
 
   <!-- Background -->
-  <rect width="720" height="300" fill="#0d1117" rx="8"/>
+  <rect width="720" height="300" rx="8" class="bg"/>
 
   <!-- Title -->
   <text x="360" y="28" text-anchor="middle" class="title">Pricing Direction</text>
   <text x="360" y="46" text-anchor="middle" class="subtitle">The provider charges their own rate — each direction priced independently</text>
 
   <!-- Node A -->
-  <rect x="80" y="90" width="140" height="70" rx="8" fill="#2e3a5e" stroke="#5080c0" stroke-width="2"/>
+  <rect x="80" y="90" width="140" height="70" rx="8" class="node" stroke-width="2"/>
   <text x="150" y="120" text-anchor="middle" class="nlabel">Peer A</text>
   <text x="150" y="140" text-anchor="middle" class="nrole">charges 5 sat/unit</text>
 
   <!-- Node B -->
-  <rect x="500" y="90" width="140" height="70" rx="8" fill="#2e3a5e" stroke="#d0a040" stroke-width="2"/>
+  <rect x="500" y="90" width="140" height="70" rx="8" class="node" stroke="#d0a040" stroke-width="2"/>
   <text x="570" y="120" text-anchor="middle" class="nlabel">Peer B</text>
   <text x="570" y="140" text-anchor="middle" class="nrole">charges 3 sat/unit</text>
 
@@ -47,10 +64,10 @@
   <text x="360" y="170" text-anchor="middle" class="annot">B charges B's rate: 3 sat/unit</text>
 
   <!-- Spilman channel labels below -->
-  <rect x="120" y="195" width="200" height="28" rx="4" fill="#151520" stroke="#d0a040" stroke-width="1"/>
+  <rect x="120" y="195" width="200" height="28" rx="4" class="callout" stroke="#d0a040" stroke-width="1"/>
   <text x="220" y="213" text-anchor="middle" class="alabel" fill="#d0a040">Channel: B&#8594;A (B pays A)</text>
 
-  <rect x="400" y="195" width="200" height="28" rx="4" fill="#151520" stroke="#5080c0" stroke-width="1"/>
+  <rect x="400" y="195" width="200" height="28" rx="4" class="callout" stroke="#5080c0" stroke-width="1"/>
   <text x="500" y="213" text-anchor="middle" class="alabel" fill="#5080c0">Channel: A&#8594;B (A pays B)</text>
 
   <!-- Connection lines from channels to arrows -->

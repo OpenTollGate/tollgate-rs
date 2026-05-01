@@ -7,10 +7,27 @@
     text.annot    { font-size: 10px; fill: #909090; font-style: italic; }
     text.elabel   { font-size: 9px; fill: #b0b0b0; }
     text.caption  { font-size: 11px; fill: #707080; font-style: italic; }
+
+    .bg           { fill: #0d1117; }
+    .callout      { fill: #151520; }
+    .node         { fill: #2e3a5e; stroke: #5080c0; }
+
+    @media (prefers-color-scheme: light) {
+      text          { fill: #1f2328; }
+      text.subtitle, text.nrole, text.plabel, text.annot, text.altlabel,
+      text.elabel, text.mdesc, text.tlabel { fill: #656d76; }
+      text.caption  { fill: #7c8186; }
+      line.sep, line.life { stroke: #d1d9e0; }
+      rect.alt      { stroke: #d1d9e0; }
+      .bg           { fill: #ffffff; }
+      .callout      { fill: #f6f8fa; }
+      .node, rect.node { fill: #ddf4ff; stroke: #0969da; }
+      rect.compute, rect.result { fill: #f6f8fa; }
+    }
   </style>
 
   <!-- Background -->
-  <rect width="780" height="360" fill="#0d1117" rx="8"/>
+  <rect width="780" height="360" rx="8" class="bg"/>
 
   <!-- Title -->
   <text x="390" y="28" text-anchor="middle" class="title">Channel Rollover</text>
@@ -35,7 +52,7 @@
   <text x="560" y="338" text-anchor="middle" class="annot">exhausted</text>
 
   <!-- Old channel bar -->
-  <rect x="120" y="100" width="440" height="40" rx="4" fill="#2e3a5e" stroke="#5080c0" stroke-width="1.5"/>
+  <rect x="120" y="100" width="440" height="40" rx="4" class="node" stroke-width="1.5"/>
 
   <!-- Old channel: filled portion (draining) -->
   <rect x="120" y="100" width="440" height="40" rx="4" fill="#5080c0" opacity="0.3"/>
@@ -57,7 +74,7 @@
   <text x="225" y="125" text-anchor="middle" class="alabel" fill="#80b0e0">Old Channel</text>
 
   <!-- New channel bar -->
-  <rect x="330" y="170" width="390" height="40" rx="4" fill="#1a2e1a" stroke="#50c050" stroke-width="1.5"/>
+  <rect x="330" y="170" width="390" height="40" rx="4" class="callout" stroke="#50c050" stroke-width="1.5"/>
 
   <!-- New channel: inactive portion (waiting) -->
   <rect x="330" y="170" width="230" height="40" rx="4" fill="#50c050" opacity="0.1"/>

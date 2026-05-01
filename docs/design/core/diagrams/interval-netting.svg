@@ -21,13 +21,30 @@
     polygon.meter { fill: #5080c0; }
     polygon.balance { fill: #d0a040; }
     polygon.ack   { fill: #40a060; }
+
+    .bg           { fill: #0d1117; }
+    .callout      { fill: #151520; }
+    .node         { fill: #2e3a5e; stroke: #5080c0; }
+
+    @media (prefers-color-scheme: light) {
+      text          { fill: #1f2328; }
+      text.subtitle, text.nrole, text.plabel, text.annot, text.altlabel,
+      text.elabel, text.mdesc, text.tlabel { fill: #656d76; }
+      text.caption  { fill: #7c8186; }
+      line.sep, line.life { stroke: #d1d9e0; }
+      rect.alt      { stroke: #d1d9e0; }
+      .bg           { fill: #ffffff; }
+      .callout      { fill: #f6f8fa; }
+      .node, rect.node { fill: #ddf4ff; stroke: #0969da; }
+      rect.compute, rect.result { fill: #f6f8fa; }
+    }
   </style>
 
   <!-- Background -->
-  <rect width="720" height="580" fill="#0d1117" rx="8"/>
+  <rect width="720" height="580" rx="8" class="bg"/>
 
   <!-- Title -->
-  <text x="360" y="28" text-anchor="middle" class="title">Settlement with Netting</text>
+  <text x="360" y="28" text-anchor="middle" class="title">Interval Netting</text>
   <text x="360" y="46" text-anchor="middle" class="subtitle">Only the net debtor signs — one signature per interval</text>
 
   <!-- Node headers -->
@@ -75,9 +92,9 @@
   <!-- Phase separator -->
   <line x1="70" y1="345" x2="660" y2="345" class="sep"/>
 
-  <!-- Phase 3: Settlement -->
+  <!-- Phase 3: Balance Update -->
   <text x="40" y="378" text-anchor="middle" class="plabel">Phase 3</text>
-  <text x="40" y="394" text-anchor="middle" class="annot">Settle</text>
+  <text x="40" y="394" text-anchor="middle" class="annot">Update</text>
 
   <!-- B → A BalanceUpdate -->
   <line x1="540" y1="390" x2="182" y2="390" class="balance"/>
@@ -85,10 +102,10 @@
   <text x="360" y="383" text-anchor="middle" class="alabel" fill="#d0a040">BalanceUpdate</text>
   <text x="360" y="407" text-anchor="middle" class="annot">channel B&#8594;A, +3 sats (signed)</text>
 
-  <!-- A → B SettlementAck -->
+  <!-- A → B BalanceAck -->
   <line x1="180" y1="435" x2="538" y2="435" class="ack"/>
   <polygon points="536,430 546,435 536,440" class="ack"/>
-  <text x="360" y="428" text-anchor="middle" class="alabel" fill="#40a060">SettlementAck</text>
+  <text x="360" y="428" text-anchor="middle" class="alabel" fill="#40a060">BalanceAck</text>
 
   <!-- Phase separator -->
   <line x1="70" y1="460" x2="660" y2="460" class="sep"/>

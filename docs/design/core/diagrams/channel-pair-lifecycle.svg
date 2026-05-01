@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 420" font-family="monospace" font-size="12">
+  <style>
+    text          { fill: #e0e0e0; }
+    text.title    { font-size: 16px; font-weight: bold; }
+    text.subtitle { font-size: 12px; fill: #909090; }
+    text.slabel   { font-size: 13px; font-weight: bold; }
+    text.sdesc    { font-size: 10px; fill: #909090; }
+    text.elabel   { font-size: 9px; fill: #b0b0b0; }
+    text.caption  { font-size: 11px; fill: #707080; font-style: italic; }
+
+    .bg           { fill: #0d1117; }
+    .callout      { fill: #151520; }
+    .node         { fill: #2e3a5e; stroke: #5080c0; }
+
+    @media (prefers-color-scheme: light) {
+      text          { fill: #1f2328; }
+      text.subtitle, text.nrole, text.plabel, text.annot, text.altlabel,
+      text.elabel, text.mdesc, text.tlabel, text.sdesc { fill: #656d76; }
+      text.caption  { fill: #7c8186; }
+      line.sep, line.life { stroke: #d1d9e0; }
+      rect.alt      { stroke: #d1d9e0; }
+      .bg           { fill: #ffffff; }
+      .callout      { fill: #f6f8fa; }
+      .node, rect.node { fill: #ddf4ff; stroke: #0969da; }
+      rect.compute, rect.result { fill: #f6f8fa; }
+    }
+  </style>
+
+  <defs>
+    <marker id="ag" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0,0 7,2.5 0,5" fill="#50c050"/>
+    </marker>
+    <marker id="ab" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0,0 7,2.5 0,5" fill="#5080c0"/>
+    </marker>
+    <marker id="ay" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0,0 7,2.5 0,5" fill="#d0a040"/>
+    </marker>
+    <marker id="agray" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0,0 7,2.5 0,5" fill="#909090"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="420" rx="8" class="bg"/>
+
+  <!-- Title -->
+  <text x="400" y="28" text-anchor="middle" class="title">Channel Pair Lifecycle</text>
+  <text x="400" y="46" text-anchor="middle" class="subtitle">States per Spilman channel</text>
+
+  <!-- States -->
+  <rect x="40" y="140" width="140" height="55" rx="8" class="callout" stroke="#5080c0" stroke-width="2"/>
+  <text x="110" y="165" text-anchor="middle" class="slabel" fill="#80b0e0">Funding</text>
+  <text x="110" y="183" text-anchor="middle" class="sdesc">2-of-2 multisig</text>
+
+  <rect x="220" y="140" width="140" height="55" rx="8" class="callout" stroke="#50c050" stroke-width="2"/>
+  <text x="290" y="165" text-anchor="middle" class="slabel" fill="#80e080">Active</text>
+  <text x="290" y="183" text-anchor="middle" class="sdesc">balance updates flow</text>
+
+  <rect x="400" y="140" width="140" height="55" rx="8" class="callout" stroke="#5080c0" stroke-width="2"/>
+  <text x="470" y="165" text-anchor="middle" class="slabel" fill="#80b0e0">RollingOver</text>
+  <text x="470" y="183" text-anchor="middle" class="sdesc">old + new overlap</text>
+
+  <rect x="580" y="140" width="140" height="55" rx="8" class="callout" stroke="#d0a040" stroke-width="2"/>
+  <text x="650" y="165" text-anchor="middle" class="slabel" fill="#e0c060">Settling</text>
+  <text x="650" y="183" text-anchor="middle" class="sdesc">submit to mint</text>
+
+  <rect x="580" y="290" width="140" height="55" rx="8" class="callout" stroke="#909090" stroke-width="2"/>
+  <text x="650" y="315" text-anchor="middle" class="slabel" fill="#b0b0b0">Closed</text>
+  <text x="650" y="333" text-anchor="middle" class="sdesc">proofs distributed</text>
+
+  <!-- Transitions -->
+  <!-- Funding → Active -->
+  <line x1="180" y1="167" x2="218" y2="167" stroke="#50c050" stroke-width="1.5" marker-end="url(#ag)"/>
+  <text x="200" y="158" text-anchor="middle" class="elabel">funded</text>
+
+  <!-- Active → RollingOver -->
+  <line x1="360" y1="167" x2="398" y2="167" stroke="#5080c0" stroke-width="1.5" marker-end="url(#ab)"/>
+  <text x="380" y="158" text-anchor="middle" class="elabel">~80%</text>
+
+  <!-- RollingOver → Settling -->
+  <line x1="540" y1="167" x2="578" y2="167" stroke="#d0a040" stroke-width="1.5" marker-end="url(#ay)"/>
+  <text x="560" y="158" text-anchor="middle" class="elabel">old exhausted</text>
+
+  <!-- Settling → Closed (down) -->
+  <line x1="650" y1="195" x2="650" y2="288" stroke="#909090" stroke-width="1.5" marker-end="url(#agray)"/>
+  <text x="660" y="245" text-anchor="start" class="elabel">mint settled</text>
+
+  <!-- Active → Settling (cooperative close, dashed, curves over RollingOver) -->
+  <path d="M 290,195 Q 290,260 580,235" fill="none" stroke="#d0a040" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#ay)"/>
+  <text x="430" y="252" text-anchor="middle" class="elabel">cooperative close</text>
+
+  <!-- Zero-price shortcut: dashed arrow into Active -->
+  <text x="110" y="248" text-anchor="middle" class="elabel">zero-price:</text>
+  <text x="110" y="261" text-anchor="middle" class="elabel">skip Funding</text>
+  <path d="M 110,228 Q 165,200 220,180" fill="none" stroke="#50c050" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#ag)"/>
+
+  <!-- Caption -->
+  <text x="400" y="395" text-anchor="middle" class="caption">RollingOver is the overlap period: new channel funded, old still draining until exhausted</text>
+</svg>

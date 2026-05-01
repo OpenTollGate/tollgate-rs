@@ -27,7 +27,7 @@ All messages use **CBOR** ([RFC 8949](https://www.rfc-editor.org/rfc/rfc8949)) e
 - TollGate messages contain variable-length strings (mint URLs, units) and nested structures (product lists). Binary encoding for these is complex and fragile.
 - FIPS binary encoding is optimized for fixed-structure, high-frequency, low-latency packets (TreeAnnounce, MMP reports). TollGate messages are infrequent (every 5s) and don't need that level of optimization.
 
-### Message Framing
+### Message Structure
 
 Each TollGate message is a CBOR map with a `type` field (integer) as discriminator:
 
@@ -45,7 +45,58 @@ Field keys are small integers (not strings) for compactness:
 | 0 | `type` | All messages |
 | 1-9 | Type-specific fields | Varies |
 
-When carried over a stream transport (TCP, FIPS session), each message is prefixed with a 2-byte little-endian length. Datagram transports use natural message boundaries.
+How messages are framed on the wire depends on the transport — see [Transports](#transports).
+
+---
+
+## Transports
+
+The protocol is transport-agnostic, but each transport has a concrete spec for how CBOR messages are framed, exchanged, and how peers detect failure. v1 defines two transports: **HTTP polling** and **WebSocket**. Both run on default port **4747**.
+
+### HTTP polling
+
+Suitable for open access (public hotspots) and constrained clients. Stateless on the wire — each request is a complete bidirectional exchange.
+
+**Endpoint:** `POST /tollgate/v1/exchange`
+
+**Content type:** `application/cbor` for both request and response.
+
+**Framing:** request and response bodies each contain zero or more CBOR messages, each prefixed with a 2-byte little-endian length:
+
+```
++------------+-----------------+------------+-----------------+----
+|  len (LE)  |  CBOR message   |  len (LE)  |  CBOR message   | ...
++------------+-----------------+------------+-----------------+----
+   2 bytes      <len> bytes       2 bytes      <len> bytes
+```
+
+An empty body is valid (no messages queued / nothing to send).
+
+**Bidirectionality:** every POST is a full exchange. The request body carries messages from the client to the server; the response body carries messages the server has queued for the client since the last poll. There is no separate inbox endpoint.
+
+**Identity:** the sender's pubkey is established by the Announce message (always the first message of a new session). The server tracks per-pubkey state keyed by that pubkey. There is no separate authentication header — TollGate runs on top of whatever transport-layer authentication the deployment uses (none, by default, in IP peering).
+
+**Polling cadence:** the client polls at the negotiated metering interval (default: 5 seconds). When the client knows it is expecting an immediate response (e.g., during initial channel setup), it may poll more aggressively until the response arrives.
+
+**Failure detection:** the server marks a peer disconnected if no poll is received within `3 × metering_interval`. The client detects server failure when an HTTP request fails (network error, 5xx). On either case, both sides clean up channel state per [Reboot / State Loss](tollgate-payment-channels.md#reboot--state-loss).
+
+**Reconnection:** a new Announce starts a fresh session. If the server receives a duplicate-pubkey reconnection while it still holds state for that pubkey, the friendly path (sharing back channel state) applies — see the reboot section above.
+
+### WebSocket
+
+Suitable for higher-frequency exchanges, infrastructure peering, and lower-latency operation.
+
+**Endpoint:** `GET /tollgate/v1/ws` (HTTP Upgrade to WebSocket)
+
+**Framing:** each WebSocket binary frame contains exactly one CBOR message. No length prefix — the frame boundary delimits the message. Text frames are not used.
+
+**Bidirectionality:** native. Either side may send a message at any time.
+
+**Identity:** the client sends Announce as the first frame after connection open. The server replies with its own Announce.
+
+**Failure detection:** WebSocket close frame, missing ping/pong (default: 30s ping interval, 90s timeout), or TCP-level disconnect. Both sides should send Disconnect (CBOR) before closing the WebSocket where possible, so the peer knows it was orderly.
+
+**Reconnection:** opening a new WebSocket starts a fresh session. Same duplicate-pubkey reconnection path as HTTP polling.
 
 ---
 
@@ -59,11 +110,11 @@ When carried over a stream transport (TCP, FIPS session), each message is prefix
 | 0x03 | ChannelReady | Bidirectional | Confirm Spilman channel funded and active |
 | 0x04 | MeteringReport | Bidirectional | Unsigned resource stats for this interval |
 | 0x05 | BalanceUpdate | Net debtor → creditor | Signed Spilman update for the net amount owed |
-| 0x06 | SettlementAck | Net creditor → debtor | Confirm balance update accepted |
+| 0x06 | BalanceAck | Net creditor → debtor | Confirm balance update accepted |
 | 0x07 | BootstrapToken | Peer → Provider | Regular Cashu token (pre-channel bootstrap) |
 | 0x08 | BootstrapAck | Provider → Peer | Acknowledge bootstrap token |
-| 0x09 | RolloverInit | Leader → Follower | New channel alongside exhausting one |
-| 0x0A | RolloverReady | Follower → Leader | New channel funded, ready |
+| 0x09 | RolloverInit | Sender → Receiver | New channel alongside exhausting one |
+| 0x0A | RolloverReady | Receiver → Sender | New channel funded, ready |
 | 0x0B | ChannelClose | Either → Either | Request cooperative close |
 | 0x0C | CloseAck | Either → Either | Acknowledge close |
 | 0x0D | Reject | Either → Either | Reject proposal (with reason) |
@@ -75,7 +126,7 @@ When carried over a stream transport (TCP, FIPS session), each message is prefix
 
 ### 0x00 Announce
 
-First message sent by each peer after network-layer authentication. Identifies the sender as a TollGate node and declares the protocol version.
+First message sent by each peer after network-layer authentication. Identifies the sender as a TollGate node, declares the protocol version, and signals which optional capabilities it supports.
 
 ```cbor
 {
@@ -83,10 +134,22 @@ First message sent by each peer after network-layer authentication. Identifies t
   1: <protocol_version>,           // u8 — current: 1
   2: <pubkey>,                     // bytes(33) — sender's compressed secp256k1 public key
   3: <unit>,                       // text — "bytes", "wh", "ml", etc.
+  4: <capabilities>,               // u32 — bitfield of supported capabilities
 }
 ```
 
 Both peers send Announce. If versions don't match, the peer with the lower version sends Reject. No other message exchange occurs before Announce.
+
+**Capability bits** (field 4):
+
+| Bit | Name | Meaning |
+|-----|------|---------|
+| `0x01` | SPILMAN | Peer can fund and sign Spilman channels. If unset, the peer is bootstrap-only — see [tollgate-bootstrap.md](tollgate-bootstrap.md). |
+| `0x02`–`0x80000000` | reserved | Must be zero in v1. Reserved for future capabilities (e.g., FSP transport, batch settlement). |
+
+Bootstrap-token support, zero-price peering, and channel rollover are universal in v1 and don't need capability bits — they fall out of the existing message set.
+
+A peer with SPILMAN unset will not send Accept with channel funding; the session runs entirely on BootstrapToken messages. A SPILMAN-capable peer connecting to a bootstrap-only peer skips the receiving-channel funding (no point — the peer never charges) and only opens its own outgoing channel if it intends to charge for delivery to the bootstrap-only peer.
 
 ### 0x01 PriceSheet
 
@@ -113,7 +176,7 @@ Sent by each peer after Announce. Contains one or more product offerings with pe
     },
     ...
   ],
-  2: [<min_interval_ms>, <max_interval_ms>],  // [u32, u32] — settlement interval range
+  2: [<min_interval_ms>, <max_interval_ms>],  // [u32, u32] — metering interval range
 }
 ```
 
@@ -131,7 +194,7 @@ Sent by the peer to accept the price sheet. References the chosen product and mi
 }
 ```
 
-The settlement interval is resolved deterministically by both sides:
+The metering interval is resolved deterministically by both sides:
 ```
 overlap = max(A.min, B.min) .. min(A.max, B.max)
 interval = (overlap.start + overlap.end) / 2
@@ -161,7 +224,7 @@ All MeteringReport values are **cumulative since session start** (the ChannelRea
 
 ### 0x04 MeteringReport
 
-Sent by both peers at each settlement interval. Contains **unsigned** resource stats only — no balance signature. This exchange allows both sides to compute the same cost and determine the net.
+Sent by both peers at each metering interval. Contains **unsigned** resource stats only — no balance signature. This exchange allows both sides to compute the same cost and determine the net.
 
 ```cbor
 {
@@ -196,17 +259,17 @@ Sent by the **net debtor** after both MeteringReports have been exchanged. Conta
   1: <channel_id>,                 // bytes(32) — the debtor's Spilman channel
   2: <cumulative_balance>,         // u64 — new cumulative balance on this channel
   3: <balance_signature>,          // bytes(64) — Schnorr signature over balance update
-  4: <net_amount>,                 // u64 — the net amount being settled this interval
+  4: <net_amount>,                 // u64 — the net amount being charged this interval
 }
 ```
 
-### 0x06 SettlementAck
+### 0x06 BalanceAck
 
 Sent by the creditor to confirm the balance update.
 
 ```cbor
 {
-  0: 0x06,                         // type: SettlementAck
+  0: 0x06,                         // type: BalanceAck
   1: <channel_id>,                 // bytes(32)
   2: <accepted_balance>,           // u64 — the cumulative balance we acknowledge
 }
@@ -228,16 +291,16 @@ Sent when a peer can't reach a mint and needs to pay with a regular Cashu token 
 ```cbor
 {
   0: 0x08,                         // type: BootstrapAck
-  1: <status>,                     // u8 — 0 = accepted (pending verification), 1 = rejected
+  1: <status>,                     // u8 — 0 = accepted (verified), 1 = rejected
   2: <reason>,                     // text | null — rejection reason
 }
 ```
 
-When offline, the provider accepts the token into a pending buffer (status=0) but cannot verify it until mint connectivity returns.
+The provider must verify the token with the mint before sending `accepted`. If the mint is unreachable, the response is `rejected` with reason "mint unreachable" — there is no pending / trust-on-faith mode. See [tollgate-bootstrap.md](tollgate-bootstrap.md) for the full bootstrap policy.
 
 ### 0x09 RolloverInit
 
-Sent by the channel leader (lowest pubkey) when a channel approaches exhaustion (default: 80% capacity used).
+Sent by the channel sender (the funder) when its outgoing channel approaches exhaustion (default: 80% capacity used). Each channel does carry shared state (cumulative balance, signatures), but rollover is initiated by the funder alone — only the party putting up new funds needs to decide when to do it. There is no leader/follower coordination across the two channels in a peer pair.
 
 ```cbor
 {
@@ -303,7 +366,7 @@ General-purpose rejection for any proposal.
 | 0x01 | Price too high |
 | 0x02 | Mint not accepted |
 | 0x03 | Unit not accepted |
-| 0x04 | Settlement interval out of range |
+| 0x04 | Metering interval out of range |
 | 0x05 | Channel funding invalid |
 | 0x06 | Balance verification failed |
 | 0x07 | Transit loss tolerance exceeded |
@@ -326,6 +389,8 @@ Orderly teardown of the entire TollGate relationship.
 
 ## Message Sequences
 
+Both sides send PriceSheet and Accept because each charges independently. The interval flow is deterministic: both sides have the same metering data and pricing, so they compute the same net independently.
+
 ### Normal Connection (Peer Already Online)
 
 ![Normal Connection Sequence](diagrams/connection-sequence.svg)
@@ -333,8 +398,8 @@ Orderly teardown of the entire TollGate relationship.
 
 ```
   1. Identity
-     A → B: Announce (v1, pubkey_A)
-     B → A: Announce (v1, pubkey_B)
+     A → B: Announce (v1, pubkey_A, capabilities)
+     B → A: Announce (v1, pubkey_B, capabilities)
 
   2. Pricing
      A → B: PriceSheet (products, prices)
@@ -346,106 +411,94 @@ Orderly teardown of the entire TollGate relationship.
      B → A: ChannelReady (B→A)
      A → B: ChannelReady (A→B)
 
-  4. Settle (repeat every 5s)
+  4. Settle (repeat every metering interval)
      A → B: MeteringReport (cumulative delivered, received)
      B → A: MeteringReport (cumulative delivered, received)
      [both compute net]
      debtor → creditor: BalanceUpdate (signed)
-     creditor → debtor: SettlementAck
+     creditor → debtor: BalanceAck
 ```
 </details>
 
-```
-Peer B connects to Node A (already authenticated by network layer)
-
-A → B: Announce (protocol v1, pubkey_A)
-B → A: Announce (protocol v1, pubkey_B)
-
-A → B: PriceSheet (A's products, pricing, interval range)
-B → A: PriceSheet (B's products, pricing, interval range)
-B → A: Accept (chosen product_id + option_id from A's sheet, Spilman funding for B→A channel)
-A → B: Accept (chosen product_id + option_id from B's sheet, Spilman funding for A→B channel)
-B → A: ChannelReady (B→A channel)
-A → B: ChannelReady (A→B channel)
-
-[metering begins — both channels active]
-
-every <interval>:
-  A → B: MeteringReport (cumulative delivered, received, elapsed)
-  B → A: MeteringReport (cumulative delivered, received, elapsed)
-
-  [both compute net: who owes whom and how much]
-
-  debtor → creditor: BalanceUpdate (signed, net amount on debtor's channel)
-  creditor → debtor: SettlementAck
-```
-
-Both sides send PriceSheet and Accept because each charges independently. The settlement flow is deterministic: both sides have the same metering data and pricing, so they compute the same net independently.
-
 ### Bootstrap Connection (Peer Offline, No Mint)
 
-```
-A → B: Announce
-B → A: Announce
-
-A → B: PriceSheet
-B → A: BootstrapToken (regular Cashu token)
-A → B: BootstrapAck (status=accepted, pending verification)
-
-[A grants B limited resource — enough to reach a mint]
-
-B reaches mint, creates Spilman funding:
-B → A: PriceSheet
-A → B: Accept (with Spilman funding)
-B → A: Accept (with Spilman funding)
-... continues as normal connection
-```
-
-### Price Change at Settlement
+![Bootstrap Connection](diagrams/bootstrap-upgrade.svg)
+<details><summary>Text version</summary>
 
 ```
-A wants to raise price for B:
+  1. Bootstrap (B has no mint path)
+     A → B: Announce
+     B → A: Announce
+     A → B: PriceSheet
+     B → A: BootstrapToken (regular Cashu token)
+     A → B: BootstrapAck (status=accepted)
+     [A grants B metered access — enough for B to reach a mint]
 
-A → B: MeteringReport (fields 4-5: new_product_id + new_pricing)
-B → A: MeteringReport (acknowledges by continuing)
-
-[next interval uses new price]
-
-OR:
-
-A → B: MeteringReport (fields 4-5: new_product_id + new_pricing)
-B → A: ChannelClose (reason=price_rejected)
-A → B: CloseAck
-
-[channel settles, B may renegotiate or disconnect]
+  2. Upgrade to Spilman (B now has mint connectivity)
+     B → A: PriceSheet
+     A → B: Accept (with Spilman funding)
+     B → A: Accept (with Spilman funding)
+     B → A: ChannelReady
+     A → B: ChannelReady
+     [Spilman channels active — remaining bootstrap balance abandoned]
 ```
+</details>
+
+### Price Change at Metering Interval
+
+![Price Change](diagrams/price-change.svg)
+<details><summary>Text version</summary>
+
+```
+  A wants to raise price for B:
+
+  A → B: MeteringReport (fields 4-5: new_product_id + new_pricing)
+
+  alt: ACCEPT (continue)
+       B → A: MeteringReport (continues normally)
+       [next interval uses new price]
+
+  alt: REJECT (close)
+       B → A: ChannelClose (reason=price_rejected)
+       A → B: CloseAck
+       [channel settles, B may renegotiate or disconnect]
+```
+</details>
 
 ### Channel Rollover
 
-```
-Channel B→A at 80% capacity:
+![Channel Rollover](diagrams/rollover-sequence.svg)
+<details><summary>Text version</summary>
 
-Leader → Follower: RolloverInit (old channel + new funding)
-Follower → Leader: RolloverReady (new channel ID)
-
-[old channel continues draining to 100%]
-[once exhausted, charges continue on new channel]
-[old channel settles with mint when possible]
 ```
+  Channel B→A at 80% capacity:
+
+  Sender → Receiver: RolloverInit (old channel + new funding)
+  Receiver → Sender: RolloverReady (new channel ID)
+
+  [old channel continues draining to 100%]
+  [once exhausted, charges continue on new channel]
+  [old channel settles with mint when possible]
+```
+</details>
 
 ### Zero-Price Peering
 
-```
-A → B: Announce
-B → A: Announce
+![Zero-Price Peering](diagrams/zero-price-peering.svg)
+<details><summary>Text version</summary>
 
-A → B: PriceSheet (all prices = 0)
-B → A: PriceSheet (all prices = 0)
-B → A: Accept (no Spilman funding — zero price)
-A → B: Accept (no Spilman funding — zero price)
-
-[delivery active, no metering, no settlement messages]
 ```
+  A → B: Announce
+  B → A: Announce
+
+  A → B: PriceSheet (all prices = 0)
+  B → A: PriceSheet (all prices = 0)
+  B → A: Accept (no Spilman funding — zero price)
+  A → B: Accept (no Spilman funding — zero price)
+
+  [delivery active, no metering, no balance update messages]
+```
+</details>
 
 ---
 
@@ -470,13 +523,13 @@ Typical message sizes (CBOR encoded):
 | ChannelReady | ~40 bytes |
 | MeteringReport | ~50 bytes |
 | BalanceUpdate | ~110 bytes |
-| SettlementAck | ~40 bytes |
+| BalanceAck | ~40 bytes |
 | BootstrapToken | Variable (Cashu token size) |
 | RolloverInit | ~200 bytes (Spilman funding) |
 | ChannelClose | ~110 bytes |
 | Disconnect | ~10 bytes |
 
-These are infrequent messages (every 5s for settlement, one-time for setup). CBOR overhead is negligible compared to the resource being metered.
+These are infrequent messages (every 5s at the metering interval, one-time for setup). CBOR overhead is negligible compared to the resource being metered.
 
 ---
 
@@ -485,15 +538,16 @@ These are infrequent messages (every 5s for settlement, one-time for setup). CBO
 | Decision | Resolution | Rationale |
 |----------|-----------|-----------|
 | Encoding | CBOR (RFC 8949) | Compact, self-describing, handles variable strings/arrays, cross-platform |
-| Framing | 2-byte LE length prefix (stream) or datagram boundaries | Simple, matches FIPS pattern |
+| Framing | Per-transport — HTTP polling uses 2-byte LE length prefix; WebSocket uses frame boundaries | Each transport already has a natural boundary mechanism; reuse it |
 | Field keys | Small integers, not strings | Compact, avoids string overhead in CBOR |
 | Message discrimination | Integer `type` field (key 0) | Simple, extensible |
 | First message | Announce (protocol version + pubkey) | Identifies TollGate capability before negotiation |
 | Mint option ID | SHA256(mint_url \| mint_unit) | Unambiguous reference to chosen pricing option |
 | Metering counters | Cumulative since session start, not deltas | Self-healing: lost/duplicated reports don't corrupt accounting |
-| Settlement flow | MeteringReport (both) → BalanceUpdate (net debtor only) → Ack | Deterministic netting, only net amount moves |
+| Interval flow | MeteringReport (both) → BalanceUpdate (net debtor only) → Ack | Deterministic netting, only net amount moves |
 | Price changes | Piggybacked on MeteringReport (fields 4-5) | No extra round-trips |
 | Zero-price mode | Accept without funding, skip metering | Simplest path for free peering |
-| Channel leadership | Lowest pubkey leads rollover | Deterministic, avoids coordination races |
+| Channel ownership | Each peer manages its own outgoing channel | Channels carry shared state, but rollover is initiated by the funder alone — only the party putting up new funds decides when to do it |
+| Capability signaling | u32 bitfield in Announce (field 4) | Lets peers know up front whether the other side can run Spilman; extensible via reserved bits |
 | Versioning | Single byte in Announce, must-match | Simple for v1, can add negotiation later |
 | Reject | General-purpose with reason codes | One message type handles all rejection scenarios |

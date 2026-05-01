@@ -10,7 +10,7 @@ Pricing has two dimensions, both always present:
 - **Time** — price per second of being an active peer
 - **Units** — price per unit delivered
 
-The operator sets either dimension to zero for simpler models. The cost for each settlement interval is:
+The operator sets either dimension to zero for simpler models. The cost for each metering interval is:
 
 ```
 cost_scaled = (elapsed_seconds × price_per_second) + (units_delivered × price_per_unit)
@@ -162,7 +162,7 @@ extensions: []
 
   B → A: Accept (product_id, option_id, funding)
 
-  ─── at each settlement interval ───
+  ─── at each metering interval ───
   A → B: MeteringReport (+ optional new prices)
          B continues = accepts new price
          B sends ChannelClose = rejects
@@ -192,7 +192,7 @@ The adjustment can be the identity function (no change) for simple deployments �
 2. Peer B connects
 3. Node A sends B a peer-specific price sheet
 4. B accepts (opens Spilman channel) or disconnects
-5. At each settlement interval, A may send updated prices
+5. At each metering interval, A may send updated prices
 6. B sees new price and must accept before next interval, or channel closes
 ```
 
@@ -209,7 +209,7 @@ B: accepts (opens channel) or disconnects
 
 **One message. Zero negotiation.**
 
-The only negotiable parameter is the **settlement interval**, because it affects both sides. Both peers send their acceptable range. The actual interval is the **average of the overlapping portion**:
+The only negotiable parameter is the **metering interval**, because it affects both sides. Both peers send their acceptable range. The actual interval is the **average of the overlapping portion**:
 
 ```
 A's range: [3s, 10s]
@@ -222,11 +222,11 @@ If the ranges don't overlap, negotiation fails. This is deterministic — both s
 
 ### Price Changes
 
-Prices can change at each settlement interval. The provider includes updated prices in the settlement message. The peer must:
+Prices can change at each metering interval. The provider includes updated prices in the MeteringReport. The peer must:
 - **Accept** — continue with new prices at the next interval
 - **Reject** — close the channel (can renegotiate or disconnect)
 
-There is no grace period. The new price takes effect at the next interval. Each settlement is also a renegotiation opportunity — the peer always has the option to walk away.
+There is no grace period. The new price takes effect at the next interval. Each metering interval is also a renegotiation opportunity — the peer always has the option to walk away.
 
 ---
 
@@ -310,7 +310,7 @@ Custom function (config DSL, Lua, WASM) computes price from all available inputs
 
 ### When Prices Change
 
-Prices update **at settlement intervals** (default: every 5 seconds). The updated price is piggybacked on the settlement message — no extra round-trips. This is the natural renegotiation point.
+Prices update **at metering intervals** (default: every 5 seconds). The updated price is piggybacked on the MeteringReport — no extra round-trips. This is the natural renegotiation point.
 
 ---
 
@@ -367,7 +367,7 @@ peer_overrides:
   "npub1ghi...":
     blocked: true                  # refuse service
 
-settlement:
+metering:
   default_interval_ms: 5000
 ```
 
@@ -382,11 +382,11 @@ settlement:
 | Products per peer | One at a time | Keeps metering simple, no product interaction |
 | Price communication | Base catalog + per-peer price sheet | Public base, private adjustments |
 | Negotiation | Take-it-or-leave-it | Simplest; mesh provides alternatives |
-| Price changes | At settlement intervals, piggybacked | No extra round-trips |
-| Price commitment | New price at next interval; peer accepts or closes | Each settlement = renegotiation opportunity |
+| Price changes | At metering intervals, piggybacked | No extra round-trips |
+| Price commitment | New price at next interval; peer accepts or closes | Each metering interval = renegotiation opportunity |
 | Price discovery | Direct peers only, no propagation | Future: profit-aware routing |
 | Currency arbitrage | Feature — operators discount preferred mints | Market efficiency |
 | Negative pricing | Signed price fields from day one | Core economic mechanism |
 | Product extensions | Opaque CBOR blob for implementation-specific fields | Core hashes but doesn't interpret |
-| Settlement interval | Both peers send acceptable range; actual = average of overlap | Deterministic, no extra round-trip, both sides agree |
+| Metering interval | Both peers send acceptable range; actual = average of overlap | Deterministic, no extra round-trip, both sides agree |
 | Product identity | `SHA256(pricing_scale \| pricing \| extensions)` | Any change detected with one hash comparison |

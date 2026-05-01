@@ -7,7 +7,7 @@ This document specifies how TollGate handles regular Cashu token payments — th
 Bootstrap tokens are regular Cashu ecash tokens (not Spilman channels) used in two scenarios:
 
 1. **Channel setup**: A peer needs to pay to get online and reach a mint so it can fund a Spilman channel. The bootstrap token is a one-time payment to establish connectivity.
-2. **Pay-only mode**: A constrained peer runs its entire session on regular tokens, never upgrading to Spilman channels. The peer sends tokens to top up as balance is consumed.
+2. **Bootstrap-only mode**: A peer runs its entire session on regular tokens, never upgrading to Spilman channels. The peer sends tokens to top up as balance is consumed.
 
 In both cases, the same mechanism applies: the peer sends a token, the provider verifies it with the mint, and grants metered service until the token value is consumed.
 
@@ -24,7 +24,7 @@ Bootstrap is needed when the connecting peer **cannot fund a Spilman channel** �
 | Peer has mint connectivity through other peers | No | Proceed directly to Spilman channel funding |
 | Peer's first connection, no other peers | Yes | Bootstrap token gets peer online |
 | All other peer connections have failed | Yes | Bootstrap token is the only payment option |
-| Peer doesn't support Spilman (pay-only device) | Yes | Entire session runs on bootstrap tokens |
+| Peer doesn't support Spilman (bootstrap-only device) | Yes | Entire session runs on bootstrap tokens |
 | Both peers have mint connectivity | No | Proceed directly to Spilman |
 
 ---
@@ -85,12 +85,12 @@ This is a strict policy: **no pay, no service**. The provider does not grant acc
 
 ## Balance Tracking
 
-Once a bootstrap token is accepted, the provider tracks the peer's balance internally **at scaled precision** (not whole sats). The balance is stored in scaled units (milli-sats with pricing_scale=1000) so that sub-unit costs accumulate correctly across settlement intervals without rounding away small amounts.
+Once a bootstrap token is accepted, the provider tracks the peer's balance internally **at scaled precision** (not whole sats). The balance is stored in scaled units (milli-sats with pricing_scale=1000) so that sub-unit costs accumulate correctly across metering intervals without rounding away small amounts.
 
 ```
 token_value_scaled = token_value_sats x pricing_scale
 
-each settlement interval:
+each metering interval:
   cost_scaled = (elapsed_seconds x price_per_second) + (units_delivered x price_per_unit)
   balance_scaled = balance_scaled - cost_scaled
 
@@ -106,9 +106,9 @@ The balance never rounds to whole sats between intervals — sub-sat costs accum
 
 ### Usage Reporting
 
-Both sides send **MeteringReport** at each settlement interval — resources flow in both directions even in bootstrap mode. The provider reports units delivered to the peer (what the peer is being charged for), and the peer reports units delivered to the provider (for calibration).
+Both sides send **MeteringReport** at each metering interval — resources flow in both directions even in bootstrap mode. The provider reports units delivered to the peer (what the peer is being charged for), and the peer reports units delivered to the provider (for calibration).
 
-However, only the provider's direction has pricing applied against the bootstrap balance. The pay-only peer's delivery price **must be zero** (or negative) — because the provider has no way to pay the peer (the peer can't receive Spilman channels). This means pay-only mode is only viable for peers that provide delivery for free — typically leaf nodes / consumers that just want access, not relay nodes charging for transit.
+However, only the provider's direction has pricing applied against the bootstrap balance. The bootstrap-only peer's delivery price **must be zero** (or negative) — because the provider has no way to pay the peer (the peer can't receive Spilman channels). This means bootstrap-only mode is only viable for peers that provide delivery for free — typically leaf nodes / consumers that just want access, not relay nodes charging for transit.
 
 ### Balance Exhaustion
 
@@ -168,58 +168,45 @@ A smart peer monitors the MeteringReports from the provider and sends a new toke
      B → A: ChannelReady
      A → B: ChannelReady
 
-     Spilman channels active — remaining bootstrap balance credited
+     Spilman channels active — remaining bootstrap balance abandoned
 ```
 </details>
 
-Once a peer has mint connectivity (gained through the bootstrap-funded connection), it can upgrade to Spilman channels:
+Once a peer has mint connectivity (gained through the bootstrap-funded connection), it upgrades by sending Accept with channel funding (see the diagram above).
 
-```
-[Bootstrap session active, peer is online]
+The remaining bootstrap balance is **abandoned** at upgrade — the provider keeps it. This is acceptable because the bootstrap amount is meant to be small (sized for channel setup, not for sustained use), and any residual value is bounded by that size. Clients that plan to upgrade should size their bootstrap token accordingly.
 
-B → A: Accept (product_id, option_id, channel funding)
-A → B: Accept (product_id, option_id, channel funding)
-B → A: ChannelReady
-A → B: ChannelReady
-
-[Spilman channels now active — remaining bootstrap balance applied as credit]
-```
-
-The remaining bootstrap balance is **carried over as a credit** toward the first Spilman settlement intervals. The provider tracks the remaining bootstrap balance internally and applies it before charging the Spilman channel:
-
-1. At upgrade time, the provider notes the remaining bootstrap balance (e.g., 40 sats remaining)
-2. Spilman channels are established and metering begins
-3. For the first N settlement intervals, the provider deducts costs from the bootstrap credit before signing BalanceUpdates on the Spilman channel
-4. Once the credit is consumed, normal Spilman settlement proceeds
-
-This is purely internal bookkeeping on the provider side — no protocol change is needed. The peer benefits from not losing pre-paid value, and the provider's accounting remains consistent.
+> **Future:** carrying the remaining balance over as a credit toward the first Spilman metering intervals would avoid the small loss, but requires the credit to be tracked deterministically by both sides (otherwise the per-interval netting computation diverges). A possible mechanism is a one-time `BootstrapCredit` message announcing the amount, with both sides tracking it identically across intervals. Out of scope for v1.
 
 ---
 
-## Pay-Only Mode
+## Bootstrap-only Mode
 
-Some devices only support sending regular Cashu tokens — no Spilman channel management, no ECDH, no balance signing. These are **pay-only** clients.
+A bootstrap-only client pays for received resources via bootstrap tokens only — it cannot fund a Spilman channel for outgoing payment (no ECDH, no balance signing capability). The entire session runs on BootstrapToken messages. **Spilman channels are highly recommended** when the client supports them, but bootstrap-only is a fully supported lifecycle for devices that can't run channel signing.
 
-In pay-only mode:
-- The peer never sends Accept with channel funding
+**Bootstrap-only is a special case of pay-only.** Pay-only means the client only pays peers and never charges them — so the peer doesn't fund a channel back toward the client (no payment ever flows in that direction). Bootstrap-only goes further: even the client's *outgoing* payment must use bootstrap tokens because it cannot sign Spilman balance updates. A Spilman-capable client can still be pay-only by simply not charging peers; its outgoing payment uses Spilman channels efficiently.
+
+In bootstrap-only mode:
+- The client never sends Accept with channel funding (can't sign balance updates)
+- The peer never sends Accept with channel funding (no receiving channel — not needed because the client doesn't charge)
 - The entire session runs on BootstrapToken messages
-- The peer sends tokens to top up as balance is consumed
+- The client sends tokens to top up as balance is consumed
 - The provider tracks balance and sends MeteringReports
-- No settlement interval signatures, no netting, no rollover
-- **The pay-only peer's delivery price must be zero or negative** — the provider cannot pay the peer (no receiving channel), so the peer must deliver for free. This limits pay-only mode to leaf/consumer nodes, not relay nodes.
+- No metering interval signatures, no netting, no rollover
+- **The client's delivery price must be zero or negative** — otherwise the peer would owe the client money it has no way to deliver (there is no channel back to the client). This is what makes the client pay-only.
 
-### Pay-Only Limitations
+### Bootstrap-only Limitations
 
-| Aspect | Spilman channels | Pay-only (bootstrap) |
-|--------|-----------------|---------------------|
+| Aspect | Spilman channels (bidirectional) | Bootstrap-only |
+|--------|---------------------------------|----------------|
 | Payment overhead | One signature per interval | Full token per payment |
 | Granularity | Streaming (per-interval) | Chunked (per-token) |
-| Change | Sender gets remaining balance back | No change — provider keeps remainder |
+| Change | Sender claims back via mint | No change — provider keeps remainder |
 | Bidirectional payment | Yes (netting) | No — one direction only |
 | Offline operation | Balance updates continue | No — each token needs mint verification |
 | Min. device capability | Spilman signing, ECDH | Just create Cashu tokens |
 
-Pay-only is strictly inferior in efficiency but serves constrained devices that can't participate in channel management.
+Bootstrap-only is strictly inferior in efficiency but serves constrained devices that can't participate in channel management, and any client that prefers it.
 
 ---
 
@@ -234,11 +221,11 @@ The ideal bootstrap token covers just enough to:
 
 A reasonable default: **2x minimum channel capacity** — enough for the channel plus setup overhead.
 
-### For Pay-Only Sessions
+### For Bootstrap-only Sessions
 
-Pay-only peers should send tokens sized for practical usage periods. Too small = frequent top-ups with high overhead. Too large = more wasted change if the session ends early.
+Bootstrap-only peers should send tokens sized for practical usage periods. Too small = frequent top-ups with high overhead. Too large = more wasted change if the session ends early.
 
-Guidance for pay-only peers:
+Guidance for bootstrap-only peers:
 - Estimate session duration x pricing rate
 - Add a small buffer (10-20%)
 - Send tokens in practical chunks (e.g., 5-10 minutes of expected usage)
@@ -278,10 +265,10 @@ If the provider loses mint connectivity after accepting a token:
 | Verification | Always verify with mint before granting service | No pay, no service — no risk of spent tokens |
 | Balance precision | Tracked at scaled units (milli-sats), not whole sats | Sub-sat costs accumulate correctly without rounding |
 | Balance tracking | Provider tracks internally, same pricing formula as Spilman | Consistent metering across payment modes |
-| Usage reporting | Bidirectional MeteringReport, pricing applied one direction only | Both sides calibrate; pay-only peer delivers for free |
+| Usage reporting | Bidirectional MeteringReport, pricing applied one direction only | Both sides calibrate; bootstrap-only peer delivers for free |
 | Top-up | Additive — new token value added to current balance | Simple, no negotiation needed |
-| Upgrade path | Peer sends Accept with Spilman funding when ready | Seamless transition, remaining bootstrap balance credited |
-| Bootstrap credit | Remaining balance carried over as credit toward first Spilman settlements | No value lost, pure internal bookkeeping |
-| Pay-only pricing | Peer's delivery price must be zero or negative | Provider can't pay peer without receiving channel |
+| Upgrade path | Peer sends Accept with Spilman funding when ready | Seamless transition; remaining bootstrap balance abandoned |
+| Bootstrap residual | Abandoned at upgrade in v1 | Avoids per-interval netting exception; future BootstrapCredit message could reclaim it deterministically |
+| Bootstrap-only pricing | Client's delivery price must be zero or negative | No receiving channel to the client; peer would have no way to pay positive amounts |
 | Exhaustion signal | Reject (balance exhausted) | Reuses existing message type |
 | Offline provider | Existing balance continues, new tokens rejected until mint returns | Already-verified balance is safe to use |
