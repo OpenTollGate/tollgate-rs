@@ -2,9 +2,19 @@
 
 ## What is TollGate?
 
-TollGate is a protocol and library for **autonomous, device-to-device payment for metered resource delivery**. Any device that delivers resources to another device can charge for that service using Cashu ecash micropayments — no accounts, no registration, no central billing authority. Devices negotiate prices, open payment channels, and settle autonomously based on observed usage.
+**TollGate** is a protocol for autonomous, device-to-device payment for metered resource delivery. Any device that delivers resources to another can charge for that service using Cashu ecash micropayments — no accounts, no registration, no central billing authority. Devices negotiate prices, open payment channels, and settle autonomously based on observed usage. The protocol is **resource-agnostic**: the same wire format and lifecycle work for forwarded bytes, watt-hours, milliliters, or any metered unit.
 
-TollGate is not a network protocol. It is a payment layer that operates alongside any system where peers are authenticated and can deliver resources to each other. The first deployment target is [FIPS](https://github.com/nicobao/fips) (Free Internetworking Peering System), a self-organizing encrypted mesh, but TollGate's core logic is network-agnostic and transport-agnostic — it works over any topology where peers are identified by Nostr keypairs (npubs) and authenticated out-of-band.
+TollGate is not a network protocol. It is a payment layer that operates alongside any system where peers are authenticated and can deliver resources to each other.
+
+### What's in this repo
+
+| Layer | What it is |
+|---|---|
+| **tollgate-protocol** | Wire format and lifecycle defined in these design documents. Resource-agnostic. Currently lives as a `protocol` module inside `tollgate-core`; it may be extracted into its own crate when there's a real second consumer (a Go or TypeScript implementation, or another Rust crate that needs only message types). |
+| **tollgate-core** | Rust library implementing the protocol's resource-agnostic logic: channels, metering, pricing, access control. Consumers plug in a `Wallet` and a `ResourceAdapter` via traits. |
+| **tollgate-net** | First deployment of TollGate: **(re)selling network access**. Built on `tollgate-core`, it ships the network-forwarding `ResourceAdapter` (traditional IP or a mesh such as [FIPS](https://github.com/nicobao/fips)) and a Cashu wallet. |
+
+A constrained-device variant (`tollgate-net-esp32`) lives in a separate project and consumes the same `tollgate-core`.
 
 ## Why TollGate?
 
@@ -14,21 +24,13 @@ TollGate is not a network protocol. It is a payment layer that operates alongsid
 
 **Autonomous operation**: Devices negotiate, pay, and settle without human intervention. A TollGate node can operate unattended indefinitely — adjusting prices based on demand, opening and rolling over payment channels, surviving network partitions and mint outages. The operator sets pricing policy; the device executes it.
 
-**Operator sovereignty**: The operator controls their node's economic behavior. Pricing is per-peer, per-product, and dynamically adjustable based on any metrics the system exposes — congestion, demand, link quality, time of day. The operator's margin is the spread between what they charge for delivery and what they pay their peers. TollGate provides the tools; the operator makes the business decisions.
+**Operator sovereignty**: The operator controls their node's economic behavior. Pricing is per-peer, per-product, and dynamically adjustable based on any metrics the system exposes — congestion, demand, link quality, time of day. **The operator's margin is the spread between what they charge for delivery and what they pay their peers.** TollGate provides the tools; the operator makes the business decisions.
 
-**Network and transport agnostic**: TollGate doesn't care how your resources travel or how TollGate messages reach the peer. The underlying system handles routing and delivery; TollGate handles commerce. The TollGate protocol itself is transport-agnostic — messages can travel over any channel the implementation provides between authenticated peers. This means the same core logic runs on a high-end Linux router, a constrained OpenWrt device, or an ESP32 microcontroller, each with their own resource and transport adapter.
+**Network and transport agnostic**: The protocol doesn't dictate how resources travel or how protocol messages reach the peer. The underlying system handles routing and delivery; TollGate handles commerce. Messages can travel over any bidirectional channel between authenticated peers. The same `tollgate-core` library can power a high-end Linux router, a constrained OpenWrt device, or an ESP32 microcontroller — each with its own wallet and resource adapter.
 
 ## How Payment Works
 
 TollGate operates on a single principle: **the provider charges for delivery**. When node A delivers resources to node B, A charges A's own rate for that service. If B also delivers resources to A, B charges B's rate. Each direction is independently priced and independently paid.
-
-```
-    A ──────[delivers to B]──────→ B
-    A charges A's rate (A is doing the work)
-
-    B ──────[delivers to A]──────→ A
-    B charges B's rate (B is doing the work)
-```
 
 ![Pricing Direction](diagrams/pricing-direction.svg)
 <details><summary>Text version</summary>
@@ -46,7 +48,7 @@ TollGate operates on a single principle: **the provider charges for delivery**. 
 ```
 </details>
 
-Prices can be positive, zero, or negative. A well-connected node (e.g., one with direct internet access) charges a positive price because its delivery is valuable. A leaf node willing to pay for inbound resources can accept a negative price from its peer — effectively paying the peer to deliver resources *to* the leaf. A pair of peers owned by the same operator can set zero prices in both directions, skipping payment entirely. Pricing naturally reflects topology, resource scarcity, and the economic relationship between each pair of peers.
+Prices can be positive, zero, or negative. A well-connected node (e.g., one with direct internet access) charges a positive price because its delivery is valuable. A leaf node is more likely to set a negative price for forwarding traffic — paying its peer to take its outgoing traffic, effectively subsidizing the relationship to ensure peers stay willing to forward on its behalf. A pair of peers owned by the same operator can set zero prices in both directions, skipping payment entirely. Pricing naturally reflects topology, resource scarcity, and the economic relationship between each pair of peers.
 
 Payment flows through **Cashu Spilman channels** — unidirectional payment channels where the sender locks ecash in a 2-of-2 multisig and signs incremental balance updates as resources are metered. The receiver can settle at any time by submitting the latest update to a Cashu mint. Two channels per peer pair (one per direction) enable bidirectional payment.
 
@@ -54,19 +56,26 @@ Payment flows through **Cashu Spilman channels** — unidirectional payment chan
 
 When two peers first connect:
 
-1. **Bootstrap (if needed)**: If the connecting peer already has mint connectivity through other peers, it proceeds directly to channel establishment. If this is its first connection and it has no path to a mint, it sends a regular Cashu token — enough to fund a Spilman channel. This solves the chicken-and-egg problem: you need to pay to get online, but Spilman channels need mint connectivity. The bootstrap token is a one-time cost to get connected.
+1. **Bootstrap (if needed)**: If the connecting peer already has mint connectivity through other peers, it can proceed directly to channel establishment. If this is its first connection and it has no path to a mint, it sends a regular Cashu token — enough to fund a Spilman channel. This solves the chicken-and-egg problem: you need to pay to get online, but Spilman channels need mint connectivity. The bootstrap token is a one-time cost to get connected. **A client can also choose to remain on bootstrap tokens for the entire session** — Spilman channels are not mandatory, but highly recommended for efficiency (see [Bootstrap-only Clients](#bootstrap-only-clients)).
 
-2. **Channel establishment**: Once both peers can reach a mint, they open Spilman channels (one per direction). The peer with the lower npub leads channel lifecycle management to avoid coordination races.
+2. **Channel establishment**: Once both peers can reach a mint, they open Spilman channels (one per direction). Each peer manages rollover for its own outgoing channel — only the funder needs to initiate, since only the funder puts up new funds.
 
-3. **Streaming payment**: As resources flow, the sender signs balance updates at a negotiated interval (default: 5 seconds). Each update reflects the cumulative units delivered since the channel opened. Only the delta since the last update needs to be signed — not a per-unit payment.
+3. **Streaming payment**: As resources flow, the sender signs balance updates at the negotiated **metering interval** (default: 5 seconds). Each update reflects the cumulative units delivered since the channel opened. Only the delta since the last update needs to be signed — not a per-unit payment.
 
-4. **Rollover**: When a channel approaches exhaustion (default: at 80% capacity), a new channel is opened alongside it. The old channel continues to be drained to 100%. Once exhausted, charging seamlessly continues on the new channel. For example: if the old channel has 2 sats remaining and the settlement costs 5 sats, the old channel exhausts and the remaining 3 sats are charged to the new one.
+4. **Rollover**: When a channel approaches exhaustion (default: at 80% capacity), a new channel is opened alongside it. The old channel continues to be drained to 100%. Once exhausted, charging seamlessly continues on the new channel. For example: if the old channel has 2 sats remaining and the metering interval costs 5 sats, the old channel exhausts and the remaining 3 sats are charged to the new one.
 
-5. **Settlement**: Either party can settle at any time. The receiver submits the latest signed balance update to the mint, receiving their earned amount while the sender gets the remaining change back.
+5. **Settlement**: Either party can settle at any time. The receiver submits the latest signed balance update to the mint, receiving their earned amount while the sender can claim back the remaining change with the mint.
 
-### Pay-Only Clients
+### Pay-only and Bootstrap-only Clients
 
-Not all devices support full Spilman channels. A constrained device may only be able to send regular Cashu tokens — no channel management, no receiving. TollGate supports this as a degraded but functional mode. The pay-only client sends tokens for access; it just doesn't get the efficiency benefits of streaming micropayments.
+Two related but distinct lifecycles exist:
+
+- **Pay-only** — the client only pays its peers; it never charges them. Because the peer never owes the client anything, the peer doesn't fund a channel back toward the client (it would only ever sit at zero balance). The client's outgoing payment can still use Spilman channels (efficient) or bootstrap tokens.
+- **Bootstrap-only** — like pay-only, but the client cannot fund Spilman channels for its outgoing payment either (no ECDH, no balance signing). The entire session runs on bootstrap tokens. Bootstrap-only ⊂ pay-only.
+
+A pay-only client is typically a leaf consumer (a phone, a laptop) that wants to buy resources but has nothing chargeable to deliver. The client's delivery price is zero or negative, which is what tells the peer not to bother funding a receiving channel.
+
+**Spilman channels are highly recommended** when the client can run them: they avoid the per-token mint round-trip and amortize signing overhead across many metering intervals. Bootstrap-only clients are forced into per-token payment because they can't sign balance updates.
 
 ### Offline Resilience
 
@@ -80,6 +89,7 @@ A TollGate node can lose mint connectivity at any moment — power loss, network
 
 ## Specific Design Goals
 
+- **Resource-agnostic core, network-specific implementation** — `tollgate-core` knows nothing about what is being sold. This repo ships it as a reusable library and `tollgate-net` as a network-forwarding binary built on top. Other resource types (electricity, fluids, compute) get their own implementations on the same core.
 - **Hop-by-hop payment** — Each peer pays its direct neighbor. No knowledge of the full path is needed. Payment relationships are strictly between adjacent peers.
 
 ![Hop-by-Hop Payment](diagrams/hop-by-hop.svg)
@@ -108,42 +118,42 @@ A TollGate node can lose mint connectivity at any moment — power loss, network
 Non-goals:
 
 - **Routing decisions** — TollGate does not make routing decisions. The underlying system (FIPS, IP, etc.) handles routing. *Future: payment status may influence routing policy (e.g., well-paying peers get favorable routing), but this is an implementation-layer concern, not a TollGate concern.*
-- **Wallet implementation** — TollGate-core defines a wallet trait; the implementation provides the actual wallet. Different platforms have different constraints (full Cashu wallet on Linux, constrained wallet on ESP32).
+- **Wallet implementation** — `tollgate-core` defines a wallet trait; the implementation provides the actual wallet. Different platforms have different constraints (full Cashu wallet on Linux, constrained wallet on ESP32).
 - **Network authentication** — Peers are authenticated by the implementation before TollGate sees them. FIPS uses Noise IK handshakes; a traditional network might use WireGuard; TollGate doesn't care.
 - **Captive portal / user interface** — TollGate is device-to-device. Human-facing UI (captive portals, web dashboards) is built on top, not inside.
 - **Anonymity** — TollGate peers know each other's identities (they have payment channels). Privacy comes from Cashu's blind signatures — the mint cannot link payments to identities.
-- **Reliable delivery** — Like FIPS, TollGate operates on best-effort delivery. Metering counts what was delivered, not what was requested.
+- **Reliable delivery** — TollGate operates on best-effort delivery. Metering counts what was delivered, not what was requested.
 
 ---
 
 ## Architecture
 
-TollGate is structured as a core library consumed by platform-specific implementations.
+The three layers introduced in [What's in this repo](#whats-in-this-repo) — `tollgate-protocol`, `tollgate-core`, `tollgate-net` — give the structure. This section covers what each layer contains and the trait boundary between them.
 
 ### tollgate-core (Library)
 
-The core library contains all payment logic, pricing, metering, and access control. It is network-agnostic — it does not know about FIPS, IP, or any specific transport. The implementation provides three things via traits:
+`tollgate-core` contains all payment logic, pricing, metering, and access control. It is network-agnostic — it does not know about FIPS, IP, or any specific transport. The consumer provides three things via traits:
 
 1. **Wallet** — Token operations, Spilman channel funding, balance signing, settlement. Must support token locking (NUT-11 2-of-2 multisig).
 2. **Resource Adapter** — Peer identification, metering counters (units delivered per peer), access control enforcement, and optional metrics for dynamic pricing.
-3. **Peer Identifiers** — Peers are always identified by their Nostr public key (npub). The implementation provides npubs for connected peers, similar to how FIPS transports provide identifiers to FMP.
+3. **Peer Identifiers** — Peers are always identified by their Nostr public key (npub). The consumer provides npubs for connected peers, similar to how FIPS transports provide identifiers to FMP.
 
 ### Separation Model
 
 ```
 tollgate-core (lib)              ← Pure logic, no platform code
     │
-    ├── tollgate (this project)  ← Single binary, feature-flagged per OS
+    ├── tollgate-net (this binary)  ← Network forwarding, feature-flagged per OS
     │     ├── Linux / macOS / Windows / OpenWrt
-    │     ├── FIPS integration (native, compile-time)
+    │     ├── FIPS or IP network adapter
     │     └── Cashu wallet (cdk-spilman based)
     │
-    └── tollgate-esp32 (separate project)
+    └── tollgate-net-esp32 (separate project)
           ├── ESP-IDF / constrained runtime
           └── Custom wallet + resource adapter
 ```
 
-The main binary targets Linux, macOS, Windows, and OpenWrt with feature flags for OS-specific differences. OpenWrt is Linux — the differences are config paths (UCI vs. XDG), packaging (ipk vs. deb/brew), and resource constraints. ESP32 is fundamentally different (different runtime, different toolchain, possibly `no_std`) and lives in its own project.
+`tollgate-net` targets Linux, macOS, Windows, and OpenWrt with feature flags for OS-specific differences. OpenWrt is Linux — the differences are config paths (UCI vs. XDG), packaging (ipk vs. deb/brew), and resource constraints. ESP32 is fundamentally different (different runtime, different toolchain, possibly `no_std`) and lives in its own project.
 
 ### Core Components
 
@@ -173,7 +183,7 @@ The main binary targets Linux, macOS, Windows, and OpenWrt with feature flags fo
 ```
 </details>
 
-- **Spilman Channel Manager**: Manages bi-directional channel pairs per peer. Handles the full lifecycle: bootstrap token → channel funding → active payments → rollover → settlement. Delegates cryptographic operations to the Wallet trait. Manages channel leadership (lowest peer ID leads). Handles offline scenarios gracefully.
+- **Spilman Channel Manager**: Manages the channel pair per peer (one per direction). Handles the full lifecycle: bootstrap token → channel funding → active payments → rollover → settlement. Each peer initiates rollover for its own outgoing channel — only the funder needs to act, since only the funder puts up new funds. Delegates cryptographic operations to the Wallet trait. Handles offline scenarios gracefully.
 
 - **Product Catalog & Pricing Engine**: Each node advertises products (offerings) with a pricing scale, per-mint pricing, and optional extensions. Product IDs are hashes of attributes so peers detect changes. Dynamic pricing adjusts based on metrics from the ResourceAdapter.
 
@@ -202,17 +212,17 @@ Pricing is explored in depth in [tollgate-pricing.md](tollgate-pricing.md).
 
 ---
 
-## Settlement and Netting
+## Interval Netting
 
-Each peer pair maintains two independent Spilman channels. At each settlement interval (default: 5 seconds):
+Each peer pair maintains two independent Spilman channels. At each metering interval (default: 5 seconds):
 
 1. Both sides report their metered usage
 2. The sender signs a balance update reflecting cumulative units delivered
 3. If both sides owe each other, only the net delta needs to move — avoiding unnecessary channel drain
 
-Metering drift is expected — transit loss means the two sides may disagree on exact counts. At each settlement interval, both parties communicate their measured units sent and received, allowing both sides to calibrate their counters. Peers agree on a transit loss tolerance (default: 5%); as long as measurements stay within tolerance, the higher value is used.
+Metering drift is expected — transit loss means the two sides may disagree on exact counts. At each metering interval, both parties communicate their measured units sent and received, allowing both sides to calibrate their counters. Peers agree on a transit loss tolerance (default: 5%); as long as measurements stay within tolerance, the higher value is used.
 
-Settlement details are explored in a dedicated design document.
+Netting details are explored in a dedicated design document.
 
 ---
 
@@ -222,11 +232,11 @@ Settlement details are explored in a dedicated design document.
 
 TollGate assumes that peers are authenticated by the underlying network (FIPS Noise IK, WireGuard, etc.) before any payment interaction occurs. The threats TollGate addresses are economic, not cryptographic:
 
-**Freeloading**: A peer attempts to have resources delivered without paying. Mitigated by access control — unpaid peers cannot have transit resources delivered. In FIPS, unpaid peers are also excluded from bloom filters to prevent blackholing.
+**Freeloading**: A peer attempts to have resources delivered without paying. Mitigated by access control — unpaid peers cannot have transit resources delivered. Mesh implementations additionally hide unpaid peers from routing advertisements to prevent blackholing.
 
 **Overpayment/Underpayment**: Metering drift causes disagreement about how much was delivered. Mitigated by configurable transit loss tolerance and reconciliation.
 
-**Rugpull (receiver)**: The receiver settles a channel and keeps the funds without providing service. Mitigated by short settlement intervals (5s default) — maximum exposure is one interval's worth of delivery.
+**Rugpull (receiver)**: The receiver settles a channel and keeps the funds without providing service. Mitigated by short metering intervals (5s default) — maximum exposure is one interval's worth of delivery.
 
 **Rugpull (sender)**: The sender stops paying and expects continued service. Mitigated by access control — delivery stops when payment stops.
 
@@ -262,13 +272,11 @@ TollGate v2 differs fundamentally:
 
 ### Cashu Spilman Channels
 
-TollGate uses the [Cashu Spilman channel](reference/cashu_spilman_channels/ARCHITECTURE.md) implementation for streaming micropayments. Spilman channels are unidirectional payment channels where the sender funds a 2-of-2 multisig and signs off-chain balance updates. This is adapted from Bitcoin's [Spilman channels](https://en.bitcoin.it/wiki/Payment_channels#Spillman-style_payment_channels) to work with Cashu ecash instead of on-chain Bitcoin.
+TollGate uses the [Cashu Spilman channel](../../../reference/cashu_spilman_channels/ARCHITECTURE.md) implementation for streaming micropayments. Spilman channels are unidirectional payment channels where the sender funds a 2-of-2 multisig and signs off-chain balance updates. This is adapted from Bitcoin's [Spilman channels](https://en.bitcoin.it/wiki/Payment_channels#Spillman-style_payment_channels) to work with Cashu ecash instead of on-chain Bitcoin.
 
 ### FIPS (Free Internetworking Peering System)
 
-FIPS provides the mesh networking substrate for TollGate's primary deployment target. FIPS handles peer discovery, authentication, encrypted delivery, and quality metrics (MMP). TollGate consumes FIPS's per-peer metrics for dynamic pricing and hooks into its delivery path for access control.
-
-See [peering-fips.md](network-peering/peering-fips.md) for FIPS-specific integration details.
+[FIPS](https://github.com/nicobao/fips) is a self-organizing encrypted mesh that TollGate can run on as one of several supported substrates. See [peering-fips.md](../network-peering/peering-fips.md) for integration details.
 
 ---
 
@@ -278,24 +286,26 @@ See [peering-fips.md](network-peering/peering-fips.md) for FIPS-specific integra
 
 | Document | Description |
 | -------- | ----------- |
-| [tollgate-pricing.md](core/tollgate-pricing.md) | Pricing model: products, per-peer pricing, dynamic adjustment |
-| [tollgate-protocol.md](core/tollgate-protocol.md) | Wire protocol: messages, negotiation, codec |
-| [tollgate-payment-channels.md](core/tollgate-payment-channels.md) | Spilman channel lifecycle, bootstrap, rollover, offline resilience |
-| [tollgate-access-control.md](core/tollgate-access-control.md) | Delivery gates, metering, unpaid peer restrictions |
-| [tollgate-configuration.md](core/tollgate-configuration.md) | Configuration schema and runtime parameters |
+| [tollgate-pricing.md](tollgate-pricing.md) | Pricing model: products, per-peer pricing, dynamic adjustment |
+| [tollgate-protocol.md](tollgate-protocol.md) | Wire protocol: messages, negotiation, codec |
+| [tollgate-bootstrap.md](tollgate-bootstrap.md) | Bootstrap tokens, bootstrap-only mode, upgrade path |
+| [tollgate-payment-channels.md](tollgate-payment-channels.md) | Spilman channel lifecycle, rollover, offline resilience |
+| [tollgate-access-control.md](tollgate-access-control.md) | Delivery gates, access levels, unpaid peer restrictions |
+| [tollgate-metering.md](tollgate-metering.md) | Metering counters, calibration, transit loss resolution |
+| [tollgate-configuration.md](tollgate-configuration.md) | Configuration schema and runtime parameters |
 
 ### Network Integration
 
 | Document | Description |
 | -------- | ----------- |
-| [peering-fips.md](network-peering/peering-fips.md) | FIPS mesh integration: metrics, bloom filters, delivery hooks |
-| [peering-ip.md](network-peering/peering-ip.md) | Traditional IP network integration |
+| [peering-fips.md](../network-peering/peering-fips.md) | FIPS mesh integration: metrics, bloom filters, delivery hooks |
+| [peering-ip.md](../network-peering/peering-ip.md) | Traditional IP network integration |
 
 ### Migration
 
 | Document | Description |
 | -------- | ----------- |
-| [FIPS_FEATURE_REQUESTS.md](../v1-to-v2-migration/FIPS_FEATURE_REQUESTS.md) | Required FIPS changes for TollGate integration |
+| [FIPS_FEATURE_REQUESTS.md](../FIPS_FEATURE_REQUESTS.md) | Required FIPS changes for TollGate integration |
 
 ### External References
 

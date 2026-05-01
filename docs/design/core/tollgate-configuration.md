@@ -43,7 +43,7 @@ identity:    # Node identity (keypair)
 products:    # What this node sells
 pricing:     # Dynamic pricing rules
 channels:    # Spilman channel parameters
-settlement:  # Settlement interval and drift tolerance
+metering:    # Metering interval and drift tolerance
 bootstrap:   # Bootstrap token parameters
 mints:       # Accepted mints
 peers:       # Static peer overrides
@@ -173,11 +173,11 @@ channels:
 
 ---
 
-## Settlement
+## Metering
 
 ```yaml
-settlement:
-  interval_range: [3000, 10000]           # acceptable settlement interval range [min_ms, max_ms]
+metering:
+  interval_range: [3000, 10000]           # acceptable metering interval range [min_ms, max_ms]
   default_interval_ms: 5000               # preferred interval (used if peer accepts)
   transit_loss_tolerance: 0.05                   # 5% transit loss tolerance
   transit_loss_max_consecutive: 3                # close after this many consecutive over-tolerance intervals (transit loss)
@@ -189,7 +189,7 @@ settlement:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `interval_range` | `[3000, 10000]` | Acceptable interval in ms |
-| `default_interval_ms` | `5000` | Preferred settlement interval |
+| `default_interval_ms` | `5000` | Preferred metering interval |
 | `transit_loss_tolerance` | `0.05` | 5% transit loss tolerance |
 | `transit_loss_max_consecutive` | `3` | Close after 3 consecutive over-tolerance intervals (transit loss) |
 | `transit_loss_unacceptable` | `0.50` | Immediately close if transit loss exceeds 50% |
@@ -202,7 +202,6 @@ settlement:
 bootstrap:
   enabled: true                            # accept bootstrap tokens
   min_token_value: 10                      # minimum token value to accept (sats)
-  max_pending_tokens: 5                    # max unverified tokens in buffer (if offline)
 ```
 
 ### Defaults
@@ -211,7 +210,8 @@ bootstrap:
 |-----------|---------|-------------|
 | `bootstrap.enabled` | `true` | Accept bootstrap tokens |
 | `min_token_value` | `10` | Reject tokens below this value |
-| `max_pending_tokens` | `5` | Limit buffered unverified tokens |
+
+Bootstrap tokens are always verified with the mint before service is granted. If the mint is unreachable the token is rejected outright — there is no pending / unverified buffer. See [tollgate-bootstrap.md](tollgate-bootstrap.md).
 
 ---
 
@@ -226,6 +226,16 @@ mints:
 ```
 
 Only mints listed here are accepted for both bootstrap tokens and Spilman channel funding. If a peer offers a product priced in a mint not on this list, the node rejects it.
+
+### Multi-Mint Resilience (Future)
+
+Operators are encouraged to maintain overlapping channels across at least two mints (three preferred) so that a single mint outage doesn't block all channel funding, rollover, and settlement. The current design lists multiple mints in this section but does not specify:
+
+- How channels are distributed across mints (round-robin? capacity-weighted? per-peer?)
+- How a node responds when a mint becomes unreachable mid-session (drain to other mints? wait?)
+- How funds are rebalanced between mints (manual today; automated inter-mint transfer is future work)
+
+For v1, operators configure multiple mints and manually ensure channels are spread across them. Automated mint distribution and rebalancing policy is **future work**.
 
 ---
 
@@ -299,7 +309,7 @@ channels:
   ttl_seconds: 3600
   rollover_threshold: 0.80
 
-settlement:
+metering:
   interval_range: [3000, 10000]
   default_interval_ms: 5000
   transit_loss_tolerance: 0.05
@@ -325,11 +335,11 @@ Some parameters can be changed at runtime without restarting the node:
 
 | Parameter | Runtime changeable? | Notes |
 |-----------|-------------------|-------|
-| Product pricing | Yes | New prices take effect at next settlement |
+| Product pricing | Yes | New prices take effect at next metering interval |
 | Dynamic pricing rules | Yes | Strategy and factors can be updated |
 | Peer overrides | Yes | Add/remove/modify peer policies |
 | Channel parameters | No | Applies to new channels only |
-| Settlement interval | No | Applies to new sessions only |
+| Metering interval | No | Applies to new sessions only |
 | Identity | No | Requires restart |
 | Accepted mints | No | Requires restart (affects channel validity) |
 

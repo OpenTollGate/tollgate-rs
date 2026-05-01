@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 240" font-family="monospace" font-size="12">
+  <style>
+    text          { fill: #e0e0e0; }
+    text.title    { font-size: 16px; font-weight: bold; }
+    text.subtitle { font-size: 12px; fill: #909090; }
+    text.nlabel   { font-size: 13px; font-weight: bold; }
+    text.nrole    { font-size: 10px; fill: #909090; }
+    text.elabel   { font-size: 9px; fill: #b0b0b0; }
+    text.caption  { font-size: 11px; fill: #707080; font-style: italic; }
+
+    .bg           { fill: #0d1117; }
+    .callout      { fill: #151520; }
+    .node         { fill: #2e3a5e; stroke: #5080c0; }
+
+    @media (prefers-color-scheme: light) {
+      text          { fill: #1f2328; }
+      text.subtitle, text.nrole, text.plabel, text.annot, text.altlabel,
+      text.elabel, text.mdesc, text.tlabel, text.sdesc { fill: #656d76; }
+      text.caption  { fill: #7c8186; }
+      line.sep, line.life { stroke: #d1d9e0; }
+      rect.alt      { stroke: #d1d9e0; }
+      .bg           { fill: #ffffff; }
+      .callout      { fill: #f6f8fa; }
+      .node, rect.node { fill: #ddf4ff; stroke: #0969da; }
+      rect.compute, rect.result { fill: #f6f8fa; }
+    }
+  </style>
+
+  <defs>
+    <marker id="aleft" markerWidth="7" markerHeight="5" refX="0" refY="2.5" orient="auto">
+      <polygon points="7,0 0,2.5 7,5" fill="#d0a040"/>
+    </marker>
+  </defs>
+
+  <rect width="720" height="240" rx="8" class="bg"/>
+
+  <text x="360" y="28" text-anchor="middle" class="title">Chain Topology</text>
+  <text x="360" y="46" text-anchor="middle" class="subtitle">Linear — each node pays its left neighbor</text>
+
+  <!-- A: Gateway -->
+  <rect x="30" y="100" width="110" height="44" rx="6" class="callout" stroke="#5080c0" stroke-width="2"/>
+  <text x="85" y="120" text-anchor="middle" class="nlabel" fill="#80b0e0">A</text>
+  <text x="85" y="135" text-anchor="middle" class="nrole">Gateway</text>
+
+  <!-- B: Relay -->
+  <rect x="210" y="100" width="110" height="44" rx="6" class="callout" stroke="#d0a040" stroke-width="2"/>
+  <text x="265" y="120" text-anchor="middle" class="nlabel" fill="#e0c060">B</text>
+  <text x="265" y="135" text-anchor="middle" class="nrole">Relay</text>
+
+  <!-- C: Relay -->
+  <rect x="390" y="100" width="110" height="44" rx="6" class="callout" stroke="#d0a040" stroke-width="2"/>
+  <text x="445" y="120" text-anchor="middle" class="nlabel" fill="#e0c060">C</text>
+  <text x="445" y="135" text-anchor="middle" class="nrole">Relay</text>
+
+  <!-- D: Client -->
+  <rect x="570" y="100" width="110" height="44" rx="6" class="callout" stroke="#40a060" stroke-width="2"/>
+  <text x="625" y="120" text-anchor="middle" class="nlabel" fill="#80e080">D</text>
+  <text x="625" y="135" text-anchor="middle" class="nrole">Client</text>
+
+  <!-- Payment arrows: right node pays left node -->
+  <line x1="210" y1="122" x2="148" y2="122" stroke="#d0a040" stroke-width="1.5" marker-end="url(#aleft)"/>
+  <text x="175" y="115" text-anchor="middle" class="elabel" fill="#d0a040">$</text>
+
+  <line x1="390" y1="122" x2="328" y2="122" stroke="#d0a040" stroke-width="1.5" marker-end="url(#aleft)"/>
+  <text x="355" y="115" text-anchor="middle" class="elabel" fill="#d0a040">$</text>
+
+  <line x1="570" y1="122" x2="508" y2="122" stroke="#d0a040" stroke-width="1.5" marker-end="url(#aleft)"/>
+  <text x="535" y="115" text-anchor="middle" class="elabel" fill="#d0a040">$</text>
+
+  <!-- Caption -->
+  <text x="360" y="200" text-anchor="middle" class="caption">B pays A, C pays B, D pays C — each link independently priced.</text>
+</svg>

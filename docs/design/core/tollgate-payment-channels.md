@@ -2,7 +2,7 @@
 
 This document specifies how TollGate manages Cashu Spilman payment channels between peers — the channel lifecycle, rollover mechanics, offline resilience, netting, and the Wallet trait.
 
-Bootstrap tokens and pay-only mode are documented separately in [tollgate-bootstrap.md](tollgate-bootstrap.md).
+Bootstrap tokens and bootstrap-only mode are documented separately in [tollgate-bootstrap.md](tollgate-bootstrap.md).
 
 ## Overview
 
@@ -28,11 +28,11 @@ Each pair of TollGate peers maintains **two unidirectional Spilman channels** �
 
 Spilman channels enable **streaming micropayments**: the sender locks ecash in a 2-of-2 multisig with a time-locked refund path, then signs incremental balance updates as resource is metered. The receiver holds the latest signed update and can settle with the mint at any time.
 
-At each settlement interval, both sides exchange metering reports. The net debtor (whichever side owes more) signs a single balance update on their channel for the net amount. Only one signature per interval, and only the delta moves.
+At each metering interval, both sides exchange metering reports. The net debtor (whichever side owes more) signs a single balance update on their channel for the net amount. Only one signature per interval, and only the delta moves.
 
-### Settlement with Netting
+### Interval Netting
 
-![Settlement with Netting](diagrams/settlement-netting.svg)
+![Interval Netting](diagrams/interval-netting.svg)
 <details><summary>Text version</summary>
 
 ```
@@ -48,7 +48,7 @@ At each settlement interval, both sides exchange metering reports. The net debto
 
   Phase 3 — Settle
     B → A: BalanceUpdate (channel B→A, +3 sats, signed)
-    A → B: SettlementAck
+    A → B: BalanceAck
 
   Result: Channel B→A drained by 3 sats. Channel A→B unchanged.
 ```
@@ -59,6 +59,9 @@ At each settlement interval, both sides exchange metering reports. The net debto
 ## Channel Pair Lifecycle
 
 The Spilman channel lifecycle begins after peers have exchanged Announce and PriceSheet messages. Bootstrap (if needed) has already completed — see [tollgate-bootstrap.md](tollgate-bootstrap.md). Both peers can reach a mint.
+
+![Channel Pair Lifecycle](diagrams/channel-pair-lifecycle.svg)
+<details><summary>Text version</summary>
 
 ```
                     ┌─────────────────────────────────────┐
@@ -71,6 +74,7 @@ The Spilman channel lifecycle begins after peers have exchanged Announce and Pri
                 │
           (zero-price: skip funding, go directly to Active)
 ```
+</details>
 
 ### Funding
 
@@ -88,10 +92,10 @@ The funding process follows the Cashu Spilman protocol:
 
 ### Active
 
-Both channels are funded and verified. Metering and settlement proceed:
-- Every settlement interval, both sides send MeteringReport
+Both channels are funded and verified. Metering and balance updates proceed:
+- Every metering interval, both sides send MeteringReport
 - Net debtor sends BalanceUpdate (signed Spilman balance update)
-- Net creditor sends SettlementAck
+- Net creditor sends BalanceAck
 
 ### RollingOver
 
@@ -118,7 +122,7 @@ Both the old (draining) and new channel are active simultaneously during the ove
   │                    │                      │
   │                    ├──── overlap period ───┤
   │                                           │
-  │                    e.g. 2 sats remain + 5 sat settlement
+  │                    e.g. 2 sats remain + 5 sat interval cost
   │                        = 2 to old, 3 to new
   ├──────────────────── time ─────────────────────────────→
 ```
@@ -138,13 +142,13 @@ Settlement complete. Proofs distributed. Channel is done.
 
 ### Zero-Price Shortcut
 
-When both sides set all prices to zero, the pair goes directly to Active with no funding, no channels, no metering, and no settlement. Delivery is free.
+When both sides set all prices to zero, the pair goes directly to Active with no funding, no channels, no metering, and no balance updates. Delivery is free.
 
 ---
 
 ## Channel Ownership
 
-Each Spilman channel is unidirectional. The **sender** (funder) of each channel is responsible for managing that channel's lifecycle — including rollover, capacity decisions, and funding. No leadership election is needed because there is no shared resource to coordinate.
+Each Spilman channel is unidirectional. The **sender** (funder) of each channel is responsible for managing that channel's lifecycle — including rollover, capacity decisions, and funding. Channels do carry shared state (cumulative balance, signatures between sender and receiver), but rollover is initiated by the funder alone because only the funder puts up new funds.
 
 - A→B channel: A is the sender, A manages rollover, A decides when to fund a new channel
 - B→A channel: B is the sender, B manages rollover, B decides when to fund a new channel
@@ -175,11 +179,11 @@ During rollover, **two channels exist simultaneously** for the same direction:
 - Old channel: draining to 100%
 - New channel: funded and ready, accepting charges once old is exhausted
 
-The balance update at each settlement interval uses whichever channel has remaining capacity. When the old channel has less remaining capacity than the settlement amount, the remainder carries over to the new channel.
+The balance update at each metering interval uses whichever channel has remaining capacity. When the old channel has less remaining capacity than the interval cost, the remainder carries over to the new channel.
 
 **Example:**
 - Old channel: 998 of 1000 sats spent (2 remaining)
-- Settlement amount this interval: 5 sats
+- Interval cost: 5 sats
 - Result: 2 sats charged to old channel (now exhausted), 3 sats charged to new channel
 
 ### Rollover While Offline
@@ -200,7 +204,7 @@ If mint connectivity is lost during rollover:
 |-----------|-------------|-------|
 | Balance updates (signing) | No | Signed between peers, no mint involvement |
 | Metering reports | No | Local computation |
-| Settlement (interval) | No | Just signatures between peers |
+| Balance updates (interval) | No | Just signatures between peers |
 | Channel funding (open) | **Yes** | Must create 2-of-2 multisig token |
 | Channel settlement (close) | **Yes** | Receiver must submit swap to mint |
 | Channel rollover (new) | **Yes** | New channel needs funding |
@@ -211,7 +215,7 @@ If mint connectivity is lost during rollover:
 
 **Mint goes down during active session:**
 - Balance updates continue normally (no mint needed)
-- Settlement interval signatures work fine
+- Metering interval signatures work fine
 - If a channel exhausts, rollover is blocked until mint returns
 - If channel approaches expiry, urgency increases
 
@@ -222,6 +226,29 @@ If mint connectivity is lost during rollover:
 - Close is queued. Receiver holds the latest signed update.
 - When mint returns, submit the swap.
 - Keyset errors (12xxx) trigger one retry after refresh.
+
+---
+
+## Reboot / State Loss
+
+Nodes are not expected to persist runtime state between restarts. On reboot, a node loses metering counters, channel tracking, and any signed BalanceUpdates it was holding. The identity key survives (it's in the config file), so the rebooted node has the same pubkey and can be recognized by peers.
+
+The remaining peer (still online) is the only party that holds the latest channel state. Two scenarios apply:
+
+### Friendly recovery
+
+The online peer recognizes the reconnecting pubkey and shares back the channel state for both directions: channel IDs, cumulative balances, and signatures. The rebooted peer validates every signature before trusting any of it. If validation succeeds, both channels resume — the rebooted peer knows how much of its outgoing channel is spent, and holds the latest signed BalanceUpdate for its incoming channel.
+
+This requires a protocol message (proposed `ChannelSync`) that the online peer sends after Announce when it detects a reconnecting pubkey with live channels. Not yet specified in [tollgate-protocol.md](tollgate-protocol.md) — **future work**.
+
+### Unfriendly outcome
+
+The online peer stays silent about the old channels. The rebooted peer falls back to a fresh session with new channels.
+
+- **Outgoing channel** (rebooted peer was sender): the online peer holds the rebooted peer's last signed BalanceUpdate and can settle with the mint. The rebooted peer reclaims any remainder via Spilman's refund timelock after expiry. No loss beyond what was legitimately owed.
+- **Incoming channel** (rebooted peer was receiver): the rebooted peer lost the only proof of earnings. The online peer waits for expiry and reclaims the full channel via the refund path. **The rebooted peer loses all earned income on that channel.**
+
+Exposure is bounded by channel capacity (the "start small, grow with relationship" model limits new-peer exposure), time since last mint settlement, and the channel TTL (1 hour default). Worst case: one channel's worth of earned income.
 
 ---
 
@@ -240,7 +267,7 @@ Default TTL: **1 hour**. Configurable per product.
 The sender initiates a **rollover** when a channel enters the safety margin before expiry — creating a new channel and allowing the old one to be settled before the refund timelock activates.
 
 ```
-safety_margin = max(60 seconds, 2 × settlement_interval)
+safety_margin = max(60 seconds, 2 × metering_interval)
 ```
 
 Within the safety margin:
@@ -265,7 +292,7 @@ Danger zone:      expiry - safety_margin (e.g., expiry - 60 seconds)
 
 ## Netting
 
-Each settlement interval, both sides owe each other independently:
+Each metering interval, both sides owe each other independently:
 
 ```
 A owes B: B's pricing × (elapsed seconds + units B delivered to A)
@@ -276,7 +303,7 @@ Net: A_owes - B_owes
 If the net is positive (A owes more), A signs a BalanceUpdate on the A→B channel for the net amount. If negative, B signs on the B→A channel. If zero, no update needed.
 
 This means:
-- Only one channel is used per settlement interval (the debtor's)
+- Only one channel is used per metering interval (the debtor's)
 - The other channel's balance doesn't change
 - Channel drain is slower (only net amounts move)
 - Both channels last longer before rollover
@@ -428,19 +455,7 @@ If a received BalanceUpdate fails signature verification:
 
 ### Transit Loss Tolerance Exceeded
 
-If metering reports diverge beyond the agreed tolerance (default 5%):
-
-**Resolution rule: use the higher value.** When the two sides disagree on units delivered, the higher measurement is accepted as the billable amount. Rationale: the provider (who measured higher) claims they did more work. The receiver may not have seen everything — but the provider still expended resources delivering. Using the higher value is conservative (favors the provider) and deterministic (both sides know the rule).
-
-If transit loss is within tolerance:
-- Use the higher value for billing
-- Both sides note the discrepancy for their counters
-
-If transit loss exceeds tolerance:
-- Still use the higher value for this interval
-- Send a warning (Reject with reason: transit loss tolerance exceeded)
-- Both sides recalibrate
-- If persistent (e.g., 3 consecutive intervals over tolerance): close and renegotiate — something is wrong with the link or metering
+When metering reports diverge beyond the agreed tolerance, the channel layer's role is to act on the warning: if persistent (3+ consecutive intervals over tolerance) the channel is closed and renegotiated. The resolution rule itself (higher value, tolerances, billing per interval) is documented in [tollgate-metering.md](tollgate-metering.md).
 
 ---
 
@@ -449,7 +464,7 @@ If transit loss exceeds tolerance:
 | Decision | Resolution | Rationale |
 |----------|-----------|-----------|
 | Channels per peer pair | Two unidirectional (one per direction) | Matches Spilman's unidirectional model; enables netting |
-| Channel ownership | Sender manages own channel lifecycle | No leadership needed; unidirectional channels are independent |
+| Channel ownership | Sender manages own channel lifecycle | Rollover initiated by the funder alone — only the party putting up new funds decides when |
 | Rollover threshold | 80% capacity (configurable, default 20% overlap) | New channel ready before old exhausts |
 | Rollover drain | Old channel drains to 100%, then new channel continues | No wasted capacity |
 | Stale session timeout | 60 seconds (configurable) | Close if rollover can't complete |

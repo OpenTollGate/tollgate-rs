@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" font-family="monospace" font-size="12">
+  <style>
+    text          { fill: #e0e0e0; }
+    text.title    { font-size: 16px; font-weight: bold; }
+    text.subtitle { font-size: 12px; fill: #909090; }
+    text.nlabel   { font-size: 13px; font-weight: bold; }
+    text.nrole    { font-size: 10px; fill: #909090; }
+    text.elabel   { font-size: 9px; fill: #b0b0b0; }
+    text.caption  { font-size: 11px; fill: #707080; font-style: italic; }
+
+    .bg           { fill: #0d1117; }
+    .callout      { fill: #151520; }
+    .node         { fill: #2e3a5e; stroke: #5080c0; }
+
+    @media (prefers-color-scheme: light) {
+      text          { fill: #1f2328; }
+      text.subtitle, text.nrole, text.plabel, text.annot, text.altlabel,
+      text.elabel, text.mdesc, text.tlabel, text.sdesc { fill: #656d76; }
+      text.caption  { fill: #7c8186; }
+      line.sep, line.life { stroke: #d1d9e0; }
+      rect.alt      { stroke: #d1d9e0; }
+      .bg           { fill: #ffffff; }
+      .callout      { fill: #f6f8fa; }
+      .node, rect.node { fill: #ddf4ff; stroke: #0969da; }
+      rect.compute, rect.result { fill: #f6f8fa; }
+    }
+  </style>
+
+  <defs>
+    <marker id="aup" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0,0 7,2.5 0,5" fill="#d0a040"/>
+    </marker>
+  </defs>
+
+  <rect width="720" height="400" rx="8" class="bg"/>
+
+  <text x="360" y="28" text-anchor="middle" class="title">Multi-Homed Topology</text>
+  <text x="360" y="46" text-anchor="middle" class="subtitle">Relay buys upstream from two gateways</text>
+
+  <!-- A: Gateway 1 -->
+  <rect x="100" y="80" width="140" height="44" rx="6" class="callout" stroke="#5080c0" stroke-width="2"/>
+  <text x="170" y="100" text-anchor="middle" class="nlabel" fill="#80b0e0">A</text>
+  <text x="170" y="115" text-anchor="middle" class="nrole">Gateway 1</text>
+
+  <!-- B: Gateway 2 -->
+  <rect x="480" y="80" width="140" height="44" rx="6" class="callout" stroke="#5080c0" stroke-width="2"/>
+  <text x="550" y="100" text-anchor="middle" class="nlabel" fill="#80b0e0">B</text>
+  <text x="550" y="115" text-anchor="middle" class="nrole">Gateway 2</text>
+
+  <!-- C: Relay -->
+  <rect x="290" y="200" width="140" height="44" rx="6" class="callout" stroke="#d0a040" stroke-width="2"/>
+  <text x="360" y="220" text-anchor="middle" class="nlabel" fill="#e0c060">C</text>
+  <text x="360" y="235" text-anchor="middle" class="nrole">Relay</text>
+
+  <!-- D: Client -->
+  <rect x="290" y="300" width="140" height="44" rx="6" class="callout" stroke="#40a060" stroke-width="2"/>
+  <text x="360" y="320" text-anchor="middle" class="nlabel" fill="#80e080">D</text>
+  <text x="360" y="335" text-anchor="middle" class="nrole">Client</text>
+
+  <!-- Payment arrows: C pays A and B; D pays C -->
+  <line x1="320" y1="200" x2="190" y2="124" stroke="#d0a040" stroke-width="1.5" marker-end="url(#aup)"/>
+  <text x="240" y="155" text-anchor="middle" class="elabel" fill="#d0a040">$</text>
+
+  <line x1="400" y1="200" x2="530" y2="124" stroke="#d0a040" stroke-width="1.5" marker-end="url(#aup)"/>
+  <text x="480" y="155" text-anchor="middle" class="elabel" fill="#d0a040">$</text>
+
+  <line x1="360" y1="300" x2="360" y2="244" stroke="#d0a040" stroke-width="1.5" marker-end="url(#aup)"/>
+  <text x="370" y="275" text-anchor="start" class="elabel" fill="#d0a040">$</text>
+
+  <!-- Caption -->
+  <text x="360" y="370" text-anchor="middle" class="caption">C pays both A and B; routing across gateways via OS routing table (policy routing, ECMP).</text>
+  <text x="360" y="386" text-anchor="middle" class="caption">TollGate meters and charges each link independently — no influence on routing.</text>
+</svg>

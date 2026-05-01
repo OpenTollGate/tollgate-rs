@@ -7,6 +7,23 @@
     text.nrole    { font-size: 10px; fill: #909090; }
     text.annot    { font-size: 10px; fill: #909090; font-style: italic; }
     text.caption  { font-size: 11px; fill: #707080; font-style: italic; }
+
+    .bg           { fill: #0d1117; }
+    .callout      { fill: #151520; }
+    .node         { fill: #2e3a5e; stroke: #5080c0; }
+
+    @media (prefers-color-scheme: light) {
+      text          { fill: #1f2328; }
+      text.subtitle, text.nrole, text.plabel, text.annot, text.altlabel,
+      text.elabel, text.mdesc, text.tlabel { fill: #656d76; }
+      text.caption  { fill: #7c8186; }
+      line.sep, line.life { stroke: #d1d9e0; }
+      rect.alt      { stroke: #d1d9e0; }
+      .bg           { fill: #ffffff; }
+      .callout      { fill: #f6f8fa; }
+      .node, rect.node { fill: #ddf4ff; stroke: #0969da; }
+      rect.compute, rect.result { fill: #f6f8fa; }
+    }
   </style>
 
   <defs>
@@ -22,23 +39,23 @@
   </defs>
 
   <!-- Background -->
-  <rect width="800" height="340" fill="#0d1117" rx="8"/>
+  <rect width="800" height="340" rx="8" class="bg"/>
 
   <!-- Title -->
   <text x="400" y="28" text-anchor="middle" class="title">Hop-by-Hop Payment</text>
   <text x="400" y="46" text-anchor="middle" class="subtitle">Each peer pays its direct neighbor — no path knowledge needed</text>
 
   <!-- Nodes -->
-  <rect x="40" y="80" width="130" height="70" rx="8" fill="#2e3a5e" stroke="#5080c0" stroke-width="2"/>
+  <rect x="40" y="80" width="130" height="70" rx="8" class="node" stroke-width="2"/>
   <text x="105" y="108" text-anchor="middle" class="nlabel">Client</text>
   <text x="105" y="135" text-anchor="middle" class="nrole">wants internet</text>
 
-  <rect x="310" y="80" width="130" height="70" rx="8" fill="#2e3a5e" stroke="#d0a040" stroke-width="2"/>
+  <rect x="310" y="80" width="130" height="70" rx="8" class="node" stroke="#d0a040" stroke-width="2"/>
   <text x="375" y="108" text-anchor="middle" class="nlabel">Relay</text>
   <text x="375" y="125" text-anchor="middle" class="nrole">charges 10 sat/unit</text>
   <text x="375" y="138" text-anchor="middle" class="nrole">pays 3 sat/unit</text>
 
-  <rect x="580" y="80" width="130" height="70" rx="8" fill="#2e3a5e" stroke="#40a060" stroke-width="2"/>
+  <rect x="580" y="80" width="130" height="70" rx="8" class="node" stroke="#40a060" stroke-width="2"/>
   <text x="645" y="108" text-anchor="middle" class="nlabel">Gateway</text>
   <text x="645" y="125" text-anchor="middle" class="nrole">charges 3 sat/unit</text>
   <text x="645" y="138" text-anchor="middle" class="nrole">has direct internet</text>
@@ -76,7 +93,7 @@
   <text x="515" y="200" text-anchor="middle" class="annot">independent relationship</text>
 
   <!-- Margin callout -->
-  <rect x="240" y="230" width="270" height="42" rx="4" fill="#151520" stroke="#d0a040" stroke-width="1"/>
+  <rect x="240" y="230" width="270" height="42" rx="4" class="callout" stroke="#d0a040" stroke-width="1"/>
   <text x="375" y="248" text-anchor="middle" class="annot" fill="#d0a040">Relay's margin: 10 - 3 = 7 sat/unit profit</text>
   <text x="375" y="263" text-anchor="middle" class="annot" fill="#909090">markup covers relay cost + operator profit</text>
 

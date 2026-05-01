@@ -7,10 +7,27 @@
     text.mdesc    { font-size: 9px; fill: #909090; }
     text.tlabel   { font-size: 10px; fill: #b0b0b0; }
     text.caption  { font-size: 11px; fill: #707080; font-style: italic; }
+
+    .bg           { fill: #0d1117; }
+    .callout      { fill: #151520; }
+    .node         { fill: #2e3a5e; stroke: #5080c0; }
+
+    @media (prefers-color-scheme: light) {
+      text          { fill: #1f2328; }
+      text.subtitle, text.nrole, text.plabel, text.annot, text.altlabel,
+      text.elabel, text.mdesc, text.tlabel { fill: #656d76; }
+      text.caption  { fill: #7c8186; }
+      line.sep, line.life { stroke: #d1d9e0; }
+      rect.alt      { stroke: #d1d9e0; }
+      .bg           { fill: #ffffff; }
+      .callout      { fill: #f6f8fa; }
+      .node, rect.node { fill: #ddf4ff; stroke: #0969da; }
+      rect.compute, rect.result { fill: #f6f8fa; }
+    }
   </style>
 
   <!-- Background -->
-  <rect width="700" height="380" fill="#0d1117" rx="8"/>
+  <rect width="700" height="380" rx="8" class="bg"/>
 
   <!-- Title -->
   <text x="350" y="28" text-anchor="middle" class="title">tollgate-core Components</text>
@@ -22,50 +39,50 @@
 
   <!-- Row 1 -->
   <!-- Spilman Channel Manager -->
-  <rect x="60" y="95" width="185" height="55" rx="5" fill="#1a2e2e" stroke="#50a0c0" stroke-width="1.5"/>
+  <rect x="60" y="95" width="185" height="55" rx="5" class="callout" stroke="#50a0c0" stroke-width="1.5"/>
   <text x="152" y="118" text-anchor="middle" class="mlabel" fill="#80c0e0">Spilman Channel</text>
   <text x="152" y="133" text-anchor="middle" class="mdesc">lifecycle, rollover, netting</text>
 
   <!-- Product Catalog & Pricing -->
-  <rect x="258" y="95" width="185" height="55" rx="5" fill="#1a2e1a" stroke="#50c050" stroke-width="1.5"/>
+  <rect x="258" y="95" width="185" height="55" rx="5" class="callout" stroke="#50c050" stroke-width="1.5"/>
   <text x="350" y="118" text-anchor="middle" class="mlabel" fill="#80e080">Product &amp; Pricing</text>
   <text x="350" y="133" text-anchor="middle" class="mdesc">catalog, dynamic adjustment</text>
 
   <!-- Access Control -->
-  <rect x="456" y="95" width="185" height="55" rx="5" fill="#2e1a1a" stroke="#c05050" stroke-width="1.5"/>
+  <rect x="456" y="95" width="185" height="55" rx="5" class="callout" stroke="#c05050" stroke-width="1.5"/>
   <text x="548" y="118" text-anchor="middle" class="mlabel" fill="#f08080">Access Control</text>
   <text x="548" y="133" text-anchor="middle" class="mdesc">gate, 5 access levels</text>
 
   <!-- Row 2 -->
   <!-- Metering -->
-  <rect x="60" y="165" width="185" height="55" rx="5" fill="#1a1a2e" stroke="#8080c0" stroke-width="1.5"/>
+  <rect x="60" y="165" width="185" height="55" rx="5" class="callout" stroke="#8080c0" stroke-width="1.5"/>
   <text x="152" y="188" text-anchor="middle" class="mlabel" fill="#a0a0e0">Metering</text>
   <text x="152" y="203" text-anchor="middle" class="mdesc">per-peer delivered</text>
 
   <!-- Protocol Messages -->
-  <rect x="258" y="165" width="185" height="55" rx="5" fill="#1a1a2e" stroke="#8080c0" stroke-width="1.5"/>
+  <rect x="258" y="165" width="185" height="55" rx="5" class="callout" stroke="#8080c0" stroke-width="1.5"/>
   <text x="350" y="188" text-anchor="middle" class="mlabel" fill="#a0a0e0">Protocol</text>
   <text x="350" y="203" text-anchor="middle" class="mdesc">CBOR messages, codec</text>
 
   <!-- Peer State Machine -->
-  <rect x="456" y="165" width="185" height="55" rx="5" fill="#1a1a2e" stroke="#8080c0" stroke-width="1.5"/>
+  <rect x="456" y="165" width="185" height="55" rx="5" class="callout" stroke="#8080c0" stroke-width="1.5"/>
   <text x="548" y="188" text-anchor="middle" class="mlabel" fill="#a0a0e0">Peer State</text>
   <text x="548" y="203" text-anchor="middle" class="mdesc">lifecycle state machine</text>
 
   <!-- Traits bar at bottom -->
-  <rect x="60" y="240" width="581" height="35" rx="4" fill="#151520" stroke="#d0a040" stroke-width="1.5"/>
+  <rect x="60" y="240" width="581" height="35" rx="4" class="callout" stroke="#d0a040" stroke-width="1.5"/>
   <text x="350" y="262" text-anchor="middle" class="mlabel" fill="#d0a040">Traits: Wallet    NetworkAdapter</text>
 
   <!-- Implementation row -->
   <text x="350" y="310" text-anchor="middle" class="tlabel">Implementation provides:</text>
 
-  <rect x="80" y="320" width="150" height="30" rx="4" fill="#151520" stroke="#404060" stroke-width="1"/>
+  <rect x="80" y="320" width="150" height="30" rx="4" class="callout" stroke="#404060" stroke-width="1"/>
   <text x="155" y="340" text-anchor="middle" class="mdesc" fill="#909090">Cashu Wallet</text>
 
-  <rect x="275" y="320" width="150" height="30" rx="4" fill="#151520" stroke="#404060" stroke-width="1"/>
+  <rect x="275" y="320" width="150" height="30" rx="4" class="callout" stroke="#404060" stroke-width="1"/>
   <text x="350" y="340" text-anchor="middle" class="mdesc" fill="#909090">FIPS / IP Adapter</text>
 
-  <rect x="470" y="320" width="150" height="30" rx="4" fill="#151520" stroke="#404060" stroke-width="1"/>
+  <rect x="470" y="320" width="150" height="30" rx="4" class="callout" stroke="#404060" stroke-width="1"/>
   <text x="545" y="340" text-anchor="middle" class="mdesc" fill="#909090">Operator Config</text>
 
   <!-- Connection lines from traits to impl -->

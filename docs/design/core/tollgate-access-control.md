@@ -4,7 +4,7 @@ This document specifies how TollGate gates delivery per-peer based on payment st
 
 ## Overview
 
-TollGate controls delivery at the peer level. Each peer has an **access level** determined by their payment status. The implementation (FIPS, IP stack, etc.) enforces access control on the delivery path — TollGate core decides *what* to enforce, the resource adapter enforces *how*.
+TollGate controls delivery at the peer level. Each peer has an **access level** determined by their payment status. The implementation (FIPS, IP stack, etc.) enforces access control on the delivery path — `tollgate-core` decides *what* to enforce, the resource adapter enforces *how*.
 
 The core principle: **no pay, no delivery**. A peer that hasn't paid cannot have resources delivered through this node. It can only exchange TollGate protocol messages with this node (Announce, PriceSheet, BootstrapToken, etc.) to negotiate payment.
 
@@ -17,22 +17,19 @@ Each peer is in exactly one access level at any time:
 | Level | Delivery | TollGate messages | Bloom filter visibility (FIPS) | When |
 |-------|---------|-------------------|-------------------------------|------|
 | `None` | Blocked | Allowed | Hidden | Peer connected, no payment yet |
-| `Bootstrap` | Allowed (metered against token balance) | Allowed | Visible | Bootstrap token verified |
-| `Active` | Allowed (metered, Spilman channels) | Allowed | Visible | Spilman channels funded |
+| `Active` | Allowed (metered) | Allowed | Visible | Payment in place — bootstrap-token-funded or Spilman-channel-funded |
 | `ZeroPrice` | Allowed (unmetered) | Allowed | Visible | Both sides agreed on zero pricing |
 | `Suspended` | Blocked | Allowed | Hidden | Balance exhausted, awaiting top-up or renegotiation |
+
+The access level says only whether delivery is allowed and how (metered or not). The *payment mode* — whether the peer is paying via bootstrap tokens or Spilman channels — is tracked separately by the payment subsystem and does not surface as an access level. A peer "upgrading" from bootstrap tokens to Spilman channels stays in `Active` throughout; only its payment mode changes.
 
 ### Transitions
 
 ```
-None --> Bootstrap (token verified)
-None --> Active (Spilman channels funded)
+None --> Active (any payment in place: bootstrap token verified OR Spilman channels funded)
 None --> ZeroPrice (zero-price PriceSheet accepted)
-Bootstrap --> Active (upgrade to Spilman)
-Bootstrap --> Suspended (balance exhausted)
-Active --> Suspended (channel exhausted, rollover timeout)
-Suspended --> Bootstrap (new token received)
-Suspended --> Active (new channel funded)
+Active --> Suspended (bootstrap balance exhausted OR channel exhausted with rollover timeout)
+Suspended --> Active (new token received OR new channel funded)
 Any --> None (disconnect)
 ```
 
@@ -42,24 +39,22 @@ Any --> None (disconnect)
 ```
                        ┌──────────────┐
                        │     None     │ (blocked, hidden)
-                       └──┬────┬────┬┘
-            token verified│    │    │zero-price
-                          ▼    │    ▼
-  ┌───────────┐  upgrade  ┌────▼─────┐      ┌───────────┐
-  │ Bootstrap ├──────────→│  Active  │      │ ZeroPrice │
-  │           │           │          │      │           │
-  └─────┬─────┘           └────┬─────┘      └───────────┘
-        │balance=0              │exhausted+timeout
-        │                       │
-        ▼                       ▼
-  ┌─────┴───────────────────────┴──┐
-  │          Suspended             │ (blocked, hidden)
-  │   new token→Bootstrap          │
-  │   new channel→Active           │
-  └────────────────────────────────┘
+                       └──┬─────────┬─┘
+              payment ok  │         │ zero-price
+                          ▼         ▼
+                   ┌──────────┐    ┌───────────┐
+                   │  Active  │    │ ZeroPrice │
+                   └────┬─────┘    └───────────┘
+                        │ exhausted (+ timeout for Spilman)
+                        ▼
+                   ┌──────────┐
+                   │ Suspended│ (blocked, hidden)
+                   └────┬─────┘
+                        │ payment restored
+                        └─────────► Active
 
-  Red = blocked    Green = allowed    Blue = bootstrap
-  Dashed = recovery    Any state → None on disconnect
+  Red = blocked    Green = allowed
+  Any state → None on disconnect
 ```
 </details>
 
@@ -72,17 +67,13 @@ This means:
 - Packets from other nodes destined for or through this peer are **not delivered to it**
 - Only TollGate protocol messages (identified by the implementation) are allowed
 
-### Bootstrap
-
-The peer has sent a bootstrap token that was verified with the mint. Delivery is allowed and metered against the token balance. When the balance reaches zero, the peer transitions to `Suspended`.
-
 ### Active
 
-Spilman channels are funded and operational. Delivery is allowed and metered. Balance updates happen at each settlement interval via the normal Spilman flow.
+Payment is in place — either a verified bootstrap token with positive balance, or funded Spilman channels. Delivery is allowed and metered. The access layer does not distinguish the two; the payment subsystem decides how cost is deducted (against the bootstrap balance or via signed BalanceUpdates).
 
 ### ZeroPrice
 
-Both sides agreed on zero pricing for all products. No payment infrastructure is needed. Delivery is allowed and unmetered. No settlement messages are exchanged.
+Both sides agreed on zero pricing for all products. No payment infrastructure is needed. Delivery is allowed and unmetered. No metering or balance update messages are exchanged.
 
 ### Suspended
 
@@ -112,95 +103,36 @@ In FIPS, bloom filters advertise reachability — "I can reach destination X thr
 | Access level | Included in bloom filters? |
 |-------------|---------------------------|
 | `None` | No — hidden (FIPS) |
-| `Bootstrap` | Yes — visible (FIPS) |
 | `Active` | Yes — visible (FIPS) |
 | `ZeroPrice` | Yes — visible (FIPS) |
 | `Suspended` | No — hidden (FIPS) |
 
-Bloom filter visibility is **inferred from the access level** — the implementation maps `set_peer_access(None/Suspended)` to hidden and `set_peer_access(Bootstrap/Active/ZeroPrice)` to visible. No separate API call needed.
+Bloom filter visibility is **inferred from the access level** — the implementation maps `set_peer_access(None/Suspended)` to hidden and `set_peer_access(Active/ZeroPrice)` to visible. No separate API call needed.
 
-This requires a FIPS modification — the ability to selectively include/exclude peers from bloom filter computation. See [FIPS_FEATURE_REQUESTS.md](../v1-to-v2-migration/FIPS_FEATURE_REQUESTS.md).
-
----
-
-## Metering
-
-### What is Metered
-
-Each node meters **units delivered to each peer** (outbound). This is what the node charges for — it did the work of delivering those resources.
-
-```
-Node A delivers 1000 units to Peer B this interval
-A's metering: units_delivered_to_B += 1000
-```
-
-Both sides meter independently. At each settlement interval, both exchange MeteringReports containing cumulative values since session start:
-- `units_delivered`: cumulative units we delivered TO this peer
-- `units_received`: cumulative units we received FROM this peer
-- `elapsed_ms`: milliseconds since session start
-
-Each side computes the interval delta as `current_cumulative - previous_cumulative`. Cumulative counters make the protocol self-healing — lost or duplicated reports don't corrupt accounting.
-
-### Calibration
-
-Both sides report what they sent and what they received. This allows calibration:
-- A says: "I delivered 1000 units to you this interval" (delta from cumulative counters)
-- B says: "I received 980 units from you this interval" (delta from cumulative counters)
-- Transit loss = |1000 - 980| / 1000 = 2% (within default 5% tolerance)
-
-### Transit Loss Resolution
-
-When the two sides disagree on unit counts, **the higher value is used** for billing. The provider claims they did more work; even if the receiver dropped some units, the provider still expended resources sending them.
-
-**Note:** This rule is honest-provider-optimistic. A dishonest provider could inflate unit counts. Dealing with dishonest peers (proof-of-delivery, reputation systems, etc.) requires further design work in future phases.
-
-| Situation | Billable amount | Action |
-|-----------|----------------|--------|
-| Transit loss within tolerance (default 5%) | Higher value | Normal — both sides note discrepancy |
-| Transit loss exceeds tolerance | Higher value | Warning sent (Reject: transit loss tolerance exceeded) |
-| Persistent transit loss (3+ intervals) | Higher value | Close and renegotiate |
-
-### Metering Scope
-
-All units delivered to a peer are metered — including TollGate protocol messages and locally-addressed resources. Distinguishing control plane from data plane at the metering layer adds complexity for negligible savings (protocol messages are tiny relative to delivered resources). The cost of protocol overhead is effectively zero at normal delivery volumes.
+This requires a FIPS modification — the ability to selectively include/exclude peers from bloom filter computation. See [FIPS_FEATURE_REQUESTS.md](../FIPS_FEATURE_REQUESTS.md).
 
 ---
 
-## ResourceAdapter Trait
+## ResourceAdapter Trait (Access Control Members)
 
-The core library uses the `ResourceAdapter` trait to interact with the resource layer. The implementation provides access control enforcement and metering counters.
+The `ResourceAdapter` trait spans both access control and metering. The access-control-related members:
 
 ```rust
 pub trait ResourceAdapter: Send + Sync {
     /// Set the access level for a peer. The implementation enforces delivery rules
     /// AND infers bloom filter visibility from the access level:
     /// - None/Suspended -> hidden from bloom filters (FIPS)
-    /// - Bootstrap/Active/ZeroPrice -> visible in bloom filters (FIPS)
+    /// - Active/ZeroPrice -> visible in bloom filters (FIPS)
     fn set_peer_access(&self, peer: &Pubkey, access: AccessLevel) -> Result<(), AdapterError>;
 
-    /// Subscribe to metering counter updates for a peer. The implementation pushes
-    /// cumulative unit counts as they change. Core takes a snapshot at each
-    /// settlement interval to compute the delta.
-    fn subscribe_meter(&self, peer: &Pubkey) -> Result<MeterStream, AdapterError>;
-
-    /// Get resource metrics for a peer (for dynamic pricing). None for resources without metrics.
-    fn peer_metrics(&self, peer: &Pubkey) -> Option<PeerMetrics>;
-}
-
-/// Continuous metering counter stream. Implementation pushes updates as delivery proceeds.
-pub struct MeterStream {
-    /// Cumulative units delivered TO this peer (outbound)
-    pub delivered: watch::Receiver<u64>,
-    /// Cumulative units received FROM this peer (inbound)
-    pub received: watch::Receiver<u64>,
+    // ... metering members documented in tollgate-metering.md
 }
 
 pub enum AccessLevel {
     /// No delivery. Only TollGate protocol messages allowed.
     None,
-    /// Delivery allowed, metered against bootstrap token balance.
-    Bootstrap,
-    /// Delivery allowed, metered via Spilman channels.
+    /// Delivery allowed, metered. Payment may be via bootstrap token or Spilman channels;
+    /// the access layer does not distinguish.
     Active,
     /// Delivery allowed, unmetered. Zero-price peering.
     ZeroPrice,
@@ -209,20 +141,7 @@ pub enum AccessLevel {
 }
 ```
 
-### PeerMetrics (Optional)
-
-Available from FIPS MMP or equivalent. Used for dynamic pricing, not access control. The metrics are an opaque map — each resource adapter provides whatever metrics are relevant to its domain.
-
-```rust
-pub enum MetricValue {
-    Float(f64),
-    Int(i64),
-    Text(String),
-    Bool(bool),
-}
-
-pub type PeerMetrics = HashMap<String, MetricValue>;
-```
+Counting units delivered, transit-loss reconciliation, and peer metrics are documented in [tollgate-metering.md](tollgate-metering.md).
 
 ---
 
@@ -244,8 +163,8 @@ pub type PeerMetrics = HashMap<String, MetricValue>;
 ```
 1. Peer sends BootstrapToken
 2. Provider verifies with mint
-3. If valid: set access to Bootstrap (bloom visible in FIPS)
-4. Metering begins
+3. If valid: set access to Active (bloom visible in FIPS)
+4. Metering begins; cost deducted from bootstrap balance
 5. When balance exhausted: set access to Suspended (bloom hidden in FIPS)
 ```
 
@@ -256,7 +175,7 @@ pub type PeerMetrics = HashMap<String, MetricValue>;
 2. Both verify funding proofs
 3. Both send ChannelReady
 4. Set access to Active (bloom visible in FIPS)
-5. Metering and settlement begin
+5. Metering begins; balance updates flow on the Spilman channels
 ```
 
 ### Balance Exhausted (Suspended)
@@ -266,8 +185,28 @@ pub type PeerMetrics = HashMap<String, MetricValue>;
 2. Set access to Suspended (bloom hidden in FIPS)
 3. Delivery stops
 4. Peer can send BootstrapToken or fund new channel
-5. On payment: transition back to Bootstrap or Active
+5. On payment: transition back to Active
 ```
+
+---
+
+## Scope and Future Work
+
+The access level governs **outbound delivery** — whether we forward, transit, or deliver to the peer. It is determined by the peer's payment to us.
+
+The reverse direction — whether we *accept* what the peer delivers to us — is not modeled by the access enum today. Locally-addressed packets from a peer are always accepted, and our payment to the peer (which gates whether we are buying from them) lives in the wallet/channel state, not in the access enum. This works in practice but leaves the asymmetric case (e.g., we paid them, but they stopped paying us) implicit.
+
+A future revision may replace the enum with a directional model that captures both directions in a single type:
+
+| State | Outbound (we deliver) | Inbound (we accept) |
+|---|---|---|
+| `None` | Blocked | Blocked |
+| `InboundOnly` | Blocked | Allowed (we pay them) |
+| `OutboundOnly` | Allowed (they pay us) | Blocked |
+| `Full` | Allowed | Allowed |
+| `ZeroPrice` | Allowed (unmetered) | Allowed (unmetered) |
+
+This makes the asymmetric case (`InboundOnly` / `OutboundOnly`) a first-class state, simplifies bloom-filter-inclusion logic, and maps cleanly to FIPS forwarding policy variants. Out of scope for v1 — flagged for future design work.
 
 ---
 
@@ -277,10 +216,6 @@ pub type PeerMetrics = HashMap<String, MetricValue>;
 |----------|-----------|-----------|
 | Default access | None (blocked) | No pay, no service |
 | Unpaid resources | Only local-addressed + TollGate protocol | Peer must be able to negotiate payment |
-| Metering target | All outbound units (delivered to peer) | What we charge for — includes protocol overhead (negligible) |
-| Metering delivery | Push/stream (cumulative counters) | Continuous updates, snapshot at settlement |
-| Transit loss resolution | Use higher value | Favors provider, deterministic. Dishonest peer mitigation is future work. |
-| Transit loss tolerance | 5% default, configurable | Accounts for loss between measurement points |
 | Bloom filter visibility | Inferred from access level (FIPS) | No separate API — access level implies visibility |
 | Zero-price peers | Skip all payment, go to Active | Simplest path for free peering |
 | Suspended state | Blocked but can still negotiate | Peer can recover without reconnecting |
