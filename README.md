@@ -47,13 +47,13 @@ channels — unidirectional payment channels with streaming micropayments.
 Two channels per peer pair (one per direction) enable bidirectional
 payment with netting.
 
-```
-A ──────[delivers to B]──────→ B
-A charges A's rate (A is doing the work)
+![Hop-by-Hop Payment](docs/design/core/diagrams/hop-by-hop.svg)
 
-B ──────[delivers to A]──────→ A
-B charges B's rate (B is doing the work)
-```
+> **The operator's margin is the spread between what they charge for delivery and what they pay their peers.**
+
+Each hop is its own independent commercial relationship. Clients don't
+need path knowledge; operators earn the margin between what they buy
+upstream and what they sell downstream.
 
 At each metering interval (default: 5 seconds), both sides exchange
 metering reports. The net debtor signs a single balance update — only the
