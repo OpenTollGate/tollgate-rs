@@ -1,5 +1,7 @@
 # tollgate-rs
 
+![tollgate-rs banner](docs/design/tollgate-rs-banner.png)
+
 Rust implementation of the [TollGate](https://github.com/OpenTollGate)
 protocol — autonomous, device-to-device payment for metered resource
 delivery, built on Cashu ecash and Spilman payment channels.
