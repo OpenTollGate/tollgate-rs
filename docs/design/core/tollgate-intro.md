@@ -300,6 +300,7 @@ TollGate uses the [Cashu Spilman channel](../../../reference/cashu_spilman_chann
 | -------- | ----------- |
 | [peering-fips.md](../network-peering/peering-fips.md) | FIPS mesh integration: metrics, bloom filters, delivery hooks |
 | [peering-ip.md](../network-peering/peering-ip.md) | Traditional IP network integration |
+| [peering-multi-egress.md](../network-peering/peering-multi-egress.md) | Per-interface instances for traffic class segmentation |
 
 ### Migration
 
