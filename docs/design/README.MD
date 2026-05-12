@@ -39,6 +39,7 @@ specific to `tollgate-net` and can be read independently.
 | -------- | ----------- |
 | [peering-ip.md](network-peering/peering-ip.md) | Traditional IP networks: open access, HTTP/WebSocket, firewall rules |
 | [peering-fips.md](network-peering/peering-fips.md) | FIPS mesh networks: native integration, MMP metrics, bloom filters |
+| [peering-multi-egress.md](network-peering/peering-multi-egress.md) | Per-interface instances: traffic class segmentation on multi-homed routers |
 
 ### FIPS Changes
 

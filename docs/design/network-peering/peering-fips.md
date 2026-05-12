@@ -241,6 +241,12 @@ The following FIPS modifications are required for TollGate integration. Full det
 
 ---
 
+## See Also
+
+For routers with multiple egress paths of divergent cost (fiber + LoRa, WiFi + LTE, etc.), see [peering-multi-egress.md](peering-multi-egress.md) for the per-interface instance deployment pattern that keeps traffic class pricing independent.
+
+---
+
 ## Differences from IP Peering
 
 | Aspect | FIPS | IP |
