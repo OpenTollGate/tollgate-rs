@@ -1,8 +1,8 @@
 //! `tollgate` — the TollGate node binary.
 //!
-//! The first deployment target is a plain IP network in **bootstrap-only mode**:
-//! peers pay with ordinary Cashu tokens and get metered access. Spilman payment
-//! channels and FIPS mesh integration are layered on later; see `docs/design/`.
+//! First deployment target: plain IP network in **bootstrap-only mode**. Peers
+//! pay with ordinary Cashu tokens and get metered access. Spilman channels and
+//! FIPS integration are layered on later.
 
 mod adapter;
 mod config;
@@ -11,16 +11,18 @@ mod server;
 mod wallet;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(name = "tollgate", version, about = "Sell metered network access with Cashu micropayments")]
 struct Cli {
-    /// Path to a config file. If omitted, the standard locations are searched.
+    /// Path to a config file. Searched in order if omitted:
+    /// ./tollgate.yaml, ~/.config/tollgate/tollgate.yaml, /etc/tollgate/tollgate.yaml
     #[arg(short, long)]
     config: Option<PathBuf>,
-    /// Override the listen address for the HTTP/WS transport.
+    /// Override the listen address (default: 127.0.0.1:4747).
     #[arg(long)]
     listen: Option<String>,
 }
@@ -37,15 +39,12 @@ async fn main() -> anyhow::Result<()> {
         cfg.listen = listen;
     }
 
-    let identity = config::Identity::load_or_generate(&cfg)?;
+    let identity = Arc::new(config::Identity::load_or_generate(&cfg)?);
     tracing::info!(pubkey = %identity.pubkey_hex(), listen = %cfg.listen, "starting tollgate node");
 
-    // IP deployment: access control + metering via the host OS firewall.
-    let _adapter = adapter::IpAdapter::new();
-    // Bootstrap-only wallet (plain Cashu tokens). Spilman channels come later.
-    let _wallet = wallet::BootstrapWallet::new(cfg.mints.clone());
-    // The driver bridges transport/adapter/wallet <-> the core Session.
-    let _driver = driver::Driver::new();
+    let wallet = wallet::BootstrapWallet::new(cfg.mints.clone());
+    let adapter = adapter::IpAdapter::new();
+    let driver = driver::Driver::new(wallet, adapter, identity);
 
-    server::serve(&cfg.listen).await
+    server::serve(&cfg.listen, driver).await
 }

@@ -31,6 +31,14 @@ minicbor = { version = "0.24", default-features = false, features = ["alloc", "d
 # sha2 with default-features off stays no_std (used for product_id).
 sha2 = { version = "0.10", default-features = false }
 
+# cashu: protocol-primitives layer from cashubtc/cdk — same rev cdk-spilman uses.
+# Provides NUT-00 token parsing, proof types, and mint HTTP client.
+# cdk-spilman (Spilman channels) builds on top of this same crate later.
+cashu = { git = "https://github.com/cashubtc/cdk.git", rev = "63866dc6d7da9796c75365cde97157d464331da1", package = "cashu", default-features = false, features = ["mint"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1.0"
+bytes = "1"
+
 # net-only (binary) crates, version-pinned here for consistency
 thiserror = "2.0"
 anyhow = "1"

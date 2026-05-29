@@ -28,6 +28,10 @@ tracing-subscriber = { workspace = true }
 hex = { workspace = true }
 dirs = { workspace = true }
 secp256k1 = { workspace = true }
+cashu = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
 
 [lints]
 workspace = true
