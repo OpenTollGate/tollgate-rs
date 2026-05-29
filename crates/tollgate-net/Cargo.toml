@@ -1,0 +1,33 @@
+[package]
+name = "tollgate-net"
+description = "TollGate node — sells metered network access over IP (FIPS support later)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+repository.workspace = true
+authors.workspace = true
+default-run = "tollgate"
+
+[[bin]]
+name = "tollgate"
+path = "src/main.rs"
+
+[dependencies]
+tollgate-core = { workspace = true }
+tollgate-protocol = { workspace = true }
+tokio = { workspace = true }
+axum = { version = "0.8", features = ["ws"] }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+hex = { workspace = true }
+dirs = { workspace = true }
+secp256k1 = { workspace = true }
+
+[lints]
+workspace = true

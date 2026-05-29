@@ -30,3 +30,8 @@ __pycache__/
 *.egg-info/
 *.egg
 
+
+# Claude Code shared skills (see ~/Documents/development/agents)
+skills
+memory-global
+memory-project/

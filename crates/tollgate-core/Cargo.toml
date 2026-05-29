@@ -1,0 +1,15 @@
+[package]
+name = "tollgate-core"
+description = "Resource-agnostic TollGate protocol logic — a sans-IO state machine (no_std)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+tollgate-protocol = { workspace = true }
+
+[lints]
+workspace = true

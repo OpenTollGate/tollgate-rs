@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tollgate-protocol",
+    "crates/tollgate-core",
+    "crates/tollgate-net",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85.0"
+license = "MIT"
+version = "0.1.0"
+repository = "https://github.com/OpenTollGate/tollgate-rs"
+authors = ["TollGate contributors"]
+
+[workspace.lints.rust]
+# Core and protocol are no_std and have no reason to reach for unsafe.
+# tollgate-net only drives I/O; keep the whole tree safe by default.
+unsafe_code = "deny"
+
+[workspace.dependencies]
+# --- internal crates ---
+tollgate-protocol = { path = "crates/tollgate-protocol", version = "0.1.0" }
+tollgate-core = { path = "crates/tollgate-core", version = "0.1.0" }
+
+# --- shared external crates ---
+# minicbor: no_std-first CBOR with derive that maps cleanly onto the wire
+# format's integer field keys (#[n(0)], #[n(1)], ...). Works on esp32.
+minicbor = { version = "0.24", default-features = false, features = ["alloc", "derive"] }
+# sha2 with default-features off stays no_std (used for product_id).
+sha2 = { version = "0.10", default-features = false }
+
+# net-only (binary) crates, version-pinned here for consistency
+thiserror = "2.0"
+anyhow = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "net", "time", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+dirs = "6.0"
+secp256k1 = { version = "0.30", features = ["rand", "global-context"] }

@@ -1,6 +1,6 @@
 # FIPS Feature Requests for TollGate Integration
 
-This document consolidates all FIPS modifications required for TollGate v2 integration. `tollgate-net` and FIPS run as independent binaries and communicate over FIPS's control socket. Each feature below is framed as a generic capability FIPS exposes on that socket. Each feature is referenced from the relevant TollGate design doc.
+This document consolidates all FIPS modifications required for tollgate-rs integration. `tollgate-net` and FIPS run as independent binaries and communicate over FIPS's control socket. Each feature below is framed as a generic capability FIPS exposes on that socket. Each feature is referenced from the relevant TollGate design doc.
 
 ---
 

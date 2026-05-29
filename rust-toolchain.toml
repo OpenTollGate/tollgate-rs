@@ -1,0 +1,4 @@
+[toolchain]
+# Matches the FIPS reference toolchain so cross-builds (OpenWrt/musl) line up.
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]

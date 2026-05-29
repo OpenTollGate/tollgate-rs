@@ -263,7 +263,7 @@ The mint sees token operations but not the economic relationships behind them. T
 
 The original TollGate implementation runs on OpenWrt routers and sells WiFi access using Cashu tokens over HTTP. It uses a tree topology (parent-child) where each node has one upstream provider. Payment is per-session (time or data allotment) using individual Cashu tokens — no payment channels. Traffic control uses Nodogsplash (captive portal).
 
-TollGate v2 differs fundamentally:
+tollgate-rs differs fundamentally:
 - **Mesh vs. tree**: Every peer is an independent payment relationship, not just parent-child
 - **Spilman channels vs. individual tokens**: Streaming micropayments instead of bulk prepayment
 - **Device-to-device vs. human-to-device**: No captive portal; autonomous operation
