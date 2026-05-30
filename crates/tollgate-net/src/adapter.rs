@@ -13,6 +13,8 @@
 use std::net::IpAddr;
 
 /// Name of the nftables table TollGate manages.
+/// Only referenced by the Linux nftables backend (and its tests).
+#[cfg(any(target_os = "linux", test))]
 pub const NFT_TABLE: &str = "tollgate";
 
 pub struct IpAdapter {
@@ -36,12 +38,16 @@ impl IpAdapter {
         Self { backend }
     }
 
-    /// Create the base table, sets, and enforcing forward chain (idempotent).
-    /// Requires root; callers should treat failure as non-fatal and warn.
-    pub fn init(&self) -> anyhow::Result<()> {
+    /// Create the base table and sets (idempotent). When `install_forward_chain`
+    /// is set, also install a `policy drop` forward chain that enforces payment
+    /// on its own; otherwise only the sets are managed and the operator wires
+    /// `@paid_peers_v4/v6` into their existing firewall. Requires root; callers
+    /// should treat failure as non-fatal and warn.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    pub fn init(&self, install_forward_chain: bool) -> anyhow::Result<()> {
         match self.backend {
             #[cfg(target_os = "linux")]
-            Backend::Nftables => nft::init(),
+            Backend::Nftables => nft::init(install_forward_chain),
             Backend::LogOnly => {
                 tracing::warn!(
                     "firewall enforcement is not implemented on this platform; \
@@ -72,7 +78,9 @@ impl IpAdapter {
 }
 
 /// Build the `nft` argument vector to add/remove `ip` from its paid-peers set.
-/// Pure (no I/O) so it can be unit-tested on any platform.
+/// Pure (no I/O) so it can be unit-tested on any platform. Only compiled for the
+/// Linux backend and for tests (the macOS/other builds use the log-only path).
+#[cfg(any(target_os = "linux", test))]
 fn nft_element_args(ip: IpAddr, add: bool) -> Vec<String> {
     let (set, addr) = match ip {
         IpAddr::V4(v4) => ("paid_peers_v4", v4.to_string()),
@@ -95,23 +103,35 @@ mod nft {
 
     use super::{NFT_TABLE, nft_element_args};
 
-    /// Base ruleset: a dedicated table, the two paid-peer sets, and a forward
-    /// chain that drops transit traffic unless it is established or comes
-    /// from/to a paid peer. Only the `forward` hook is touched, so the host's
-    /// own input/output (management plane) is unaffected.
-    pub fn init() -> anyhow::Result<()> {
-        let ruleset = format!(
+    /// Base ruleset: a dedicated table and the two paid-peer sets. When
+    /// `install_forward_chain` is set, also a `forward` chain that drops transit
+    /// traffic unless it is established or from/to a paid peer. Only the
+    /// `forward` hook is touched, so the host's own input/output (management
+    /// plane) is unaffected.
+    ///
+    /// The `add table; delete table; add table` prologue makes this idempotent
+    /// across restarts: the table is recreated clean each time, so re-running
+    /// never duplicates rules. (Paid peers are re-added as sessions re-establish.)
+    pub fn init(install_forward_chain: bool) -> anyhow::Result<()> {
+        let mut ruleset = format!(
             "add table inet {t}\n\
+             delete table inet {t}\n\
+             add table inet {t}\n\
              add set inet {t} paid_peers_v4 {{ type ipv4_addr; flags interval; }}\n\
-             add set inet {t} paid_peers_v6 {{ type ipv6_addr; flags interval; }}\n\
-             add chain inet {t} forward {{ type filter hook forward priority 0; policy drop; }}\n\
-             add rule inet {t} forward ct state established,related accept\n\
-             add rule inet {t} forward ip saddr @paid_peers_v4 accept\n\
-             add rule inet {t} forward ip daddr @paid_peers_v4 accept\n\
-             add rule inet {t} forward ip6 saddr @paid_peers_v6 accept\n\
-             add rule inet {t} forward ip6 daddr @paid_peers_v6 accept\n",
+             add set inet {t} paid_peers_v6 {{ type ipv6_addr; flags interval; }}\n",
             t = NFT_TABLE
         );
+        if install_forward_chain {
+            ruleset.push_str(&format!(
+                "add chain inet {t} forward {{ type filter hook forward priority 0; policy drop; }}\n\
+                 add rule inet {t} forward ct state established,related accept\n\
+                 add rule inet {t} forward ip saddr @paid_peers_v4 accept\n\
+                 add rule inet {t} forward ip daddr @paid_peers_v4 accept\n\
+                 add rule inet {t} forward ip6 saddr @paid_peers_v6 accept\n\
+                 add rule inet {t} forward ip6 daddr @paid_peers_v6 accept\n",
+                t = NFT_TABLE
+            ));
+        }
 
         use std::io::Write;
         let mut child = Command::new("nft")
@@ -128,7 +148,12 @@ mod nft {
         if !status.success() {
             anyhow::bail!("nft -f failed with status {status}");
         }
-        tracing::info!("nftables table `{NFT_TABLE}` initialized");
+        let mode = if install_forward_chain {
+            "enforcing"
+        } else {
+            "sets-only"
+        };
+        tracing::info!("nftables table `{NFT_TABLE}` initialized ({mode})");
         Ok(())
     }
 

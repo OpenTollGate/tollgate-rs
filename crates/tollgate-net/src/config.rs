@@ -21,6 +21,8 @@ pub struct Config {
     pub mints: Vec<String>,
     /// Products this node sells. Static pricing only in v1.
     pub products: Vec<ProductConfig>,
+    /// How TollGate manages the host firewall.
+    pub firewall: FirewallMode,
 }
 
 impl Default for Config {
@@ -30,7 +32,29 @@ impl Default for Config {
             listen: "127.0.0.1:4747".to_string(),
             mints: Vec::new(),
             products: Vec::new(),
+            firewall: FirewallMode::default(),
         }
+    }
+}
+
+/// How `tollgate-net` manages the host firewall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FirewallMode {
+    /// Install a `policy drop` forward chain that enforces payment on its own.
+    /// Correct for a dedicated TollGate gateway. (Default.)
+    #[default]
+    Enforcing,
+    /// Only manage the `paid_peers` sets; do not install a forward chain. Use on
+    /// a box that already has a firewall — reference `@paid_peers_v4/v6` from
+    /// your own ruleset. Without that wiring, access is tracked but NOT enforced.
+    SetsOnly,
+}
+
+impl FirewallMode {
+    /// Whether `init` should install the enforcing forward chain.
+    pub fn installs_forward_chain(self) -> bool {
+        matches!(self, FirewallMode::Enforcing)
     }
 }
 
@@ -106,5 +130,24 @@ impl Identity {
     /// The compressed public key as lowercase hex (33 bytes → 66 chars).
     pub fn pubkey_hex(&self) -> String {
         hex::encode(self.public_key.serialize())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn firewall_defaults_to_enforcing() {
+        let cfg: Config = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(cfg.firewall, FirewallMode::Enforcing);
+        assert!(cfg.firewall.installs_forward_chain());
+    }
+
+    #[test]
+    fn firewall_sets_only_parses_and_disables_chain() {
+        let cfg: Config = serde_yaml::from_str("firewall: sets-only").unwrap();
+        assert_eq!(cfg.firewall, FirewallMode::SetsOnly);
+        assert!(!cfg.firewall.installs_forward_chain());
     }
 }

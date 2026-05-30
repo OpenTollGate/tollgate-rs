@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
 
     let wallet = wallet::BootstrapWallet::new(cfg.mints.clone());
     let adapter = adapter::IpAdapter::new();
-    if let Err(e) = adapter.init() {
+    if let Err(e) = adapter.init(cfg.firewall.installs_forward_chain()) {
         tracing::warn!(err = %e, "firewall init failed; access may not be enforced (need root?)");
     }
     let driver = driver::Driver::new(wallet, adapter, identity);
