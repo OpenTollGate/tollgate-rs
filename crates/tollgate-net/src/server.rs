@@ -4,8 +4,10 @@
 //!   POST /tollgate/v1/exchange   — HTTP polling (2-byte LE length-prefixed CBOR frames)
 //!   GET  /tollgate/v1/ws        — WebSocket upgrade (one CBOR message per binary frame)
 
+use std::net::SocketAddr;
+
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -19,7 +21,12 @@ pub async fn serve(listen: &str, driver: Driver) -> anyhow::Result<()> {
     let app = router(driver);
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!(addr = %listener.local_addr()?, "listening");
-    axum::serve(listener, app).await?;
+    // ConnectInfo gives each handler the peer's source address for firewall gating.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -34,13 +41,23 @@ fn router(driver: Driver) -> Router {
 /// CBOR frames. We establish the peer from its Announce (first message of a
 /// session), route the rest through the driver, and return any queued response
 /// frames in the same framing.
-async fn http_exchange(State(driver): State<Driver>, body: Bytes) -> Response {
+async fn http_exchange(
+    State(driver): State<Driver>,
+    extensions: axum::http::Extensions,
+    body: Bytes,
+) -> Response {
     let frames = match decode_frames(&body) {
         Ok(f) => f,
         Err(e) => {
             return (StatusCode::BAD_REQUEST, format!("bad framing: {e:?}")).into_response();
         }
     };
+
+    // ConnectInfo is injected into request extensions by
+    // `into_make_service_with_connect_info`; absent in tests using `oneshot`.
+    let peer_ip = extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.ip());
 
     // The Announce establishes the peer identity for this exchange. Without
     // transport-layer auth (the IP default), the pubkey comes from Announce.
@@ -51,7 +68,7 @@ async fn http_exchange(State(driver): State<Driver>, body: Bytes) -> Response {
             Some(MessageType::Announce) => match Announce::decode(frame) {
                 Ok(announce) => {
                     let hex = hex::encode(announce.public_key().as_bytes());
-                    driver.peer_connected(&hex).await;
+                    driver.peer_connected(&hex, peer_ip).await;
                     peer_hex = Some(hex);
                 }
                 Err(e) => tracing::warn!(err = %e, "malformed Announce"),

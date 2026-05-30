@@ -135,6 +135,11 @@ impl Session {
                 if let Some(peer_session) = self.peers.get_mut(&peer) {
                     peer_session.phase = PeerPhase::Closed;
                 }
+                // Revoke firewall access and stop metering before forgetting the peer.
+                actions.push(Action::SetAccess {
+                    peer,
+                    level: AccessLevel::None,
+                });
                 actions.push(Action::StopMetering { peer });
                 self.peers.remove(&peer);
             }

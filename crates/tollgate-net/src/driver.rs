@@ -7,6 +7,7 @@
 //! the same exchange.
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -30,6 +31,8 @@ struct Inner {
     session: Mutex<Session>,
     /// Per-peer queue of outbound message bodies (unframed), keyed by pubkey hex.
     outbox: Mutex<BTreeMap<String, Vec<Vec<u8>>>>,
+    /// Maps a peer's pubkey hex to its source IP — the firewall enforces by IP.
+    peer_ip: Mutex<BTreeMap<String, IpAddr>>,
     wallet: BootstrapWallet,
     adapter: IpAdapter,
     #[allow(dead_code)]
@@ -41,14 +44,19 @@ impl Driver {
         Self(Arc::new(Inner {
             session: Mutex::new(Session::new()),
             outbox: Mutex::new(BTreeMap::new()),
+            peer_ip: Mutex::new(BTreeMap::new()),
             wallet,
             adapter,
             identity,
         }))
     }
 
-    /// A peer connected — its identity was established by Announce.
-    pub async fn peer_connected(&self, peer_hex: &str) {
+    /// A peer connected — its identity was established by Announce. `ip` is the
+    /// source address the firewall will gate (absent in tests without a socket).
+    pub async fn peer_connected(&self, peer_hex: &str, ip: Option<IpAddr>) {
+        if let Some(ip) = ip {
+            self.0.peer_ip.lock().await.insert(peer_hex.to_string(), ip);
+        }
         let peer = parse_peer(peer_hex);
         let actions = self.handle(Event::PeerConnected { peer }).await;
         self.dispatch(actions, peer_hex).await;
@@ -61,7 +69,10 @@ impl Driver {
     pub async fn peer_disconnected(&self, peer_hex: &str) {
         let peer = parse_peer(peer_hex);
         let actions = self.handle(Event::PeerDisconnected { peer }).await;
+        // Dispatch first (so the SetAccess(None) revoke can still resolve the IP),
+        // then forget the mapping.
         self.dispatch(actions, peer_hex).await;
+        self.0.peer_ip.lock().await.remove(peer_hex);
     }
 
     /// A decoded protocol frame arrived from a peer.
@@ -112,7 +123,14 @@ impl Driver {
     async fn execute(&self, action: Action) {
         match action {
             Action::SetAccess { peer, level } => {
-                self.0.adapter.set_access(&peer_to_hex(peer), level);
+                let hex = peer_to_hex(peer);
+                match self.0.peer_ip.lock().await.get(&hex).copied() {
+                    Some(ip) if level.allows_delivery() => self.0.adapter.allow(ip),
+                    Some(ip) => self.0.adapter.deny(ip),
+                    None => {
+                        tracing::debug!(peer = %hex, ?level, "no IP mapping; access not enforced")
+                    }
+                }
             }
             Action::Send { peer, bytes } => {
                 self.enqueue(&peer_to_hex(peer), bytes).await;
@@ -224,7 +242,7 @@ mod tests {
         let peer = PeerId(PublicKey::from_bytes([4u8; 33]));
         let hex = peer_to_hex(peer);
 
-        driver.peer_connected(&hex).await;
+        driver.peer_connected(&hex, None).await;
 
         // PeerConnected only sets access (None); nothing to send on the wire.
         assert!(driver.drain_outbox(&hex).await.is_empty());
