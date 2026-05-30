@@ -12,6 +12,8 @@
 
 use std::net::IpAddr;
 
+use tollgate_core::metering::Counters;
+
 /// Name of the nftables table TollGate manages.
 /// Only referenced by the Linux nftables backend (and its tests).
 #[cfg(any(target_os = "linux", test))]
@@ -58,11 +60,15 @@ impl IpAdapter {
         }
     }
 
-    /// Permit the peer at `ip` to forward traffic (add to the paid set).
+    /// Permit the peer at `ip` to forward traffic (add to the paid set) and
+    /// ensure its per-peer byte counters exist.
     pub fn allow(&self, ip: IpAddr) {
         match self.backend {
             #[cfg(target_os = "linux")]
-            Backend::Nftables => nft::apply(ip, true),
+            Backend::Nftables => {
+                nft::apply(ip, true);
+                nft::ensure_counters(ip);
+            }
             Backend::LogOnly => tracing::info!(%ip, "allow (log-only, not enforced)"),
         }
     }
@@ -73,6 +79,18 @@ impl IpAdapter {
             #[cfg(target_os = "linux")]
             Backend::Nftables => nft::apply(ip, false),
             Backend::LogOnly => tracing::info!(%ip, "deny (log-only, not enforced)"),
+        }
+    }
+
+    /// Read the cumulative byte counters for the peer at `ip`. Zero on platforms
+    /// without enforcement, or when counters haven't been installed (e.g.
+    /// `sets-only` mode, where there is no forward chain to attach them to).
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    pub fn read_counters(&self, ip: IpAddr) -> Counters {
+        match self.backend {
+            #[cfg(target_os = "linux")]
+            Backend::Nftables => nft::read(ip),
+            Backend::LogOnly => Counters::default(),
         }
     }
 }
@@ -97,11 +115,47 @@ fn nft_element_args(ip: IpAddr, add: bool) -> Vec<String> {
     ]
 }
 
+/// nftables named-counter identifiers for a peer: `(delivered, received)`.
+/// `.`/`:` in the address are replaced with `_` to form a valid identifier.
+#[cfg(any(target_os = "linux", test))]
+fn counter_names(ip: IpAddr) -> (String, String) {
+    let key = ip.to_string().replace(['.', ':'], "_");
+    (format!("tg_d_{key}"), format!("tg_r_{key}"))
+}
+
+/// Extract a named counter's byte total from `nft -j list counters` JSON.
+/// Pure, so it is unit-tested without nftables.
+#[cfg(any(target_os = "linux", test))]
+fn parse_counter_bytes(json: &str, name: &str) -> Option<u64> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let items = value.get("nftables")?.as_array()?;
+    for item in items {
+        let Some(counter) = item.get("counter") else {
+            continue;
+        };
+        if counter.get("name").and_then(|n| n.as_str()) == Some(name) {
+            return counter.get("bytes").and_then(|b| b.as_u64());
+        }
+    }
+    None
+}
+
 #[cfg(target_os = "linux")]
 mod nft {
+    use std::collections::HashSet;
+    use std::io::Write;
+    use std::net::IpAddr;
     use std::process::Command;
+    use std::sync::{LazyLock, Mutex};
 
-    use super::{NFT_TABLE, nft_element_args};
+    use tollgate_core::metering::Counters;
+
+    use super::{NFT_TABLE, counter_names, nft_element_args, parse_counter_bytes};
+
+    /// Peers whose counter rules have been installed this process-run. The base
+    /// table is recreated on every `init`, so this in-memory view stays in sync.
+    static INSTALLED: LazyLock<Mutex<HashSet<IpAddr>>> =
+        LazyLock::new(|| Mutex::new(HashSet::new()));
 
     /// Base ruleset: a dedicated table and the two paid-peer sets. When
     /// `install_forward_chain` is set, also a `forward` chain that drops transit
@@ -133,21 +187,7 @@ mod nft {
             ));
         }
 
-        use std::io::Write;
-        let mut child = Command::new("nft")
-            .arg("-f")
-            .arg("-")
-            .stdin(std::process::Stdio::piped())
-            .spawn()?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("failed to open nft stdin"))?
-            .write_all(ruleset.as_bytes())?;
-        let status = child.wait()?;
-        if !status.success() {
-            anyhow::bail!("nft -f failed with status {status}");
-        }
+        run_batch(&ruleset)?;
         let mode = if install_forward_chain {
             "enforcing"
         } else {
@@ -174,6 +214,80 @@ mod nft {
             }
             Err(e) => tracing::warn!(%ip, err = %e, "could not run nft"),
         }
+    }
+
+    /// Install per-peer byte counters and the counter rules that feed them, once
+    /// per peer per process-run. The counter rules are `insert`ed at the top of
+    /// the forward chain so they run before the accept verdicts. No-op in
+    /// `sets-only` mode is expected to fail (no forward chain) — logged, retried.
+    pub fn ensure_counters(ip: IpAddr) {
+        {
+            let mut installed = INSTALLED.lock().unwrap_or_else(|e| e.into_inner());
+            if !installed.insert(ip) {
+                return;
+            }
+        }
+        let (delivered, received) = counter_names(ip);
+        let (proto, addr) = match ip {
+            IpAddr::V4(a) => ("ip", a.to_string()),
+            IpAddr::V6(a) => ("ip6", a.to_string()),
+        };
+        let batch = format!(
+            "add counter inet {t} {delivered}\n\
+             add counter inet {t} {received}\n\
+             insert rule inet {t} forward {proto} daddr {addr} counter name {delivered}\n\
+             insert rule inet {t} forward {proto} saddr {addr} counter name {received}\n",
+            t = NFT_TABLE
+        );
+        if let Err(e) = run_batch(&batch) {
+            tracing::warn!(%ip, err = %e, "could not install peer counters");
+            // Allow a retry on the next allow().
+            INSTALLED
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&ip);
+        }
+    }
+
+    /// Read a peer's cumulative `(delivered, received)` byte counters.
+    pub fn read(ip: IpAddr) -> Counters {
+        let (delivered_name, received_name) = counter_names(ip);
+        let output = Command::new("nft")
+            .args(["-j", "list", "counters", "table", "inet", NFT_TABLE])
+            .output();
+        let json = match output {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+            Ok(o) => {
+                tracing::debug!(status = %o.status, "nft list counters failed");
+                return Counters::default();
+            }
+            Err(e) => {
+                tracing::warn!(err = %e, "could not run nft list counters");
+                return Counters::default();
+            }
+        };
+        Counters {
+            delivered: parse_counter_bytes(&json, &delivered_name).unwrap_or(0),
+            received: parse_counter_bytes(&json, &received_name).unwrap_or(0),
+        }
+    }
+
+    /// Run an `nft -f -` batch from a ruleset string.
+    fn run_batch(ruleset: &str) -> anyhow::Result<()> {
+        let mut child = Command::new("nft")
+            .arg("-f")
+            .arg("-")
+            .stdin(std::process::Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("failed to open nft stdin"))?
+            .write_all(ruleset.as_bytes())?;
+        if !child.wait()?.success() {
+            anyhow::bail!("nft batch failed");
+        }
+        Ok(())
     }
 }
 
@@ -210,5 +324,30 @@ mod tests {
         let args = nft_element_args("fd00::5".parse().unwrap(), true);
         assert_eq!(args[4], "paid_peers_v6");
         assert_eq!(args[5], "{ fd00::5 }");
+    }
+
+    #[test]
+    fn counter_names_sanitize_address() {
+        let (d, r) = counter_names("10.0.0.5".parse().unwrap());
+        assert_eq!(d, "tg_d_10_0_0_5");
+        assert_eq!(r, "tg_r_10_0_0_5");
+        let (d6, _) = counter_names("fd00::5".parse().unwrap());
+        assert_eq!(d6, "tg_d_fd00__5");
+    }
+
+    #[test]
+    fn parse_counter_bytes_finds_named_counter() {
+        let json = r#"{
+            "nftables": [
+                { "metainfo": { "version": "1.0.9" } },
+                { "counter": { "family": "inet", "table": "tollgate",
+                               "name": "tg_d_10_0_0_5", "packets": 3, "bytes": 1500 } },
+                { "counter": { "family": "inet", "table": "tollgate",
+                               "name": "tg_r_10_0_0_5", "packets": 2, "bytes": 800 } }
+            ]
+        }"#;
+        assert_eq!(parse_counter_bytes(json, "tg_d_10_0_0_5"), Some(1500));
+        assert_eq!(parse_counter_bytes(json, "tg_r_10_0_0_5"), Some(800));
+        assert_eq!(parse_counter_bytes(json, "tg_d_missing"), None);
     }
 }

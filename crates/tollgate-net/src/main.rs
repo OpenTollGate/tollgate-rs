@@ -51,7 +51,19 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = adapter.init(cfg.firewall.installs_forward_chain()) {
         tracing::warn!(err = %e, "firewall init failed; access may not be enforced (need root?)");
     }
-    let driver = driver::Driver::new(wallet, adapter, identity);
+
+    // v1: one price for all peers, taken from the first configured product.
+    let price = cfg
+        .products
+        .first()
+        .map(|p| tollgate_core::Price {
+            per_second: p.price_per_second,
+            per_unit: p.price_per_unit,
+        })
+        .unwrap_or_default();
+
+    let driver = driver::Driver::new(wallet, adapter, identity, price);
+    driver.spawn_metering(std::time::Duration::from_secs(5));
 
     server::serve(&cfg.listen, driver).await
 }

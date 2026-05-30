@@ -10,6 +10,7 @@ use crate::action::Action;
 use crate::event::Event;
 use crate::metering::Counters;
 use crate::peer::PeerId;
+use crate::pricing::Price;
 use crate::time::Millis;
 
 /// Where one peer relationship sits in its lifecycle.
@@ -33,7 +34,11 @@ struct PeerSession {
     phase: PeerPhase,
     /// Scaled milli-unit balance (scale = 1000). Bootstrap top-ups are additive.
     balance: u64,
-    counters: Counters,
+    /// The last meter reading, or `None` until the first sample establishes the
+    /// baseline (so a non-zero starting counter isn't charged retroactively).
+    last_counters: Option<Counters>,
+    /// When `last_counters` was taken.
+    last_meter_at: Millis,
 }
 
 impl PeerSession {
@@ -41,7 +46,8 @@ impl PeerSession {
         Self {
             phase: PeerPhase::New,
             balance: 0,
-            counters: Counters::default(),
+            last_counters: None,
+            last_meter_at: Millis(0),
         }
     }
 }
@@ -51,11 +57,19 @@ impl PeerSession {
 #[derive(Debug, Default)]
 pub struct Session {
     peers: BTreeMap<PeerId, PeerSession>,
+    /// The rate this node charges peers for delivery (v1: one rate for all).
+    price: Price,
 }
 
 impl Session {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the rate charged to peers. v1 uses a single price for all peers;
+    /// per-peer pricing arrives with PriceSheet negotiation.
+    pub fn set_price(&mut self, price: Price) {
+        self.price = price;
     }
 
     /// Drive the state machine with one event. `now` is the host's monotonic
@@ -64,7 +78,7 @@ impl Session {
     /// This currently implements the bootstrap-only happy path (the first
     /// milestone: an IP deployment that sells access for plain Cashu tokens).
     /// Spilman channels, rollover, and netting are added on top later.
-    pub fn handle(&mut self, event: Event, _now: Millis) -> Vec<Action> {
+    pub fn handle(&mut self, event: Event, now: Millis) -> Vec<Action> {
         let mut actions = Vec::new();
         match event {
             Event::PeerConnected { peer } => {
@@ -123,11 +137,34 @@ impl Session {
             }
 
             Event::MeterSample { peer, counters } => {
-                // TODO: charge the balance from the delta, suspend when it is
-                // exhausted, and emit a MeteringReport. The skeleton just records
-                // the latest reading.
+                let price = self.price;
                 if let Some(peer_session) = self.peers.get_mut(&peer) {
-                    peer_session.counters = counters;
+                    if peer_session.phase == PeerPhase::Active {
+                        match peer_session.last_counters {
+                            // First reading after activation: establish the
+                            // baseline, charge nothing.
+                            None => {
+                                peer_session.last_counters = Some(counters);
+                                peer_session.last_meter_at = now;
+                            }
+                            Some(prev) => {
+                                let delivered = counters.delivered.saturating_sub(prev.delivered);
+                                let elapsed = now.since(peer_session.last_meter_at);
+                                let cost = price.cost_scaled(elapsed, delivered);
+                                peer_session.last_counters = Some(counters);
+                                peer_session.last_meter_at = now;
+                                peer_session.balance = peer_session.balance.saturating_sub(cost);
+                                if peer_session.balance == 0 {
+                                    peer_session.phase = PeerPhase::Suspended;
+                                    actions.push(Action::SetAccess {
+                                        peer,
+                                        level: AccessLevel::Suspended,
+                                    });
+                                    actions.push(Action::StopMetering { peer });
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -265,6 +302,56 @@ mod tests {
                 .expect("decode")
                 .is_accepted()
         );
+    }
+
+    #[test]
+    fn metering_charges_deltas_and_suspends_when_exhausted() {
+        let mut session = Session::new();
+        session.set_price(Price {
+            per_second: 0,
+            per_unit: 1,
+        }); // 1 unit = 1 milli
+        let p = peer(7);
+
+        session.handle(Event::PeerConnected { peer: p }, Millis(0));
+        session.handle(
+            Event::BootstrapVerified {
+                peer: p,
+                amount: 10,
+                ok: true,
+            },
+            Millis(0),
+        );
+
+        let sample = |delivered| Event::MeterSample {
+            peer: p,
+            counters: Counters {
+                delivered,
+                received: 0,
+            },
+        };
+
+        // First sample establishes the baseline — no charge, no actions.
+        assert!(session.handle(sample(0), Millis(1000)).is_empty());
+        // Deliver 4 units → cost 4, balance 10 → 6, still active.
+        assert!(session.handle(sample(4), Millis(2000)).is_empty());
+        // Deliver 6 more (cumulative 10) → cost 6, balance 6 → 0 → suspend.
+        let actions = session.handle(sample(10), Millis(3000));
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            Action::SetAccess {
+                level: AccessLevel::Suspended,
+                ..
+            }
+        )));
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::StopMetering { .. }))
+        );
+
+        // Once suspended, further samples are ignored (no more actions).
+        assert!(session.handle(sample(99), Millis(4000)).is_empty());
     }
 
     #[test]

@@ -9,14 +9,15 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Mutex;
 
 use tollgate_core::action::Action;
 use tollgate_core::event::Event;
+use tollgate_core::metering::Counters;
 use tollgate_core::time::Millis;
-use tollgate_core::{PeerId, Session};
+use tollgate_core::{PeerId, Price, Session};
 use tollgate_protocol::PublicKey;
 
 use crate::adapter::IpAdapter;
@@ -40,15 +41,55 @@ struct Inner {
 }
 
 impl Driver {
-    pub fn new(wallet: BootstrapWallet, adapter: IpAdapter, identity: Arc<Identity>) -> Self {
+    pub fn new(
+        wallet: BootstrapWallet,
+        adapter: IpAdapter,
+        identity: Arc<Identity>,
+        price: Price,
+    ) -> Self {
+        let mut session = Session::new();
+        session.set_price(price);
         Self(Arc::new(Inner {
-            session: Mutex::new(Session::new()),
+            session: Mutex::new(session),
             outbox: Mutex::new(BTreeMap::new()),
             peer_ip: Mutex::new(BTreeMap::new()),
             wallet,
             adapter,
             identity,
         }))
+    }
+
+    /// Spawn the metering loop: every `period`, read each known peer's byte
+    /// counters and feed a MeterSample into the session (which charges the
+    /// balance and suspends exhausted peers).
+    pub fn spawn_metering(&self, period: Duration) {
+        let driver = self.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(period);
+            ticker.tick().await; // the first tick fires immediately; skip it
+            loop {
+                ticker.tick().await;
+                let peers: Vec<(String, IpAddr)> = driver
+                    .0
+                    .peer_ip
+                    .lock()
+                    .await
+                    .iter()
+                    .map(|(hex, ip)| (hex.clone(), *ip))
+                    .collect();
+                for (hex, ip) in peers {
+                    let counters = driver.0.adapter.read_counters(ip);
+                    driver.meter(&hex, counters).await;
+                }
+            }
+        });
+    }
+
+    /// Feed a meter reading for a peer into the session.
+    async fn meter(&self, peer_hex: &str, counters: Counters) {
+        let peer = parse_peer(peer_hex);
+        let actions = self.handle(Event::MeterSample { peer, counters }).await;
+        self.dispatch(actions, peer_hex).await;
     }
 
     /// A peer connected — its identity was established by Announce. `ip` is the
@@ -215,7 +256,12 @@ mod tests {
 
     fn test_driver() -> Driver {
         let identity = Arc::new(Identity::load_or_generate(&Config::default()).unwrap());
-        Driver::new(BootstrapWallet::new(vec![]), IpAdapter::new(), identity)
+        Driver::new(
+            BootstrapWallet::new(vec![]),
+            IpAdapter::new(),
+            identity,
+            Price::default(),
+        )
     }
 
     #[tokio::test]

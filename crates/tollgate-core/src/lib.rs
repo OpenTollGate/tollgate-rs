@@ -35,6 +35,6 @@ pub use access::AccessLevel;
 pub use action::Action;
 pub use event::Event;
 pub use peer::PeerId;
-pub use pricing::Product;
+pub use pricing::{Price, Product};
 pub use session::Session;
 pub use time::Millis;

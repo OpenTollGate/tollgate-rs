@@ -121,7 +121,12 @@ mod tests {
 
     fn test_driver() -> Driver {
         let identity = Arc::new(Identity::load_or_generate(&Config::default()).unwrap());
-        Driver::new(BootstrapWallet::new(vec![]), IpAdapter::new(), identity)
+        Driver::new(
+            BootstrapWallet::new(vec![]),
+            IpAdapter::new(),
+            identity,
+            tollgate_core::Price::default(),
+        )
     }
 
     #[tokio::test]
