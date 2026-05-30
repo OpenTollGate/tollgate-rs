@@ -55,8 +55,8 @@ A product defines the structural terms of a delivery service. Each peer subscrib
 
 ```rust
 struct Product {
-    id: ProductId,                     // SHA256(pricing_scale | pricing | extensions)
-    pricing_scale: u64,                // divisor for sub-unit precision (default: 1000)
+    id: ProductId,                     // SHA256 over canonical layout — see Product Identity
+    pricing_scale: u32,                // divisor for sub-unit precision (default: 1000)
     pricing: Vec<MintPricing>,         // per-mint pricing
     extensions: Vec<u8>,               // opaque, implementation-specific parameters
 }
@@ -73,11 +73,38 @@ The `extensions` field carries implementation-specific parameters (e.g., bandwid
 
 ### Product Identity
 
+The product ID is a 32-byte `SHA256` over an explicit, fixed byte layout — **not**
+a hash of a CBOR encoding. Hashing CBOR would be ambiguous: two encoders can
+order map keys differently and produce different IDs for the same product,
+silently breaking product matching across implementations (Rust, Go, esp32). The
+fixed layout below, behind a domain-separation tag, removes that ambiguity. All
+multi-byte integers are **big-endian**.
+
 ```
-product_id = SHA256(pricing_scale | pricing | extensions)
+preimage =
+    "tollgate/product-id/v1"          // domain tag, ASCII, no terminator
+    pricing_scale                     // u32, big-endian
+    count(mint_options)               // u32, big-endian
+    for each mint_option, sorted by mint_url bytes ascending:
+        len(mint_url)                 // u32, big-endian
+        mint_url                      // raw UTF-8 bytes
+        price_per_second              // i64, big-endian
+        price_per_unit                // i64, big-endian
+    len(extensions)                   // u32, big-endian
+    extensions                        // opaque bytes, hashed verbatim
+
+product_id = SHA256(preimage)
 ```
 
-The product ID includes **all** fields — pricing and extensions. Any change (scale, price, or extension parameters) produces a new ID. The peer compares IDs to instantly detect whether renegotiation is needed. This is cheap (one hash comparison) and unambiguous — no need to diff individual fields.
+`extensions` is hashed verbatim as an opaque byte string: the producer
+serializes it once and every implementation hashes the identical bytes, so the
+core never has to agree on how to re-encode it. Sorting mint options by
+`mint_url` makes the ID independent of declaration order.
+
+The product ID includes **all** pricing-relevant fields. Any change (scale,
+price, mint set, or extensions) produces a new ID, so a peer detects whether
+renegotiation is needed with one hash comparison — no need to diff individual
+fields.
 
 ### Examples
 
@@ -389,4 +416,4 @@ metering:
 | Negative pricing | Signed price fields from day one | Core economic mechanism |
 | Product extensions | Opaque CBOR blob for implementation-specific fields | Core hashes but doesn't interpret |
 | Metering interval | Both peers send acceptable range; actual = average of overlap | Deterministic, no extra round-trip, both sides agree |
-| Product identity | `SHA256(pricing_scale \| pricing \| extensions)` | Any change detected with one hash comparison |
+| Product identity | `SHA256` over a canonical byte layout (see Product Identity) | Any change detected with one hash comparison; layout is cross-implementation stable |

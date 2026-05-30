@@ -75,25 +75,53 @@ impl MessageType {
     }
 }
 
-/// Body of a [`MessageType::MeteringReport`] (0x04): cumulative, **unsigned**
-/// resource stats exchanged each interval so both sides compute the same cost.
+/// [`MessageType::MeteringReport`] (0x04): cumulative, **unsigned** resource
+/// stats exchanged each interval so both sides compute the same cost. Counters
+/// are cumulative since the session baseline; no sequence number is needed (the
+/// protocol is self-healing — a lost report is corrected by the next one's
+/// totals).
 ///
-/// Encoded as a CBOR map with integer keys — the convention for every TollGate
-/// message. (Key `0`, the message type, is added by the framing layer.) This
-/// type doubles as the worked example of the `minicbor` derive pattern the rest
-/// of the messages will follow.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Encode, Decode)]
+/// Key 5 (`new_pricing`, the updated pricing array used for price renegotiation)
+/// is reserved until the PriceSheet pricing types exist; only `new_product_id`
+/// (key 4) is carried for now.
+#[derive(Clone, PartialEq, Eq, Debug, Encode, Decode)]
 #[cbor(map)]
 pub struct MeteringReport {
-    /// Cumulative units delivered to the peer since the session baseline.
+    #[n(0)]
+    pub type_tag: u8,
+    /// Milliseconds since session start (cumulative).
     #[n(1)]
-    pub delivered: u64,
-    /// Cumulative units received from the peer since the session baseline.
+    pub elapsed_ms: u64,
+    /// Cumulative units delivered TO the peer since session start.
     #[n(2)]
-    pub received: u64,
-    /// Monotonic interval sequence number.
+    pub delivered: u64,
+    /// Cumulative units received FROM the peer since session start.
     #[n(3)]
-    pub seq: u64,
+    pub received: u64,
+    /// Updated product id for the next interval, if the provider is changing
+    /// price (renegotiation); `None` otherwise.
+    #[n(4)]
+    pub new_product_id: Option<ByteArray<32>>,
+}
+
+impl MeteringReport {
+    pub fn new(elapsed_ms: u64, delivered: u64, received: u64) -> Self {
+        Self {
+            type_tag: MessageType::MeteringReport.as_u8(),
+            elapsed_ms,
+            delivered,
+            received,
+            new_product_id: None,
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        minicbor::to_vec(self).expect("MeteringReport encodes infallibly")
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, minicbor::decode::Error> {
+        minicbor::decode(bytes)
+    }
 }
 
 /// Capability bit: peer can fund and sign Spilman channels. If unset in an
@@ -243,14 +271,20 @@ mod tests {
 
     #[test]
     fn metering_report_cbor_round_trips() {
-        let report = MeteringReport {
-            delivered: 100,
-            received: 40,
-            seq: 3,
-        };
-        let bytes = minicbor::to_vec(report).expect("encode");
-        let back: MeteringReport = minicbor::decode(&bytes).expect("decode");
+        let report = MeteringReport::new(5000, 100, 40);
+        let back = MeteringReport::decode(&report.encode()).expect("decode");
         assert_eq!(report, back);
+        assert_eq!(back.type_tag, MessageType::MeteringReport.as_u8());
+        assert_eq!(back.elapsed_ms, 5000);
+        assert_eq!(back.new_product_id, None);
+    }
+
+    #[test]
+    fn metering_report_carries_renegotiated_product_id() {
+        let mut report = MeteringReport::new(1000, 1, 2);
+        report.new_product_id = Some(ByteArray::from([9u8; 32]));
+        let back = MeteringReport::decode(&report.encode()).expect("decode");
+        assert_eq!(back.new_product_id, Some(ByteArray::from([9u8; 32])));
     }
 
     #[test]

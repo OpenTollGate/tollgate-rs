@@ -162,7 +162,7 @@ Sent by each peer after Announce. Contains one or more product offerings with pe
     {
       1: <product_id>,             // bytes(32) — SHA256 of full product (including pricing)
       2: <extensions>,              // bytes — CBOR-encoded implementation-specific fields
-      3: <pricing_scale>,          // u64 — default 1000
+      3: <pricing_scale>,          // u32 — default 1000
       4: [                         // array of mint options
         {
           1: <option_id>,          // bytes(32) — SHA256(mint_url | mint_unit)
