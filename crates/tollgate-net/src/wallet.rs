@@ -25,14 +25,6 @@ impl BootstrapWallet {
         }
     }
 
-    /// Cheap clone — the underlying HTTP client is already Arc-backed.
-    pub fn clone_ref(&self) -> Self {
-        Self {
-            accepted_mints: self.accepted_mints.clone(),
-            client: self.client.clone(),
-        }
-    }
-
     /// Parse and verify a Cashu token. Returns the amount in milli-sat
     /// if valid, or an error if invalid, already spent, or from an
     /// unaccepted mint.

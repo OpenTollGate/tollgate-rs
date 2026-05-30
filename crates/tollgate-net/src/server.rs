@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use bytes::Bytes;
 
-use tollgate_protocol::{Announce, MessageType, decode_frames, peek_type};
+use tollgate_protocol::{Announce, MessageType, decode_frames, encode_frame, peek_type};
 
 use crate::driver::Driver;
 
@@ -45,7 +45,6 @@ async fn http_exchange(State(driver): State<Driver>, body: Bytes) -> Response {
     // The Announce establishes the peer identity for this exchange. Without
     // transport-layer auth (the IP default), the pubkey comes from Announce.
     let mut peer_hex: Option<String> = None;
-    let mut response = Vec::new();
 
     for frame in frames {
         match peek_type(frame) {
@@ -58,13 +57,21 @@ async fn http_exchange(State(driver): State<Driver>, body: Bytes) -> Response {
                 Err(e) => tracing::warn!(err = %e, "malformed Announce"),
             },
             Some(_) => match &peer_hex {
-                Some(hex) => {
-                    let reply = driver.message_received(hex, frame.to_vec()).await;
-                    response.extend_from_slice(&reply);
-                }
+                Some(hex) => driver.message_received(hex, frame.to_vec()).await,
                 None => tracing::warn!("message received before Announce; ignoring"),
             },
             None => tracing::warn!("unknown or malformed message; ignoring"),
+        }
+    }
+
+    // Return any messages the driver queued for this peer during the exchange,
+    // each as its own length-prefixed frame.
+    let mut response = Vec::new();
+    if let Some(hex) = &peer_hex {
+        for message in driver.drain_outbox(hex).await {
+            if encode_frame(&message, &mut response).is_err() {
+                tracing::error!("queued message exceeds max frame length; dropping");
+            }
         }
     }
 

@@ -3,7 +3,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use tollgate_protocol::{BootstrapToken, MessageType};
+use tollgate_protocol::{BootstrapAck, BootstrapToken, MessageType};
 
 use crate::access::AccessLevel;
 use crate::action::Action;
@@ -99,6 +99,10 @@ impl Session {
                     if ok {
                         peer_session.balance = peer_session.balance.saturating_add(amount);
                         peer_session.phase = PeerPhase::Active;
+                        actions.push(Action::Send {
+                            peer,
+                            bytes: BootstrapAck::accepted().encode(),
+                        });
                         actions.push(Action::SetAccess {
                             peer,
                             level: AccessLevel::Active,
@@ -106,6 +110,10 @@ impl Session {
                         actions.push(Action::StartMetering { peer });
                     } else {
                         peer_session.phase = PeerPhase::New;
+                        actions.push(Action::Send {
+                            peer,
+                            bytes: BootstrapAck::rejected("token verification failed").encode(),
+                        });
                         actions.push(Action::SetAccess {
                             peer,
                             level: AccessLevel::None,
@@ -203,7 +211,55 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, Action::StartMetering { .. }))
         );
+
+        // An accepted BootstrapAck is queued for the wire.
+        let ack_bytes = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Send { bytes, .. } => Some(bytes.clone()),
+                _ => None,
+            })
+            .expect("a Send action carrying a BootstrapAck");
+        let ack = BootstrapAck::decode(&ack_bytes).expect("decode BootstrapAck");
+        assert!(ack.is_accepted());
+
         assert_eq!(session.peer_count(), 1);
+    }
+
+    #[test]
+    fn rejected_bootstrap_blocks_and_acks() {
+        let mut session = Session::new();
+        let p = peer(3);
+        session.handle(Event::PeerConnected { peer: p }, Millis(0));
+
+        let actions = session.handle(
+            Event::BootstrapVerified {
+                peer: p,
+                amount: 0,
+                ok: false,
+            },
+            Millis(1),
+        );
+
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            Action::SetAccess {
+                level: AccessLevel::None,
+                ..
+            }
+        )));
+        let ack_bytes = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Send { bytes, .. } => Some(bytes.clone()),
+                _ => None,
+            })
+            .expect("a Send action carrying a BootstrapAck");
+        assert!(
+            !BootstrapAck::decode(&ack_bytes)
+                .expect("decode")
+                .is_accepted()
+        );
     }
 
     #[test]

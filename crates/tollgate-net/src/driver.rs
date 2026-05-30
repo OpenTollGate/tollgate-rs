@@ -1,10 +1,12 @@
 //! Bridges transport/adapter/wallet ↔ the tollgate-core Session.
 //!
-//! The driver holds the core `Session` behind an async Mutex and exposes a
-//! `handle` method the server calls per incoming frame. It translates
-//! network bytes into `Event`s, calls `Session::handle`, and executes the
-//! returned `Action`s — calling the wallet or adapter as needed.
+//! Holds the core `Session` and a per-peer outbox. The server feeds inbound
+//! frames in; the driver runs them through `Session::handle`, executes the
+//! resulting `Action`s (set firewall access, verify tokens with the mint), and
+//! queues any outbound wire messages in the outbox for the server to return on
+//! the same exchange.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -20,12 +22,14 @@ use crate::adapter::IpAdapter;
 use crate::config::Identity;
 use crate::wallet::BootstrapWallet;
 
-/// Shared handle — cheaply cloned and given to each connection task.
+/// Shared handle — cheaply cloned (Arc) and given to each connection.
 #[derive(Clone)]
 pub struct Driver(Arc<Inner>);
 
 struct Inner {
     session: Mutex<Session>,
+    /// Per-peer queue of outbound message bodies (unframed), keyed by pubkey hex.
+    outbox: Mutex<BTreeMap<String, Vec<Vec<u8>>>>,
     wallet: BootstrapWallet,
     adapter: IpAdapter,
     #[allow(dead_code)]
@@ -36,155 +40,131 @@ impl Driver {
     pub fn new(wallet: BootstrapWallet, adapter: IpAdapter, identity: Arc<Identity>) -> Self {
         Self(Arc::new(Inner {
             session: Mutex::new(Session::new()),
+            outbox: Mutex::new(BTreeMap::new()),
             wallet,
             adapter,
             identity,
         }))
     }
 
-    /// Called by the server when a peer connects (transport-layer auth done).
+    /// A peer connected — its identity was established by Announce.
     pub async fn peer_connected(&self, peer_hex: &str) {
         let peer = parse_peer(peer_hex);
-        let now = now_millis();
-        let actions = self
-            .0
-            .session
-            .lock()
-            .await
-            .handle(Event::PeerConnected { peer }, now);
+        let actions = self.handle(Event::PeerConnected { peer }).await;
         self.dispatch(actions, peer_hex).await;
     }
 
-    /// Called by the server when a peer disconnects.
-    /// Not yet wired: HTTP polling detects disconnect via poll timeout and the
+    /// A peer disconnected.
+    /// Not yet wired: HTTP polling detects this via poll timeout and the
     /// WebSocket path via close frame — both arrive in a later step.
     #[allow(dead_code)]
     pub async fn peer_disconnected(&self, peer_hex: &str) {
         let peer = parse_peer(peer_hex);
-        let now = now_millis();
-        let actions = self
-            .0
-            .session
-            .lock()
-            .await
-            .handle(Event::PeerDisconnected { peer }, now);
+        let actions = self.handle(Event::PeerDisconnected { peer }).await;
         self.dispatch(actions, peer_hex).await;
     }
 
-    /// Called by the server with each decoded frame from a peer.
-    /// Returns encoded response frames to send back (may be empty).
-    pub async fn message_received(&self, peer_hex: &str, bytes: Vec<u8>) -> Vec<u8> {
+    /// A decoded protocol frame arrived from a peer.
+    pub async fn message_received(&self, peer_hex: &str, bytes: Vec<u8>) {
         let peer = parse_peer(peer_hex);
-        let now = now_millis();
-        let actions = self
-            .0
-            .session
+        let actions = self.handle(Event::MessageReceived { peer, bytes }).await;
+        self.dispatch(actions, peer_hex).await;
+    }
+
+    /// Remove and return all queued outbound message bodies for a peer.
+    pub async fn drain_outbox(&self, peer_hex: &str) -> Vec<Vec<u8>> {
+        self.0
+            .outbox
             .lock()
             .await
-            .handle(Event::MessageReceived { peer, bytes }, now);
-        self.dispatch(actions, peer_hex).await;
-        // TODO: collect Send actions and return their encoded bytes.
-        Vec::new()
+            .remove(peer_hex)
+            .unwrap_or_default()
+    }
+
+    /// Run one event through the core session, releasing the lock before any I/O.
+    async fn handle(&self, event: Event) -> Vec<Action> {
+        let now = now_millis();
+        self.0.session.lock().await.handle(event, now)
     }
 
     async fn dispatch(&self, actions: Vec<Action>, peer_hex: &str) {
         for action in actions {
             match action {
-                Action::SetAccess { peer: _, level } => {
-                    self.0.adapter.set_access(peer_hex, level);
-                }
-
                 Action::VerifyBootstrapToken { peer, token } => {
-                    let token_str = match std::str::from_utf8(&token) {
-                        Ok(s) => s.to_string(),
-                        Err(_) => {
-                            tracing::warn!(peer = peer_hex, "bootstrap token is not valid UTF-8");
-                            self.send_bootstrap_result(peer, false, 0).await;
-                            continue;
-                        }
-                    };
-
-                    let wallet = self.0.wallet.clone_ref();
-                    let driver = self.clone();
-                    let peer_hex_owned = peer_hex.to_string();
-
-                    // Verify against the mint without holding the session lock.
-                    tokio::spawn(async move {
-                        let (ok, amount) = match wallet.verify(&token_str).await {
-                            Ok(amount) => {
-                                tracing::info!(
-                                    peer = %peer_hex_owned,
-                                    amount_milli_sat = amount,
-                                    "bootstrap token verified"
-                                );
-                                (true, amount)
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    peer = %peer_hex_owned,
-                                    err = %e,
-                                    "bootstrap token rejected"
-                                );
-                                (false, 0)
-                            }
-                        };
-                        driver.send_bootstrap_result(peer, ok, amount).await;
-                    });
+                    // Verify with the mint inline (the session lock is not held
+                    // here), then feed the result back into the session. The
+                    // follow-up actions never contain another VerifyBootstrapToken,
+                    // so there is no async recursion.
+                    let (ok, amount) = self.verify_token(peer_hex, &token).await;
+                    let follow = self
+                        .handle(Event::BootstrapVerified { peer, amount, ok })
+                        .await;
+                    for action in follow {
+                        self.execute(action).await;
+                    }
                 }
-
-                Action::StartMetering { peer: _ } => {
-                    tracing::debug!(peer = peer_hex, "start metering (stub)");
-                    // TODO: subscribe to OS byte counters and emit MeterSample events.
-                }
-
-                Action::StopMetering { peer: _ } => {
-                    tracing::debug!(peer = peer_hex, "stop metering");
-                }
-
-                Action::Send { peer: _, bytes: _ } => {
-                    // TODO: route bytes to the connection's write half.
-                    tracing::debug!(peer = peer_hex, "send (stub)");
-                }
-
-                Action::Disconnect { peer: _ } => {
-                    tracing::debug!(peer = peer_hex, "disconnect (stub)");
-                }
+                other => self.execute(other).await,
             }
         }
     }
 
-    /// Feed a bootstrap verification result back into the session.
-    /// Separate non-recursive method so it doesn't cause async recursion.
-    async fn send_bootstrap_result(&self, peer: PeerId, ok: bool, amount: u64) {
-        let peer_hex = hex::encode(peer.0.as_bytes());
-        let now = now_millis();
-        let actions = self
-            .0
-            .session
-            .lock()
-            .await
-            .handle(Event::BootstrapVerified { peer, amount, ok }, now);
-        // dispatch the resulting actions (SetAccess, StartMetering, etc.) directly,
-        // without recursing through VerifyBootstrapToken again.
-        for action in actions {
-            match action {
-                Action::SetAccess { peer: _, level } => {
-                    self.0.adapter.set_access(&peer_hex, level);
-                }
-                Action::StartMetering { peer: _ } => {
-                    tracing::debug!(peer = %peer_hex, "start metering (stub)");
-                }
-                Action::StopMetering { peer: _ } => {
-                    tracing::debug!(peer = %peer_hex, "stop metering");
-                }
-                Action::Send { .. } | Action::Disconnect { .. } => {}
-                // VerifyBootstrapToken cannot appear here — core only emits it
-                // from MessageReceived, not from BootstrapVerified.
-                Action::VerifyBootstrapToken { .. } => {
-                    tracing::error!("unexpected VerifyBootstrapToken from BootstrapVerified");
-                }
+    /// Execute a non-I/O action. (Token verification is handled in `dispatch`.)
+    async fn execute(&self, action: Action) {
+        match action {
+            Action::SetAccess { peer, level } => {
+                self.0.adapter.set_access(&peer_to_hex(peer), level);
+            }
+            Action::Send { peer, bytes } => {
+                self.enqueue(&peer_to_hex(peer), bytes).await;
+            }
+            Action::StartMetering { peer } => {
+                tracing::debug!(peer = %peer_to_hex(peer), "start metering (stub)");
+            }
+            Action::StopMetering { peer } => {
+                tracing::debug!(peer = %peer_to_hex(peer), "stop metering");
+            }
+            Action::Disconnect { peer } => {
+                tracing::debug!(peer = %peer_to_hex(peer), "disconnect (stub)");
+            }
+            Action::VerifyBootstrapToken { .. } => {
+                tracing::error!("VerifyBootstrapToken must be handled by dispatch");
             }
         }
+    }
+
+    /// Verify a bootstrap token with its mint. Returns `(accepted, milli_sat)`.
+    async fn verify_token(&self, peer_hex: &str, token: &[u8]) -> (bool, u64) {
+        let token_str = match std::str::from_utf8(token) {
+            Ok(s) => s,
+            Err(_) => {
+                tracing::warn!(peer = peer_hex, "bootstrap token is not valid UTF-8");
+                return (false, 0);
+            }
+        };
+        match self.0.wallet.verify(token_str).await {
+            Ok(amount) => {
+                tracing::info!(
+                    peer = peer_hex,
+                    amount_milli_sat = amount,
+                    "bootstrap token verified"
+                );
+                (true, amount)
+            }
+            Err(e) => {
+                tracing::warn!(peer = peer_hex, err = %e, "bootstrap token rejected");
+                (false, 0)
+            }
+        }
+    }
+
+    async fn enqueue(&self, peer_hex: &str, message: Vec<u8>) {
+        self.0
+            .outbox
+            .lock()
+            .await
+            .entry(peer_hex.to_string())
+            .or_default()
+            .push(message);
     }
 }
 
@@ -196,6 +176,10 @@ fn parse_peer(peer_hex: &str) -> PeerId {
     PeerId(PublicKey::from_bytes(arr))
 }
 
+fn peer_to_hex(peer: PeerId) -> String {
+    hex::encode(peer.0.as_bytes())
+}
+
 fn now_millis() -> Millis {
     Millis(
         SystemTime::now()
@@ -203,4 +187,46 @@ fn now_millis() -> Millis {
             .unwrap_or_default()
             .as_millis() as u64,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::config::Config;
+
+    fn test_driver() -> Driver {
+        let identity = Arc::new(Identity::load_or_generate(&Config::default()).unwrap());
+        Driver::new(BootstrapWallet::new(vec![]), IpAdapter::new(), identity)
+    }
+
+    #[tokio::test]
+    async fn send_action_is_queued_then_drained_once() {
+        let driver = test_driver();
+        let peer = PeerId(PublicKey::from_bytes([3u8; 33]));
+        let hex = peer_to_hex(peer);
+
+        driver
+            .execute(Action::Send {
+                peer,
+                bytes: vec![1, 2, 3],
+            })
+            .await;
+
+        assert_eq!(driver.drain_outbox(&hex).await, vec![vec![1u8, 2, 3]]);
+        // A second drain yields nothing.
+        assert!(driver.drain_outbox(&hex).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bare_connect_queues_no_wire_message() {
+        let driver = test_driver();
+        let peer = PeerId(PublicKey::from_bytes([4u8; 33]));
+        let hex = peer_to_hex(peer);
+
+        driver.peer_connected(&hex).await;
+
+        // PeerConnected only sets access (None); nothing to send on the wire.
+        assert!(driver.drain_outbox(&hex).await.is_empty());
+    }
 }
