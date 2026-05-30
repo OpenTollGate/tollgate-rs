@@ -3,6 +3,8 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+use tollgate_protocol::{BootstrapToken, MessageType};
+
 use crate::access::AccessLevel;
 use crate::action::Action;
 use crate::event::Event;
@@ -36,7 +38,11 @@ struct PeerSession {
 
 impl PeerSession {
     fn new() -> Self {
-        Self { phase: PeerPhase::New, balance: 0, counters: Counters::default() }
+        Self {
+            phase: PeerPhase::New,
+            balance: 0,
+            counters: Counters::default(),
+        }
     }
 }
 
@@ -64,18 +70,27 @@ impl Session {
             Event::PeerConnected { peer } => {
                 self.peers.insert(peer, PeerSession::new());
                 // New peers start blocked until they pay (access-control default).
-                actions.push(Action::SetAccess { peer, level: AccessLevel::None });
+                actions.push(Action::SetAccess {
+                    peer,
+                    level: AccessLevel::None,
+                });
             }
 
             Event::MessageReceived { peer, bytes } => {
-                // Skeleton: a real implementation decodes the frame with
-                // `tollgate-protocol` and dispatches on the message type. The
-                // bootstrap-only path turns a BootstrapPayment (0x06) into a
-                // token-verification request.
-                // TODO: decode `bytes` and branch on MessageType.
-                if let Some(peer_session) = self.peers.get_mut(&peer) {
-                    peer_session.phase = PeerPhase::BootstrapPending;
-                    actions.push(Action::VerifyBootstrapToken { peer, token: bytes });
+                // Decode the message type and dispatch. The bootstrap-only path
+                // turns a BootstrapToken (0x07) into a token-verification request
+                // carrying the actual Cashu token bytes.
+                // TODO: handle Announce, PriceSheet, Accept, MeteringReport, etc.
+                if let Some(MessageType::BootstrapToken) = tollgate_protocol::peek_type(&bytes) {
+                    if let Ok(msg) = BootstrapToken::decode(&bytes) {
+                        if let Some(peer_session) = self.peers.get_mut(&peer) {
+                            peer_session.phase = PeerPhase::BootstrapPending;
+                            actions.push(Action::VerifyBootstrapToken {
+                                peer,
+                                token: msg.token_bytes(),
+                            });
+                        }
+                    }
                 }
             }
 
@@ -84,11 +99,17 @@ impl Session {
                     if ok {
                         peer_session.balance = peer_session.balance.saturating_add(amount);
                         peer_session.phase = PeerPhase::Active;
-                        actions.push(Action::SetAccess { peer, level: AccessLevel::Active });
+                        actions.push(Action::SetAccess {
+                            peer,
+                            level: AccessLevel::Active,
+                        });
                         actions.push(Action::StartMetering { peer });
                     } else {
                         peer_session.phase = PeerPhase::New;
-                        actions.push(Action::SetAccess { peer, level: AccessLevel::None });
+                        actions.push(Action::SetAccess {
+                            peer,
+                            level: AccessLevel::None,
+                        });
                     }
                 }
             }
@@ -126,7 +147,6 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
     use tollgate_protocol::PublicKey;
 
     fn peer(byte: u8) -> PeerId {
@@ -141,19 +161,48 @@ mod tests {
         let actions = session.handle(Event::PeerConnected { peer: p }, Millis(0));
         assert!(matches!(
             actions.as_slice(),
-            [Action::SetAccess { level: AccessLevel::None, .. }]
+            [Action::SetAccess {
+                level: AccessLevel::None,
+                ..
+            }]
         ));
 
-        let actions =
-            session.handle(Event::MessageReceived { peer: p, bytes: vec![0x06] }, Millis(1));
-        assert!(matches!(actions.as_slice(), [Action::VerifyBootstrapToken { .. }]));
+        let token_frame =
+            tollgate_protocol::BootstrapToken::new(b"cashuBtesttoken".to_vec()).encode();
+        let actions = session.handle(
+            Event::MessageReceived {
+                peer: p,
+                bytes: token_frame,
+            },
+            Millis(1),
+        );
+        match actions.as_slice() {
+            [Action::VerifyBootstrapToken { token, .. }] => {
+                assert_eq!(token, b"cashuBtesttoken");
+            }
+            other => panic!("expected VerifyBootstrapToken, got {other:?}"),
+        }
 
-        let actions =
-            session.handle(Event::BootstrapVerified { peer: p, amount: 5000, ok: true }, Millis(2));
-        assert!(actions
-            .iter()
-            .any(|a| matches!(a, Action::SetAccess { level: AccessLevel::Active, .. })));
-        assert!(actions.iter().any(|a| matches!(a, Action::StartMetering { .. })));
+        let actions = session.handle(
+            Event::BootstrapVerified {
+                peer: p,
+                amount: 5000,
+                ok: true,
+            },
+            Millis(2),
+        );
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            Action::SetAccess {
+                level: AccessLevel::Active,
+                ..
+            }
+        )));
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::StartMetering { .. }))
+        );
         assert_eq!(session.peer_count(), 1);
     }
 
@@ -163,7 +212,11 @@ mod tests {
         let p = peer(2);
         session.handle(Event::PeerConnected { peer: p }, Millis(0));
         let actions = session.handle(Event::PeerDisconnected { peer: p }, Millis(1));
-        assert!(actions.iter().any(|a| matches!(a, Action::StopMetering { .. })));
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::StopMetering { .. }))
+        );
         assert_eq!(session.peer_count(), 0);
     }
 }

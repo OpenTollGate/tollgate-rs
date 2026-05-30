@@ -4,45 +4,140 @@
 //!   POST /tollgate/v1/exchange   — HTTP polling (2-byte LE length-prefixed CBOR frames)
 //!   GET  /tollgate/v1/ws        — WebSocket upgrade (one CBOR message per binary frame)
 
-use axum::{Router, extract::State, response::IntoResponse, routing::get};
+use axum::Router;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
 use bytes::Bytes;
+
+use tollgate_protocol::{Announce, MessageType, decode_frames, peek_type};
 
 use crate::driver::Driver;
 
 pub async fn serve(listen: &str, driver: Driver) -> anyhow::Result<()> {
-    let app = Router::new()
-        .route("/tollgate/v1/exchange", axum::routing::post(http_exchange))
-        .route("/tollgate/v1/ws", get(ws_upgrade))
-        .with_state(driver);
-
+    let app = router(driver);
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!(addr = %listener.local_addr()?, "listening");
     axum::serve(listener, app).await?;
     Ok(())
 }
 
-/// HTTP polling transport.
-///
-/// The request body is a sequence of length-prefixed CBOR frames (2-byte LE
-/// length + CBOR bytes). We decode them, push through the driver, and return
-/// any queued response frames in the same format.
-///
-/// Peer identity: the Announce message (0x00) inside the first frame carries
-/// the sender's pubkey. Until that's decoded, we use the raw bytes as a
-/// temporary handle. Full peer tracking requires Announce parsing (next step).
-async fn http_exchange(
-    State(driver): State<Driver>,
-    body: Bytes,
-) -> impl IntoResponse {
-    // TODO: decode length-prefixed frames, route through driver, return response frames.
-    // For now: echo the received length back for smoke-testing.
-    tracing::debug!(bytes = body.len(), "http_exchange (stub)");
-    format!("received {} bytes", body.len())
+fn router(driver: Driver) -> Router {
+    Router::new()
+        .route("/tollgate/v1/exchange", axum::routing::post(http_exchange))
+        .route("/tollgate/v1/ws", get(ws_upgrade))
+        .with_state(driver)
+}
+
+/// HTTP polling transport. The request body is zero or more length-prefixed
+/// CBOR frames. We establish the peer from its Announce (first message of a
+/// session), route the rest through the driver, and return any queued response
+/// frames in the same framing.
+async fn http_exchange(State(driver): State<Driver>, body: Bytes) -> Response {
+    let frames = match decode_frames(&body) {
+        Ok(f) => f,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, format!("bad framing: {e:?}")).into_response();
+        }
+    };
+
+    // The Announce establishes the peer identity for this exchange. Without
+    // transport-layer auth (the IP default), the pubkey comes from Announce.
+    let mut peer_hex: Option<String> = None;
+    let mut response = Vec::new();
+
+    for frame in frames {
+        match peek_type(frame) {
+            Some(MessageType::Announce) => match Announce::decode(frame) {
+                Ok(announce) => {
+                    let hex = hex::encode(announce.public_key().as_bytes());
+                    driver.peer_connected(&hex).await;
+                    peer_hex = Some(hex);
+                }
+                Err(e) => tracing::warn!(err = %e, "malformed Announce"),
+            },
+            Some(_) => match &peer_hex {
+                Some(hex) => {
+                    let reply = driver.message_received(hex, frame.to_vec()).await;
+                    response.extend_from_slice(&reply);
+                }
+                None => tracing::warn!("message received before Announce; ignoring"),
+            },
+            None => tracing::warn!("unknown or malformed message; ignoring"),
+        }
+    }
+
+    (StatusCode::OK, response).into_response()
 }
 
 /// WebSocket upgrade.
-async fn ws_upgrade(State(_driver): State<Driver>) -> impl IntoResponse {
-    // TODO: upgrade to WebSocket, stream frames through driver per connection.
-    tracing::debug!("ws_upgrade (stub)");
-    "websocket upgrade stub"
+async fn ws_upgrade(State(_driver): State<Driver>) -> Response {
+    // TODO: upgrade to a WebSocket, stream one CBOR message per binary frame
+    // through the driver per connection.
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        "websocket transport not yet implemented",
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    use crate::adapter::IpAdapter;
+    use crate::config::{Config, Identity};
+    use crate::wallet::BootstrapWallet;
+
+    fn test_driver() -> Driver {
+        let identity = Arc::new(Identity::load_or_generate(&Config::default()).unwrap());
+        Driver::new(BootstrapWallet::new(vec![]), IpAdapter::new(), identity)
+    }
+
+    #[tokio::test]
+    async fn announce_establishes_peer_and_returns_ok() {
+        let app = router(test_driver());
+
+        let pk = tollgate_protocol::PublicKey::from_bytes([2u8; 33]);
+        let announce = Announce::new(1, pk, "bytes", 0).encode();
+        let body = tollgate_protocol::frame(&announce).unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tollgate/v1/exchange")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn malformed_framing_is_rejected() {
+        let app = router(test_driver());
+
+        // A length prefix claiming 9 bytes but with no body.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tollgate/v1/exchange")
+                    .body(Body::from(vec![0x09, 0x00]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
 }

@@ -16,7 +16,11 @@ use std::sync::Arc;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "tollgate", version, about = "Sell metered network access with Cashu micropayments")]
+#[command(
+    name = "tollgate",
+    version,
+    about = "Sell metered network access with Cashu micropayments"
+)]
 struct Cli {
     /// Path to a config file. Searched in order if omitted:
     /// ./tollgate.yaml, ~/.config/tollgate/tollgate.yaml, /etc/tollgate/tollgate.yaml

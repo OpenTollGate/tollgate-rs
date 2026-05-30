@@ -2105,6 +2105,7 @@ dependencies = [
  "tokio",
  "tollgate-core",
  "tollgate-protocol",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

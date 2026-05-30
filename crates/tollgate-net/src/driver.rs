@@ -46,16 +46,28 @@ impl Driver {
     pub async fn peer_connected(&self, peer_hex: &str) {
         let peer = parse_peer(peer_hex);
         let now = now_millis();
-        let actions = self.0.session.lock().await.handle(Event::PeerConnected { peer }, now);
+        let actions = self
+            .0
+            .session
+            .lock()
+            .await
+            .handle(Event::PeerConnected { peer }, now);
         self.dispatch(actions, peer_hex).await;
     }
 
     /// Called by the server when a peer disconnects.
+    /// Not yet wired: HTTP polling detects disconnect via poll timeout and the
+    /// WebSocket path via close frame — both arrive in a later step.
+    #[allow(dead_code)]
     pub async fn peer_disconnected(&self, peer_hex: &str) {
         let peer = parse_peer(peer_hex);
         let now = now_millis();
-        let actions =
-            self.0.session.lock().await.handle(Event::PeerDisconnected { peer }, now);
+        let actions = self
+            .0
+            .session
+            .lock()
+            .await
+            .handle(Event::PeerDisconnected { peer }, now);
         self.dispatch(actions, peer_hex).await;
     }
 
@@ -64,8 +76,12 @@ impl Driver {
     pub async fn message_received(&self, peer_hex: &str, bytes: Vec<u8>) -> Vec<u8> {
         let peer = parse_peer(peer_hex);
         let now = now_millis();
-        let actions =
-            self.0.session.lock().await.handle(Event::MessageReceived { peer, bytes }, now);
+        let actions = self
+            .0
+            .session
+            .lock()
+            .await
+            .handle(Event::MessageReceived { peer, bytes }, now);
         self.dispatch(actions, peer_hex).await;
         // TODO: collect Send actions and return their encoded bytes.
         Vec::new()

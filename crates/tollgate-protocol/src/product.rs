@@ -78,7 +78,11 @@ mod tests {
     use alloc::vec;
 
     fn price(url: &str, per_sec: i64, per_unit: i64) -> MintPrice {
-        MintPrice { mint_url: url.to_string(), price_per_second: per_sec, price_per_unit: per_unit }
+        MintPrice {
+            mint_url: url.to_string(),
+            price_per_second: per_sec,
+            price_per_unit: per_unit,
+        }
     }
 
     #[test]

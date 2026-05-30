@@ -97,7 +97,10 @@ impl Identity {
             }
         };
         let public_key = secret_key.public_key(&secp);
-        Ok(Self { public_key, secret_key })
+        Ok(Self {
+            public_key,
+            secret_key,
+        })
     }
 
     /// The compressed public key as lowercase hex (33 bytes → 66 chars).
