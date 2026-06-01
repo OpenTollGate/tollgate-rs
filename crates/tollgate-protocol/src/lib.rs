@@ -14,6 +14,7 @@ mod product;
 
 pub use codec::{FrameError, MAX_FRAME_LEN, decode_frames, encode_frame, frame, peek_type};
 pub use message::{
-    Announce, BootstrapAck, BootstrapToken, CAP_SPILMAN, MessageType, MeteringReport, PublicKey,
+    Announce, BootstrapAck, BootstrapToken, CAP_SPILMAN, MessageType, MeteringReport,
+    PROTOCOL_VERSION, PublicKey,
 };
 pub use product::{DEFAULT_PRICING_SCALE, MintPrice, ProductId, product_id};

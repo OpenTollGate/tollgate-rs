@@ -25,6 +25,8 @@ pub struct Config {
     pub products: Vec<ProductConfig>,
     /// How TollGate manages the host firewall.
     pub firewall: FirewallMode,
+    /// Resource unit this node meters, advertised in Announce ("bytes", "wh", …).
+    pub unit: String,
 }
 
 impl Default for Config {
@@ -35,6 +37,7 @@ impl Default for Config {
             mints: Vec::new(),
             products: Vec::new(),
             firewall: FirewallMode::default(),
+            unit: "bytes".to_string(),
         }
     }
 }

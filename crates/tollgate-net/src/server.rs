@@ -68,6 +68,13 @@ async fn http_exchange(
             Some(MessageType::Announce) => match Announce::decode(frame) {
                 Ok(announce) => {
                     let hex = hex::encode(announce.public_key().as_bytes());
+                    tracing::info!(
+                        peer = %hex,
+                        version = announce.version,
+                        unit = %announce.unit,
+                        ip = ?peer_ip,
+                        "peer announced"
+                    );
                     driver.peer_connected(&hex, peer_ip).await;
                     peer_hex = Some(hex);
                 }
@@ -126,6 +133,7 @@ mod tests {
             IpAdapter::new(),
             identity,
             tollgate_core::Price::default(),
+            "bytes",
         )
     }
 

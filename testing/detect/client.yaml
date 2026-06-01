@@ -1,0 +1,3 @@
+# Child node (client). Probes the gateway to detect it.
+unit: "bytes"
+firewall: sets-only

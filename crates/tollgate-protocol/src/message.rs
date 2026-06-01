@@ -124,6 +124,9 @@ impl MeteringReport {
     }
 }
 
+/// Current TollGate protocol version, carried in [`Announce`] field 1.
+pub const PROTOCOL_VERSION: u8 = 1;
+
 /// Capability bit: peer can fund and sign Spilman channels. If unset in an
 /// [`Announce`], the peer is bootstrap-only.
 pub const CAP_SPILMAN: u32 = 0x01;

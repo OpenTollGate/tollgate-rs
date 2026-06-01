@@ -5,6 +5,7 @@
 //! FIPS integration are layered on later.
 
 mod adapter;
+mod client;
 mod config;
 mod driver;
 mod server;
@@ -13,7 +14,7 @@ mod wallet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -26,9 +27,24 @@ struct Cli {
     /// ./tollgate.yaml, ~/.config/tollgate/tollgate.yaml, /etc/tollgate/tollgate.yaml
     #[arg(short, long)]
     config: Option<PathBuf>,
-    /// Override the listen address (default: 127.0.0.1:4747).
-    #[arg(long)]
-    listen: Option<String>,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Run the node: listen for peers and sell metered access. (Default.)
+    Serve {
+        /// Override the listen address (default: 127.0.0.1:4747).
+        #[arg(long)]
+        listen: Option<String>,
+    },
+    /// Probe a peer: send our Announce and report the peer's identity.
+    Connect {
+        /// Peer HTTP origin, e.g. http://gateway:4747
+        #[arg(long)]
+        peer: String,
+    },
 }
 
 #[tokio::main]
@@ -38,12 +54,23 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let mut cfg = config::Config::load(cli.config.as_deref())?;
-    if let Some(listen) = cli.listen {
+    let cfg = config::Config::load(cli.config.as_deref())?;
+    let identity = Arc::new(config::Identity::load_or_generate(&cfg)?);
+
+    match cli.command.unwrap_or(Command::Serve { listen: None }) {
+        Command::Serve { listen } => serve(cfg, identity, listen).await,
+        Command::Connect { peer } => connect(&cfg, &identity, &peer).await,
+    }
+}
+
+async fn serve(
+    mut cfg: config::Config,
+    identity: Arc<config::Identity>,
+    listen: Option<String>,
+) -> anyhow::Result<()> {
+    if let Some(listen) = listen {
         cfg.listen = listen;
     }
-
-    let identity = Arc::new(config::Identity::load_or_generate(&cfg)?);
     tracing::info!(pubkey = %identity.pubkey_hex(), listen = %cfg.listen, "starting tollgate node");
 
     let wallet = wallet::BootstrapWallet::new(cfg.mints.clone());
@@ -62,8 +89,29 @@ async fn main() -> anyhow::Result<()> {
         })
         .unwrap_or_default();
 
-    let driver = driver::Driver::new(wallet, adapter, identity, price);
+    let driver = driver::Driver::new(wallet, adapter, identity, price, cfg.unit.clone());
     driver.spawn_metering(std::time::Duration::from_secs(5));
 
     server::serve(&cfg.listen, driver).await
+}
+
+async fn connect(
+    cfg: &config::Config,
+    identity: &config::Identity,
+    peer: &str,
+) -> anyhow::Result<()> {
+    tracing::info!(pubkey = %identity.pubkey_hex(), %peer, "probing peer");
+    let detected = client::detect(peer, identity, &cfg.unit).await?;
+    tracing::info!(
+        peer_pubkey = %detected.pubkey_hex,
+        peer_unit = %detected.unit,
+        peer_version = detected.version,
+        "detected peer"
+    );
+    // Machine-readable line for test harnesses to grep.
+    println!(
+        "DETECTED peer={} unit={} version={}",
+        detected.pubkey_hex, detected.unit, detected.version
+    );
+    Ok(())
 }

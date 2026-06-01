@@ -18,7 +18,7 @@ use tollgate_core::event::Event;
 use tollgate_core::metering::Counters;
 use tollgate_core::time::Millis;
 use tollgate_core::{PeerId, Price, Session};
-use tollgate_protocol::PublicKey;
+use tollgate_protocol::{Announce, PROTOCOL_VERSION, PublicKey};
 
 use crate::adapter::IpAdapter;
 use crate::config::Identity;
@@ -36,8 +36,9 @@ struct Inner {
     peer_ip: Mutex<BTreeMap<String, IpAddr>>,
     wallet: BootstrapWallet,
     adapter: IpAdapter,
-    #[allow(dead_code)]
     identity: Arc<Identity>,
+    /// Resource unit this node meters ("bytes", "wh", …), sent in our Announce.
+    unit: String,
 }
 
 impl Driver {
@@ -46,6 +47,7 @@ impl Driver {
         adapter: IpAdapter,
         identity: Arc<Identity>,
         price: Price,
+        unit: impl Into<String>,
     ) -> Self {
         let mut session = Session::new();
         session.set_price(price);
@@ -56,7 +58,15 @@ impl Driver {
             wallet,
             adapter,
             identity,
+            unit: unit.into(),
         }))
+    }
+
+    /// This node's own Announce, encoded — sent to a peer so both sides learn
+    /// each other's identity (mutual detection).
+    fn our_announce(&self) -> Vec<u8> {
+        let pubkey = PublicKey::from_bytes(self.0.identity.public_key.serialize());
+        Announce::new(PROTOCOL_VERSION, pubkey, self.0.unit.clone(), 0).encode()
     }
 
     /// Spawn the metering loop: every `period`, read each known peer's byte
@@ -101,6 +111,9 @@ impl Driver {
         let peer = parse_peer(peer_hex);
         let actions = self.handle(Event::PeerConnected { peer }).await;
         self.dispatch(actions, peer_hex).await;
+        // Announce ourselves back so the peer learns our identity (mutual
+        // detection). Queued on the outbox; the transport returns it.
+        self.enqueue(peer_hex, self.our_announce()).await;
     }
 
     /// A peer disconnected.
@@ -261,6 +274,7 @@ mod tests {
             IpAdapter::new(),
             identity,
             Price::default(),
+            "bytes",
         )
     }
 
@@ -283,14 +297,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bare_connect_queues_no_wire_message() {
+    async fn connect_queues_our_announce_for_mutual_detection() {
         let driver = test_driver();
         let peer = PeerId(PublicKey::from_bytes([4u8; 33]));
         let hex = peer_to_hex(peer);
 
         driver.peer_connected(&hex, None).await;
 
-        // PeerConnected only sets access (None); nothing to send on the wire.
-        assert!(driver.drain_outbox(&hex).await.is_empty());
+        // On connect we Announce ourselves back so the peer learns our identity.
+        let queued = driver.drain_outbox(&hex).await;
+        assert_eq!(queued.len(), 1);
+        let announce = tollgate_protocol::Announce::decode(&queued[0]).expect("our Announce");
+        assert_eq!(
+            announce.public_key().as_bytes(),
+            &driver.0.identity.public_key.serialize()
+        );
     }
 }
