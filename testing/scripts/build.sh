@@ -14,6 +14,11 @@ if [ ! -f "$PROJECT_ROOT/Cargo.toml" ]; then
     exit 1
 fi
 
+# BuildKit is required for the Dockerfile's cache mounts (persisted cargo
+# registry + target/ across builds). Default in modern Docker; forced here so
+# incremental rebuilds are fast regardless of daemon config.
+export DOCKER_BUILDKIT=1
+
 echo "Building tollgate-test:latest (workspace compiled once inside the image)..."
 docker build \
     -t tollgate-test:latest \

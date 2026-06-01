@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Single build of the `tollgate` binary, reused by every test container.
 #
 # Stage 1 (builder) compiles the workspace once. Stage 2 (runtime) is a slim
@@ -7,22 +8,28 @@
 #
 # Build context is the repo root (see build.sh), so the whole workspace is
 # available to the builder.
+#
+# Caching: BuildKit cache mounts persist the cargo registry and the target/
+# directory *across* builds, so a source edit recompiles only what changed
+# rather than every dependency from scratch. The `cp` out of target/ happens in
+# the same RUN because cache-mount contents do not survive into the image layer.
 
 # ---- Stage 1: build ----
 FROM rust:1.94-slim-trixie AS builder
 
 WORKDIR /src
 
-# Build dependencies for secp256k1 (cc) and TLS (pkg-config/openssl via rustls
-# we avoid openssl, but cc + perl are needed by some -sys crates).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy the full workspace and build the release binary in one layer.
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN cargo build --release --bin tollgate && \
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --bin tollgate && \
     cp target/release/tollgate /tollgate
 
 # ---- Stage 2: runtime ----

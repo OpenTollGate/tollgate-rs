@@ -197,19 +197,23 @@ mod nft {
         Ok(())
     }
 
-    /// Add or remove `ip` from the paid-peers set.
+    /// Add or remove `ip` from the paid-peers set. `nft` output is captured (not
+    /// inherited) so a benign "element does not exist" on delete doesn't leak to
+    /// our own stdout/stderr.
     pub fn apply(ip: std::net::IpAddr, add: bool) {
         let args = nft_element_args(ip, add);
-        match Command::new("nft").args(&args).status() {
-            Ok(status) if status.success() => {
+        match Command::new("nft").args(&args).output() {
+            Ok(out) if out.status.success() => {
                 tracing::debug!(%ip, add, "nftables set updated");
             }
-            Ok(status) => {
-                // A delete of an absent element is benign; an add failure is not.
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                // A delete of an absent element is benign (e.g. revoking a peer
+                // that was never granted); an add failure is not.
                 if add {
-                    tracing::warn!(%ip, %status, "nft add element failed");
+                    tracing::warn!(%ip, status = %out.status, %stderr, "nft add element failed");
                 } else {
-                    tracing::debug!(%ip, %status, "nft delete element (likely absent)");
+                    tracing::debug!(%ip, "nft delete element (likely absent)");
                 }
             }
             Err(e) => tracing::warn!(%ip, err = %e, "could not run nft"),
@@ -272,20 +276,28 @@ mod nft {
         }
     }
 
-    /// Run an `nft -f -` batch from a ruleset string.
+    /// Run an `nft -f -` batch from a ruleset string. Output is captured so
+    /// nft's diagnostics never leak to our own stdout/stderr; on failure the
+    /// captured stderr is included in the error.
     fn run_batch(ruleset: &str) -> anyhow::Result<()> {
         let mut child = Command::new("nft")
             .arg("-f")
             .arg("-")
             .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .spawn()?;
         child
             .stdin
             .take()
             .ok_or_else(|| anyhow::anyhow!("failed to open nft stdin"))?
             .write_all(ruleset.as_bytes())?;
-        if !child.wait()?.success() {
-            anyhow::bail!("nft batch failed");
+        let out = child.wait_with_output()?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "nft batch failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
         Ok(())
     }

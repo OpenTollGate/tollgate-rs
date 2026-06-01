@@ -41,15 +41,18 @@ echo "----------------------"
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
+# Extract the 66-hex-char pubkey following the first `peer=` on matching lines.
+# grep -oE avoids sed portability quirks (BSD vs GNU) across host platforms.
+pubkey_after_peer() { grep -oE 'peer=[0-9a-f]{66}' | head -1 | cut -d= -f2; }
+
 # 1. Client detected the gateway.
-detected_line="$(echo "$CLIENT_LOG" | grep -o 'DETECTED peer=[0-9a-f]* unit=[^ ]* version=[0-9]*' | head -1 || true)"
-[ -n "$detected_line" ] || fail "client did not print a DETECTED line"
-gateway_pubkey="$(echo "$detected_line" | sed -n 's/.*peer=\([0-9a-f]*\).*/\1/p')"
+echo "$CLIENT_LOG" | grep -q 'DETECTED peer=' || fail "client did not print a DETECTED line"
+gateway_pubkey="$(echo "$CLIENT_LOG" | grep 'DETECTED peer=' | pubkey_after_peer)"
 [ ${#gateway_pubkey} -eq 66 ] || fail "gateway pubkey is not 33 bytes hex (got '${gateway_pubkey}')"
 
 # 2. Gateway saw the client announce.
 echo "$GATEWAY_LOG" | grep -q "peer announced" || fail "gateway did not log a peer announce"
-client_pubkey="$(echo "$GATEWAY_LOG" | sed -n 's/.*peer announced.*peer=\([0-9a-f]*\).*/\1/p' | head -1)"
+client_pubkey="$(echo "$GATEWAY_LOG" | grep "peer announced" | pubkey_after_peer)"
 [ ${#client_pubkey} -eq 66 ] || fail "client pubkey not found in gateway log (got '${client_pubkey}')"
 
 # 3. They are distinct nodes.
