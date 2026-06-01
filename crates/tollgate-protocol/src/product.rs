@@ -15,6 +15,9 @@ pub struct MintPrice {
     pub mint_url: String,
     pub price_per_second: i64,
     pub price_per_unit: i64,
+    /// The mint's currency unit ("sat", "msat", "usd", …). Part of the product
+    /// identity: the same prices in a different unit are a different product.
+    pub mint_unit: String,
 }
 
 /// A product fingerprint. Any change to pricing, mints, or extensions changes
@@ -39,6 +42,8 @@ pub struct ProductId(pub [u8; 32]);
 ///     mint_url             : raw UTF-8 bytes
 ///     price_per_second     : i64 big-endian
 ///     price_per_unit       : i64 big-endian
+///     len(mint_unit)       : u32 big-endian
+///     mint_unit            : raw UTF-8 bytes
 /// len(extensions)          : u32 big-endian
 /// extensions               : raw bytes, hashed verbatim
 /// ```
@@ -61,6 +66,9 @@ pub fn product_id(pricing_scale: u32, prices: &[MintPrice], extensions: &[u8]) -
         hasher.update(url);
         hasher.update(price.price_per_second.to_be_bytes());
         hasher.update(price.price_per_unit.to_be_bytes());
+        let unit = price.mint_unit.as_bytes();
+        hasher.update((unit.len() as u32).to_be_bytes());
+        hasher.update(unit);
     }
     hasher.update((extensions.len() as u32).to_be_bytes());
     hasher.update(extensions);
@@ -82,6 +90,7 @@ mod tests {
             mint_url: url.to_string(),
             price_per_second: per_sec,
             price_per_unit: per_unit,
+            mint_unit: "sat".to_string(),
         }
     }
 
@@ -110,6 +119,17 @@ mod tests {
         assert_ne!(
             product_id(DEFAULT_PRICING_SCALE, &p, b""),
             product_id(DEFAULT_PRICING_SCALE, &p, b"bandwidth=10000"),
+        );
+    }
+
+    #[test]
+    fn product_id_changes_with_mint_unit() {
+        let sat = vec![price("https://mint.example", 10, 1)]; // mint_unit = "sat"
+        let mut msat = sat.clone();
+        msat[0].mint_unit = "msat".to_string();
+        assert_ne!(
+            product_id(DEFAULT_PRICING_SCALE, &sat, b""),
+            product_id(DEFAULT_PRICING_SCALE, &msat, b""),
         );
     }
 }

@@ -13,8 +13,10 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// hex-encoded secp256k1 secret key. Omit to generate an ephemeral one.
-    pub secret_key: Option<String>,
+    /// Path to a file holding the hex-encoded secp256k1 secret key. If the file
+    /// is absent, a fresh key is generated and written there (mode 0600). If
+    /// unset entirely, an ephemeral key is generated and not persisted.
+    pub secret_key_file: Option<PathBuf>,
     /// Listen address for the HTTP/WS transport (TollGate default port is 4747).
     pub listen: String,
     /// Mints whose tokens this node accepts.
@@ -28,7 +30,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            secret_key: None,
+            secret_key_file: None,
             listen: "127.0.0.1:4747".to_string(),
             mints: Vec::new(),
             products: Vec::new(),
@@ -107,17 +109,29 @@ pub struct Identity {
 }
 
 impl Identity {
-    /// Load the configured key, or generate an ephemeral one if none is set.
+    /// Resolve the node's signing key:
+    /// - `secret_key_file` set and present → load it
+    /// - `secret_key_file` set but absent → generate, persist to that path, reuse on restart
+    /// - `secret_key_file` unset → generate an ephemeral key (not persisted)
     pub fn load_or_generate(cfg: &Config) -> anyhow::Result<Self> {
         let secp = secp256k1::Secp256k1::new();
-        let secret_key = match &cfg.secret_key {
-            Some(hex_key) => {
-                let bytes = hex::decode(hex_key).context("decoding secret_key hex")?;
-                secp256k1::SecretKey::from_slice(&bytes).context("invalid secret_key")?
+        let secret_key = match &cfg.secret_key_file {
+            Some(path) if path.exists() => {
+                let hex_key = std::fs::read_to_string(path)
+                    .with_context(|| format!("reading key file {}", path.display()))?;
+                let bytes = hex::decode(hex_key.trim()).context("decoding secret key hex")?;
+                secp256k1::SecretKey::from_slice(&bytes).context("invalid secret key")?
+            }
+            Some(path) => {
+                let (secret_key, _) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
+                write_key_file(path, &hex::encode(secret_key.secret_bytes()))
+                    .with_context(|| format!("writing key file {}", path.display()))?;
+                tracing::info!(path = %path.display(), "generated and saved new identity");
+                secret_key
             }
             None => {
-                let (secret_key, _) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
-                secret_key
+                tracing::warn!("no secret_key_file configured; using an ephemeral identity");
+                secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng).0
             }
         };
         let public_key = secret_key.public_key(&secp);
@@ -131,6 +145,31 @@ impl Identity {
     pub fn pubkey_hex(&self) -> String {
         hex::encode(self.public_key.serialize())
     }
+}
+
+/// Write the secret key to `path`, owner-read/write only on Unix (mode 0600).
+fn write_key_file(path: &Path, hex_key: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating key dir {}", parent.display()))?;
+        }
+    }
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+
+    let mut file = opts.open(path)?;
+    file.write_all(hex_key.as_bytes())?;
+    file.write_all(b"\n")?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -149,5 +188,43 @@ mod tests {
         let cfg: Config = serde_yaml::from_str("firewall: sets-only").unwrap();
         assert_eq!(cfg.firewall, FirewallMode::SetsOnly);
         assert!(!cfg.firewall.installs_forward_chain());
+    }
+
+    #[test]
+    fn key_file_is_generated_then_reused() {
+        // A unique temp path that does not yet exist.
+        let mut path = std::env::temp_dir();
+        path.push(format!("tollgate-test-key-{}.hex", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let cfg = Config {
+            secret_key_file: Some(path.clone()),
+            ..Config::default()
+        };
+
+        // First load generates and persists the key.
+        let first = Identity::load_or_generate(&cfg).unwrap();
+        assert!(path.exists());
+        // Second load reuses the same key (stable pubkey across restarts).
+        let second = Identity::load_or_generate(&cfg).unwrap();
+        assert_eq!(first.pubkey_hex(), second.pubkey_hex());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn no_key_file_yields_ephemeral_identity() {
+        let cfg = Config::default();
+        // Two ephemeral identities differ (fresh random key each time).
+        let a = Identity::load_or_generate(&cfg).unwrap();
+        let b = Identity::load_or_generate(&cfg).unwrap();
+        assert_ne!(a.pubkey_hex(), b.pubkey_hex());
     }
 }

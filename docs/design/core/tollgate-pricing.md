@@ -90,6 +90,8 @@ preimage =
         mint_url                      // raw UTF-8 bytes
         price_per_second              // i64, big-endian
         price_per_unit                // i64, big-endian
+        len(mint_unit)                // u32, big-endian
+        mint_unit                     // raw UTF-8 bytes ("sat", "msat", …)
     len(extensions)                   // u32, big-endian
     extensions                        // opaque bytes, hashed verbatim
 
