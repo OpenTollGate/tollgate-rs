@@ -24,6 +24,12 @@ Re-run after changing Rust code. Topologies can then reuse it with
 | Test | Topology | Asserts |
 |------|----------|---------|
 | `detect/` | gateway (parent) ↔ client (child) | the two nodes detect each other (mutual Announce) |
+| `bootstrap/` | fake mint ← gateway ← client | child pays a bootstrap token; gateway verifies it with the mint and grants access |
+
+The `bootstrap/` mint is a stock `python:3-slim` running `fake-mint.py` — a NUT-07
+check-state stub that reports every proof UNSPENT. It exercises the provider's
+real verification path without a full Cashu mint; swap in `cdk-spilman-test-mint`
+later for payment-correctness fidelity.
 
 Run one:
 

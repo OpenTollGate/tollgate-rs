@@ -45,6 +45,18 @@ enum Command {
         #[arg(long)]
         peer: String,
     },
+    /// Pay a peer a bootstrap token and report whether it was accepted.
+    Pay {
+        /// Peer HTTP origin, e.g. http://gateway:4747
+        #[arg(long)]
+        peer: String,
+        /// Mint URL to draw the token on, e.g. http://mint:3338
+        #[arg(long)]
+        mint: String,
+        /// Token amount in sats.
+        #[arg(long, default_value_t = 8)]
+        amount: u64,
+    },
 }
 
 #[tokio::main]
@@ -60,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command.unwrap_or(Command::Serve { listen: None }) {
         Command::Serve { listen } => serve(cfg, identity, listen).await,
         Command::Connect { peer } => connect(&cfg, &identity, &peer).await,
+        Command::Pay { peer, mint, amount } => pay(&cfg, &identity, &peer, &mint, amount).await,
     }
 }
 
@@ -113,5 +126,36 @@ async fn connect(
         "DETECTED peer={} unit={} version={}",
         detected.pubkey_hex, detected.unit, detected.version
     );
+    Ok(())
+}
+
+async fn pay(
+    cfg: &config::Config,
+    identity: &config::Identity,
+    peer: &str,
+    mint: &str,
+    amount: u64,
+) -> anyhow::Result<()> {
+    tracing::info!(pubkey = %identity.pubkey_hex(), %peer, %mint, amount, "paying bootstrap token");
+    let paid = client::pay(peer, identity, &cfg.unit, mint, amount).await?;
+    tracing::info!(
+        peer_pubkey = %paid.peer_pubkey_hex,
+        accepted = paid.accepted,
+        reason = ?paid.reason,
+        "bootstrap result"
+    );
+    // Machine-readable line for test harnesses to grep.
+    println!(
+        "PAID peer={} accepted={} reason={}",
+        paid.peer_pubkey_hex,
+        paid.accepted,
+        paid.reason.as_deref().unwrap_or("-")
+    );
+    if !paid.accepted {
+        anyhow::bail!(
+            "bootstrap rejected: {}",
+            paid.reason.as_deref().unwrap_or("unknown")
+        );
+    }
     Ok(())
 }
