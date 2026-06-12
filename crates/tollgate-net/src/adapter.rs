@@ -31,7 +31,10 @@ pub struct IpAdapter {
 enum Backend {
     #[cfg(target_os = "linux")]
     Nftables,
-    /// No enforcement on this platform — decisions are logged only.
+    /// No enforcement on this platform — decisions are logged only. On Linux it
+    /// is never constructed (the nftables backend is always selected) but its
+    /// match arms must still compile, so the variant stays.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     LogOnly,
 }
 
