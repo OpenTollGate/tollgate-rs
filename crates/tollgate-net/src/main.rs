@@ -61,8 +61,11 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Emit ANSI colors only to a real terminal. Under docker/journald the output
+    // is piped, where escape codes corrupt field text (and break log greps).
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
     let cli = Cli::parse();

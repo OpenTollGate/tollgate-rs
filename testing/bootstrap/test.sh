@@ -38,6 +38,12 @@ echo "----------------------"
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
+# Strip ANSI escape codes before matching, so colored tracing output (e.g. a
+# reset sequence between a field key and its `=`) can't break literal greps.
+strip_ansi() { sed $'s/\x1b\\[[0-9;]*m//g'; }
+CLIENT_LOG="$(echo "$CLIENT_LOG" | strip_ansi)"
+GATEWAY_LOG="$(echo "$GATEWAY_LOG" | strip_ansi)"
+
 # 1. Client's bootstrap was accepted.
 echo "$CLIENT_LOG" | grep -q 'PAID .*accepted=true' \
     || fail "client did not report PAID accepted=true"

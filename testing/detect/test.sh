@@ -41,6 +41,12 @@ echo "----------------------"
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
+# Strip ANSI escape codes before matching (defensive: the node disables color on
+# non-tty output, but this keeps greps robust regardless).
+strip_ansi() { sed $'s/\x1b\\[[0-9;]*m//g'; }
+CLIENT_LOG="$(echo "$CLIENT_LOG" | strip_ansi)"
+GATEWAY_LOG="$(echo "$GATEWAY_LOG" | strip_ansi)"
+
 # Extract the 66-hex-char pubkey following the first `peer=` on matching lines.
 # grep -oE avoids sed portability quirks (BSD vs GNU) across host platforms.
 pubkey_after_peer() { grep -oE 'peer=[0-9a-f]{66}' | head -1 | cut -d= -f2; }
