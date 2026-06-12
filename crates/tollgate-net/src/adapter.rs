@@ -11,6 +11,7 @@
 //! decisions are logged only (so a node still runs for development).
 
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tollgate_core::metering::Counters;
 
@@ -21,6 +22,9 @@ pub const NFT_TABLE: &str = "tollgate";
 
 pub struct IpAdapter {
     backend: Backend,
+    /// Whether a forward chain exists to host per-peer counter rules. Set at
+    /// `init`; false in sets-only mode, where counters have nowhere to attach.
+    counters_available: AtomicBool,
 }
 
 #[derive(Clone, Copy)]
@@ -37,7 +41,10 @@ impl IpAdapter {
         let backend = Backend::Nftables;
         #[cfg(not(target_os = "linux"))]
         let backend = Backend::LogOnly;
-        Self { backend }
+        Self {
+            backend,
+            counters_available: AtomicBool::new(false),
+        }
     }
 
     /// Create the base table and sets (idempotent). When `install_forward_chain`
@@ -47,6 +54,10 @@ impl IpAdapter {
     /// should treat failure as non-fatal and warn.
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     pub fn init(&self, install_forward_chain: bool) -> anyhow::Result<()> {
+        // Per-peer counter rules live in the forward chain; without it (sets-only
+        // mode) there is nowhere to attach them, so don't try.
+        self.counters_available
+            .store(install_forward_chain, Ordering::Relaxed);
         match self.backend {
             #[cfg(target_os = "linux")]
             Backend::Nftables => nft::init(install_forward_chain),
@@ -60,14 +71,16 @@ impl IpAdapter {
         }
     }
 
-    /// Permit the peer at `ip` to forward traffic (add to the paid set) and
-    /// ensure its per-peer byte counters exist.
+    /// Permit the peer at `ip` to forward traffic (add to the paid set) and,
+    /// when a forward chain is present, ensure its per-peer byte counters exist.
     pub fn allow(&self, ip: IpAddr) {
         match self.backend {
             #[cfg(target_os = "linux")]
             Backend::Nftables => {
                 nft::apply(ip, true);
-                nft::ensure_counters(ip);
+                if self.counters_available.load(Ordering::Relaxed) {
+                    nft::ensure_counters(ip);
+                }
             }
             Backend::LogOnly => tracing::info!(%ip, "allow (log-only, not enforced)"),
         }

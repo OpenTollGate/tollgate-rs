@@ -46,8 +46,8 @@ echo "$CLIENT_LOG" | grep -q 'PAID .*accepted=true' \
 echo "$GATEWAY_LOG" | grep -q "bootstrap token verified" \
     || fail "gateway did not log a verified bootstrap token"
 
-# 3. Gateway granted access for the client (allow on its IP).
-echo "$GATEWAY_LOG" | grep -Eq "allow" \
-    || fail "gateway did not log an access grant"
+# 3. Gateway granted access for the client (backend-independent decision log).
+echo "$GATEWAY_LOG" | grep -q "access decision.*allowed=true" \
+    || fail "gateway did not log an access grant (allowed=true)"
 
 echo "PASS: bootstrap payment accepted and access granted"

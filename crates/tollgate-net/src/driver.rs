@@ -178,7 +178,18 @@ impl Driver {
         match action {
             Action::SetAccess { peer, level } => {
                 let hex = peer_to_hex(peer);
-                match self.0.peer_ip.lock().await.get(&hex).copied() {
+                let ip = self.0.peer_ip.lock().await.get(&hex).copied();
+                // Backend-independent access-decision log (the nftables backend
+                // itself logs only at debug). This is the authoritative line a
+                // test or operator greps for.
+                tracing::info!(
+                    peer = %hex,
+                    ?level,
+                    ip = ?ip,
+                    allowed = level.allows_delivery(),
+                    "access decision"
+                );
+                match ip {
                     Some(ip) if level.allows_delivery() => self.0.adapter.allow(ip),
                     Some(ip) => self.0.adapter.deny(ip),
                     None => {
