@@ -56,4 +56,15 @@ echo "$GATEWAY_LOG" | grep -q "bootstrap token verified" \
 echo "$GATEWAY_LOG" | grep -q "access decision.*allowed=true" \
     || fail "gateway did not log an access grant (allowed=true)"
 
-echo "PASS: bootstrap payment accepted and access granted"
+# 4. Enforcement, not just the decision: the granted client IP is actually a
+# member of the nftables paid-peers set the forward rules gate on.
+client_ip="$(echo "$GATEWAY_LOG" | grep -E 'access decision.*allowed=true' \
+    | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)"
+[ -n "$client_ip" ] || fail "could not extract a granted client IP from the gateway log"
+
+set_v4="$($COMPOSE exec -T gateway nft list set inet tollgate paid_peers_v4 2>/dev/null || true)"
+echo "----- nft paid_peers_v4 -----"; echo "${set_v4:-<empty>}"
+echo "$set_v4" | grep -qF "$client_ip" \
+    || fail "granted client IP $client_ip is not in paid_peers_v4 (access not enforced)"
+
+echo "PASS: bootstrap accepted, access granted, and IP enforced in nftables ($client_ip)"

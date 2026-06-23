@@ -258,6 +258,58 @@ impl BootstrapAck {
     }
 }
 
+/// [`MessageType::Reject`] (0x0D): the provider tells a peer why service was
+/// refused or stopped. The most common cause in bootstrap-only mode is the
+/// balance running out ([`Reject::CODE_BALANCE_EXHAUSTED`]); the peer reacts by
+/// sending another [`BootstrapToken`] to top up.
+///
+/// In the HTTP-polling transport this is queued and delivered on the peer's next
+/// exchange; over WebSocket it is pushed immediately.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(map)]
+pub struct Reject {
+    #[n(0)]
+    pub type_tag: u8,
+    /// Machine-readable reason code (see the `CODE_*` constants).
+    #[n(1)]
+    pub code: u8,
+    /// Optional human-readable detail.
+    #[n(2)]
+    pub reason: Option<String>,
+}
+
+impl Reject {
+    /// Balance exhausted — the peer must top up (or upgrade to Spilman) to
+    /// resume. See `docs/design/core/tollgate-bootstrap.md`.
+    pub const CODE_BALANCE_EXHAUSTED: u8 = 0x09;
+
+    pub fn new(code: u8, reason: Option<String>) -> Self {
+        Self {
+            type_tag: MessageType::Reject.as_u8(),
+            code,
+            reason,
+        }
+    }
+
+    /// A balance-exhausted rejection.
+    pub fn balance_exhausted() -> Self {
+        Self::new(Self::CODE_BALANCE_EXHAUSTED, None)
+    }
+
+    /// Whether this rejection is the balance-exhausted signal.
+    pub fn is_balance_exhausted(&self) -> bool {
+        self.code == Self::CODE_BALANCE_EXHAUSTED
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        minicbor::to_vec(self).expect("Reject encodes infallibly")
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, minicbor::decode::Error> {
+        minicbor::decode(bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +367,23 @@ mod tests {
         let back = BootstrapToken::decode(&bytes).expect("decode");
         assert_eq!(back.token_bytes(), b"cashuBsometoken");
         assert_eq!(back.type_tag, MessageType::BootstrapToken.as_u8());
+    }
+
+    #[test]
+    fn reject_round_trips_and_flags_balance_exhausted() {
+        let reject = Reject::balance_exhausted();
+        assert_eq!(reject.type_tag, MessageType::Reject.as_u8());
+        assert!(reject.is_balance_exhausted());
+
+        let back = Reject::decode(&reject.encode()).expect("decode");
+        assert_eq!(reject, back);
+        assert_eq!(back.code, Reject::CODE_BALANCE_EXHAUSTED);
+        assert_eq!(back.reason, None);
+
+        let other = Reject::new(0x01, Some("mint unreachable".into()));
+        assert!(!other.is_balance_exhausted());
+        let back = Reject::decode(&other.encode()).expect("decode");
+        assert_eq!(back.reason.as_deref(), Some("mint unreachable"));
     }
 
     #[test]

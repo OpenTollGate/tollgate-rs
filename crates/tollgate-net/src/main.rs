@@ -107,6 +107,13 @@ async fn serve(
 
     let driver = driver::Driver::new(wallet, adapter, identity, price, cfg.unit.clone());
     driver.spawn_metering(std::time::Duration::from_secs(5));
+    // Reap peers that have gone silent. The HTTP-polling transport has no socket
+    // close to observe, so idle-timeout is the disconnect signal; Active peers are
+    // kept regardless (they hold paid balance and may consume without polling).
+    driver.spawn_reaper(
+        std::time::Duration::from_secs(120),
+        std::time::Duration::from_secs(30),
+    );
 
     server::serve(&cfg.listen, driver).await
 }

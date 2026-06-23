@@ -6,7 +6,7 @@
 //! queues any outbound wire messages in the outbox for the server to return on
 //! the same exchange.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,6 +16,7 @@ use tokio::sync::Mutex;
 use tollgate_core::action::Action;
 use tollgate_core::event::Event;
 use tollgate_core::metering::Counters;
+use tollgate_core::session::PeerPhase;
 use tollgate_core::time::Millis;
 use tollgate_core::{PeerId, Price, Session};
 use tollgate_protocol::{Announce, PROTOCOL_VERSION, PublicKey};
@@ -34,6 +35,14 @@ struct Inner {
     outbox: Mutex<BTreeMap<String, Vec<Vec<u8>>>>,
     /// Maps a peer's pubkey hex to its source IP — the firewall enforces by IP.
     peer_ip: Mutex<BTreeMap<String, IpAddr>>,
+    /// Last time (host wall-clock ms) each peer was heard from. The reaper drops
+    /// peers idle past a timeout — the only "disconnect" signal the HTTP-polling
+    /// transport has (there is no socket close to observe).
+    last_seen: Mutex<BTreeMap<String, Millis>>,
+    /// Peers currently being metered (Active). `StartMetering`/`StopMetering`
+    /// maintain this; the metering loop only reads counters for these, so blocked
+    /// and suspended peers aren't polled.
+    metered: Mutex<BTreeSet<String>>,
     wallet: BootstrapWallet,
     adapter: IpAdapter,
     identity: Arc<Identity>,
@@ -55,6 +64,8 @@ impl Driver {
             session: Mutex::new(session),
             outbox: Mutex::new(BTreeMap::new()),
             peer_ip: Mutex::new(BTreeMap::new()),
+            last_seen: Mutex::new(BTreeMap::new()),
+            metered: Mutex::new(BTreeSet::new()),
             wallet,
             adapter,
             identity,
@@ -79,20 +90,73 @@ impl Driver {
             ticker.tick().await; // the first tick fires immediately; skip it
             loop {
                 ticker.tick().await;
-                let peers: Vec<(String, IpAddr)> = driver
-                    .0
-                    .peer_ip
-                    .lock()
-                    .await
-                    .iter()
-                    .map(|(hex, ip)| (hex.clone(), *ip))
-                    .collect();
+                // Only meter Active peers that have a known IP. Locks are released
+                // before any counter read or `meter` await.
+                let peers: Vec<(String, IpAddr)> = {
+                    let metered = driver.0.metered.lock().await;
+                    let peer_ip = driver.0.peer_ip.lock().await;
+                    metered
+                        .iter()
+                        .filter_map(|hex| peer_ip.get(hex).map(|ip| (hex.clone(), *ip)))
+                        .collect()
+                };
                 for (hex, ip) in peers {
                     let counters = driver.0.adapter.read_counters(ip);
                     driver.meter(&hex, counters).await;
                 }
             }
         });
+    }
+
+    /// Spawn the reaper: every `sweep_every`, drop peers idle longer than
+    /// `idle_after`. In the HTTP-polling transport a peer "disconnects" simply by
+    /// no longer polling, so silence past a timeout is the disconnect signal.
+    pub fn spawn_reaper(&self, idle_after: Duration, sweep_every: Duration) {
+        let driver = self.clone();
+        let idle_ms = idle_after.as_millis() as u64;
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(sweep_every);
+            ticker.tick().await; // skip the immediate first tick
+            loop {
+                ticker.tick().await;
+                driver.reap_idle(now_millis().0, idle_ms).await;
+            }
+        });
+    }
+
+    /// One reaping sweep at wall-clock `now_ms`: tear down every peer idle for at
+    /// least `idle_ms` that is **not** `Active`. Active peers hold paid balance and
+    /// are kept even while silent — a bootstrap client pays once, then consumes
+    /// without polling again. Factored out of [`Self::spawn_reaper`] so tests can
+    /// drive a sweep at a controlled time.
+    async fn reap_idle(&self, now_ms: u64, idle_ms: u64) {
+        let idle: Vec<String> = self
+            .0
+            .last_seen
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, seen)| now_ms.saturating_sub(seen.0) >= idle_ms)
+            .map(|(hex, _)| hex.clone())
+            .collect();
+        for hex in idle {
+            let peer = parse_peer(&hex);
+            let phase = self.0.session.lock().await.peer_phase(&peer);
+            if matches!(phase, Some(PeerPhase::Active)) {
+                continue;
+            }
+            tracing::info!(peer = %hex, ?phase, "reaping idle peer");
+            self.peer_disconnected(&hex).await;
+        }
+    }
+
+    /// Record that we just heard from a peer (resets its idle timer).
+    async fn touch(&self, peer_hex: &str) {
+        self.0
+            .last_seen
+            .lock()
+            .await
+            .insert(peer_hex.to_string(), now_millis());
     }
 
     /// Feed a meter reading for a peer into the session.
@@ -108,6 +172,7 @@ impl Driver {
         if let Some(ip) = ip {
             self.0.peer_ip.lock().await.insert(peer_hex.to_string(), ip);
         }
+        self.touch(peer_hex).await;
         let peer = parse_peer(peer_hex);
         let actions = self.handle(Event::PeerConnected { peer }).await;
         self.dispatch(actions, peer_hex).await;
@@ -116,21 +181,25 @@ impl Driver {
         self.enqueue(peer_hex, self.our_announce()).await;
     }
 
-    /// A peer disconnected.
-    /// Not yet wired: HTTP polling detects this via poll timeout and the
-    /// WebSocket path via close frame — both arrive in a later step.
-    #[allow(dead_code)]
+    /// A peer disconnected — driven by the reaper on idle timeout (and, once the
+    /// WebSocket path lands, by a close frame).
     pub async fn peer_disconnected(&self, peer_hex: &str) {
         let peer = parse_peer(peer_hex);
         let actions = self.handle(Event::PeerDisconnected { peer }).await;
         // Dispatch first (so the SetAccess(None) revoke can still resolve the IP),
-        // then forget the mapping.
+        // then forget all per-peer state.
         self.dispatch(actions, peer_hex).await;
         self.0.peer_ip.lock().await.remove(peer_hex);
+        self.0.last_seen.lock().await.remove(peer_hex);
+        self.0.metered.lock().await.remove(peer_hex);
+        // Drop any undelivered queue (e.g. a Reject from exhaustion the gone peer
+        // never polled for) so nothing leaks into a future reconnect's session.
+        self.0.outbox.lock().await.remove(peer_hex);
     }
 
     /// A decoded protocol frame arrived from a peer.
     pub async fn message_received(&self, peer_hex: &str, bytes: Vec<u8>) {
+        self.touch(peer_hex).await;
         let peer = parse_peer(peer_hex);
         let actions = self.handle(Event::MessageReceived { peer, bytes }).await;
         self.dispatch(actions, peer_hex).await;
@@ -201,10 +270,14 @@ impl Driver {
                 self.enqueue(&peer_to_hex(peer), bytes).await;
             }
             Action::StartMetering { peer } => {
-                tracing::debug!(peer = %peer_to_hex(peer), "start metering (stub)");
+                let hex = peer_to_hex(peer);
+                tracing::debug!(peer = %hex, "start metering");
+                self.0.metered.lock().await.insert(hex);
             }
             Action::StopMetering { peer } => {
-                tracing::debug!(peer = %peer_to_hex(peer), "stop metering");
+                let hex = peer_to_hex(peer);
+                tracing::debug!(peer = %hex, "stop metering");
+                self.0.metered.lock().await.remove(&hex);
             }
             Action::Disconnect { peer } => {
                 tracing::debug!(peer = %peer_to_hex(peer), "disconnect (stub)");
@@ -323,5 +396,56 @@ mod tests {
             announce.public_key().as_bytes(),
             &driver.0.identity.public_key.serialize()
         );
+    }
+
+    #[tokio::test]
+    async fn start_and_stop_metering_track_the_metered_set() {
+        let driver = test_driver();
+        let peer = PeerId(PublicKey::from_bytes([7u8; 33]));
+        let hex = peer_to_hex(peer);
+
+        driver.execute(Action::StartMetering { peer }).await;
+        assert!(driver.0.metered.lock().await.contains(&hex));
+
+        driver.execute(Action::StopMetering { peer }).await;
+        assert!(!driver.0.metered.lock().await.contains(&hex));
+    }
+
+    #[tokio::test]
+    async fn reaper_drops_idle_unpaid_peer_but_keeps_active() {
+        let driver = test_driver();
+
+        // A peer that announced but never paid (stays New / blocked).
+        let unpaid = PeerId(PublicKey::from_bytes([5u8; 33]));
+        let unpaid_hex = peer_to_hex(unpaid);
+        driver.peer_connected(&unpaid_hex, None).await;
+
+        // A peer that paid and is Active.
+        let active = PeerId(PublicKey::from_bytes([6u8; 33]));
+        let active_hex = peer_to_hex(active);
+        driver.peer_connected(&active_hex, None).await;
+        let _ = driver
+            .handle(Event::BootstrapVerified {
+                peer: active,
+                amount: 1_000,
+                ok: true,
+            })
+            .await;
+        assert_eq!(
+            driver.0.session.lock().await.peer_phase(&active),
+            Some(PeerPhase::Active)
+        );
+
+        // Sweep far in the future so both peers count as idle.
+        driver.reap_idle(now_millis().0 + 1_000_000, 1_000).await;
+
+        // The unpaid peer is gone; the Active peer survives despite being idle.
+        assert_eq!(driver.0.session.lock().await.peer_phase(&unpaid), None);
+        assert!(!driver.0.last_seen.lock().await.contains_key(&unpaid_hex));
+        assert_eq!(
+            driver.0.session.lock().await.peer_phase(&active),
+            Some(PeerPhase::Active)
+        );
+        assert!(driver.0.last_seen.lock().await.contains_key(&active_hex));
     }
 }
