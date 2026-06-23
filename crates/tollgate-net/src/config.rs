@@ -180,6 +180,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn load_parses_an_explicit_file() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("tollgate-test-cfg-{}.yaml", std::process::id()));
+        std::fs::write(
+            &path,
+            "listen: \"0.0.0.0:9999\"\nunit: \"wh\"\nfirewall: sets-only\nmints:\n  - \"http://m\"\n",
+        )
+        .unwrap();
+
+        let cfg = Config::load(Some(&path)).expect("load explicit config");
+        assert_eq!(cfg.listen, "0.0.0.0:9999");
+        assert_eq!(cfg.unit, "wh");
+        assert_eq!(cfg.firewall, FirewallMode::SetsOnly);
+        assert_eq!(cfg.mints, vec!["http://m".to_string()]);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn load_missing_explicit_file_errors() {
+        let result = Config::load(Some(Path::new("/nonexistent/tollgate-does-not-exist.yaml")));
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn firewall_defaults_to_enforcing() {
         let cfg: Config = serde_yaml::from_str("{}").unwrap();
         assert_eq!(cfg.firewall, FirewallMode::Enforcing);

@@ -12,3 +12,16 @@ impl Millis {
         self.0.saturating_sub(earlier.0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn since_is_a_forward_delta_that_saturates_backward() {
+        assert_eq!(Millis(5000).since(Millis(2000)), 3000);
+        assert_eq!(Millis(100).since(Millis(100)), 0);
+        // earlier > self (e.g. clock skew) must clamp to zero, never wrap.
+        assert_eq!(Millis(100).since(Millis(500)), 0);
+    }
+}

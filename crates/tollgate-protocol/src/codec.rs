@@ -111,4 +111,34 @@ mod tests {
             Err(FrameError::Truncated)
         );
     }
+
+    #[test]
+    fn encode_frame_rejects_oversize_body_and_accepts_the_limit() {
+        let too_big = vec![0u8; MAX_FRAME_LEN + 1];
+        let mut out = Vec::new();
+        assert_eq!(encode_frame(&too_big, &mut out), Err(FrameError::TooLong));
+        assert!(
+            out.is_empty(),
+            "nothing is written when the body is rejected"
+        );
+
+        // Exactly at the limit is allowed (2-byte prefix + body).
+        let at_limit = vec![0u8; MAX_FRAME_LEN];
+        let mut out = Vec::new();
+        assert!(encode_frame(&at_limit, &mut out).is_ok());
+        assert_eq!(out.len(), MAX_FRAME_LEN + 2);
+    }
+
+    #[test]
+    fn peek_type_handles_garbage_unknown_and_known() {
+        // Not a CBOR message map at all.
+        assert!(peek_type(&[0xff, 0xff]).is_none());
+        // A valid one-entry map {0: 0x0F} whose type tag is an unknown type.
+        assert!(peek_type(&[0xA1, 0x00, 0x0F]).is_none());
+        // Sanity: {0: 0x07} is recognised as BootstrapToken.
+        assert_eq!(
+            peek_type(&[0xA1, 0x00, 0x07]),
+            Some(MessageType::BootstrapToken)
+        );
+    }
 }

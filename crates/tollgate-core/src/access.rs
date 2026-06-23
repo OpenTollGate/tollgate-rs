@@ -33,3 +33,34 @@ impl AccessLevel {
         self.allows_delivery()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn predicate_truth_table() {
+        use AccessLevel::*;
+        // (level, allows_delivery, is_metered, is_visible)
+        let cases = [
+            (None, false, false, false),
+            (Active, true, true, true),
+            (ZeroPrice, true, false, true),
+            (Suspended, false, false, false),
+        ];
+        for (level, deliver, metered, visible) in cases {
+            assert_eq!(
+                level.allows_delivery(),
+                deliver,
+                "{level:?} allows_delivery"
+            );
+            assert_eq!(level.is_metered(), metered, "{level:?} is_metered");
+            assert_eq!(level.is_visible(), visible, "{level:?} is_visible");
+        }
+    }
+
+    #[test]
+    fn default_is_blocked() {
+        assert_eq!(AccessLevel::default(), AccessLevel::None);
+    }
+}
