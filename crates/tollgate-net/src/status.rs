@@ -11,6 +11,37 @@ pub struct NodeStatus {
     /// Resource unit metered ("bytes", "wh", …).
     pub unit: String,
     pub peers: Vec<PeerStatus>,
+    /// What this node advertises (its own PriceSheet). `default` so a snapshot
+    /// from an older node without pricing still deserializes.
+    #[serde(default)]
+    pub pricing: PricingStatus,
+}
+
+/// The node's advertised pricing — a flattened, serde-friendly view of its
+/// PriceSheet (products × mint options + the metering interval range).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PricingStatus {
+    pub products: Vec<ProductStatus>,
+    pub min_interval_ms: u32,
+    pub max_interval_ms: u32,
+}
+
+/// One advertised product: its id and the mints it can be paid through.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProductStatus {
+    /// Canonical product id, hex.
+    pub product_id: String,
+    pub pricing_scale: u32,
+    pub mints: Vec<MintStatus>,
+}
+
+/// One mint option's price within a product.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MintStatus {
+    pub mint_url: String,
+    pub mint_unit: String,
+    pub price_per_second: i64,
+    pub price_per_unit: i64,
 }
 
 /// One peer's state as the node sees it.
@@ -84,6 +115,53 @@ pub fn render_table(status: &NodeStatus) -> String {
     out
 }
 
+/// Render the node's advertised pricing as a plain-text table (for `--once`).
+///
+/// Prices are *per unit of the resource we sell* (`status.unit`, e.g. bytes) and
+/// *per second*, denominated in each mint option's currency (`CCY`, e.g. sat).
+pub fn render_pricing(status: &NodeStatus) -> String {
+    use std::fmt::Write;
+    let p = &status.pricing;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "pricing — selling {}  ·  {} product(s), interval {}–{} ms",
+        status.unit,
+        p.products.len(),
+        p.min_interval_ms,
+        p.max_interval_ms
+    );
+    if p.products.is_empty() {
+        let _ = write!(out, "(no products — this node sells nothing)");
+        return out;
+    }
+    let _ = writeln!(
+        out,
+        "{:<13} {:<26} {:<5} {:>8} {:>9}",
+        "PRODUCT", "MINT", "CCY", "PER_SEC", "PER_UNIT"
+    );
+    for product in &p.products {
+        if product.mints.is_empty() {
+            let _ = writeln!(out, "{:<13} (no mints)", short(&product.product_id));
+            continue;
+        }
+        for m in &product.mints {
+            let _ = writeln!(
+                out,
+                "{:<13} {:<26} {:<5} {:>8} {:>9}",
+                short(&product.product_id),
+                m.mint_url,
+                m.mint_unit,
+                m.price_per_second,
+                m.price_per_unit,
+            );
+        }
+    }
+    let total: usize = p.products.iter().map(|pr| pr.mints.len()).sum();
+    let _ = write!(out, "{total} mint option(s)");
+    out
+}
+
 /// Abbreviate a long hex pubkey to `123456…cdef` for display.
 pub fn short(hex: &str) -> String {
     if hex.len() > 12 {
@@ -125,6 +203,20 @@ mod tests {
                     idle_ms: 9000,
                 },
             ],
+            pricing: PricingStatus {
+                products: vec![ProductStatus {
+                    product_id: format!("aa{}", "bb".repeat(31)),
+                    pricing_scale: 1000,
+                    mints: vec![MintStatus {
+                        mint_url: "http://mint:3338".to_string(),
+                        mint_unit: "sat".to_string(),
+                        price_per_second: 0,
+                        price_per_unit: 1,
+                    }],
+                }],
+                min_interval_ms: 5000,
+                max_interval_ms: 60000,
+            },
         }
     }
 
@@ -158,5 +250,20 @@ mod tests {
     fn short_abbreviates_long_hex_and_passes_short_through() {
         assert_eq!(short(&format!("02{}", "ab".repeat(32))), "02abab…abab");
         assert_eq!(short("0203"), "0203");
+    }
+
+    #[test]
+    fn render_pricing_lists_products_or_says_empty() {
+        let status = sample();
+        let out = render_pricing(&status);
+        assert!(out.contains("selling bytes"), "{out}"); // the resource we sell
+        assert!(out.contains("1 product(s)"), "{out}");
+        assert!(out.contains("http://mint:3338"), "{out}");
+        assert!(out.contains("interval 5000–60000 ms"), "{out}");
+        assert!(out.contains("1 mint option(s)"), "{out}");
+
+        let mut empty = sample();
+        empty.pricing = PricingStatus::default();
+        assert!(render_pricing(&empty).contains("no products"));
     }
 }

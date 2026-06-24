@@ -60,6 +60,7 @@ mod tests {
                 pubkey: "02ab".to_string(),
                 unit: "bytes".to_string(),
                 peers: Vec::new(),
+                pricing: Default::default(),
             };
             let mut w = stream;
             w.write_all(serde_json::to_string(&status).unwrap().as_bytes())

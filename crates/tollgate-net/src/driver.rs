@@ -19,9 +19,9 @@ use tollgate_core::metering::Counters;
 use tollgate_core::session::PeerPhase;
 use tollgate_core::time::Millis;
 use tollgate_core::{PeerId, Price, Session};
-use tollgate_protocol::{Announce, PROTOCOL_VERSION, PublicKey};
+use tollgate_protocol::{Announce, PROTOCOL_VERSION, PriceSheet, PublicKey};
 
-use tollgate_net::status::{NodeStatus, PeerStatus};
+use tollgate_net::status::{MintStatus, NodeStatus, PeerStatus, PricingStatus, ProductStatus};
 
 use crate::adapter::IpAdapter;
 use crate::config::Identity;
@@ -261,6 +261,7 @@ impl Driver {
             pubkey: self.0.identity.pubkey_hex(),
             unit: self.0.unit.clone(),
             peers,
+            pricing: decode_pricing(&self.0.price_sheet),
         }
     }
 
@@ -394,6 +395,36 @@ fn now_millis() -> Millis {
     )
 }
 
+/// Decode our advertised PriceSheet into the serde-friendly [`PricingStatus`].
+/// Empty/undecodable bytes (e.g. a node that sells nothing) yield empty pricing.
+fn decode_pricing(encoded: &[u8]) -> PricingStatus {
+    let Ok(sheet) = PriceSheet::decode(encoded) else {
+        return PricingStatus::default();
+    };
+    PricingStatus {
+        products: sheet
+            .products
+            .iter()
+            .map(|p| ProductStatus {
+                product_id: hex::encode(p.product_id.as_slice()),
+                pricing_scale: p.pricing_scale,
+                mints: p
+                    .mints
+                    .iter()
+                    .map(|m| MintStatus {
+                        mint_url: m.mint_url.clone(),
+                        mint_unit: m.mint_unit.clone(),
+                        price_per_second: m.price_per_second,
+                        price_per_unit: m.price_per_unit,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        min_interval_ms: sheet.interval_ms.0,
+        max_interval_ms: sheet.interval_ms.1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,6 +555,35 @@ mod tests {
         assert_eq!(p.balance, 4242);
         assert_eq!(p.ip.as_deref(), Some("10.0.0.9"));
         assert!(p.allowed);
+    }
+
+    #[tokio::test]
+    async fn status_includes_advertised_pricing() {
+        use tollgate_protocol::{MintPrice, PriceSheet, ProductOffer};
+
+        let prices = vec![MintPrice {
+            mint_url: "http://mint".to_string(),
+            price_per_second: 0,
+            price_per_unit: 9,
+            mint_unit: "sat".to_string(),
+        }];
+        let sheet =
+            PriceSheet::new(vec![ProductOffer::new(1000, &prices, vec![])], 5000, 60000).encode();
+        let identity = Arc::new(Identity::load_or_generate(&Config::default()).unwrap());
+        let driver = Driver::new(
+            BootstrapWallet::new(vec![]),
+            IpAdapter::new(),
+            identity,
+            Price::default(),
+            "bytes",
+            sheet,
+        );
+
+        let pricing = driver.status().await.pricing;
+        assert_eq!(pricing.products.len(), 1);
+        assert_eq!(pricing.products[0].mints[0].price_per_unit, 9);
+        assert_eq!(pricing.min_interval_ms, 5000);
+        assert_eq!(pricing.max_interval_ms, 60000);
     }
 
     #[tokio::test]
