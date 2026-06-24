@@ -105,7 +105,14 @@ async fn serve(
         })
         .unwrap_or_default();
 
-    let driver = driver::Driver::new(wallet, adapter, identity, price, cfg.unit.clone());
+    let driver = driver::Driver::new(
+        wallet,
+        adapter,
+        identity,
+        price,
+        cfg.unit.clone(),
+        cfg.price_sheet().encode(),
+    );
     driver.spawn_metering(std::time::Duration::from_secs(5));
     // Reap peers that have gone silent. The HTTP-polling transport has no socket
     // close to observe, so idle-timeout is the disconnect signal; Active peers are
@@ -131,12 +138,32 @@ async fn connect(
         peer_version = detected.version,
         "detected peer"
     );
-    // Machine-readable line for test harnesses to grep.
+    // Machine-readable lines for test harnesses to grep.
     println!(
         "DETECTED peer={} unit={} version={}",
         detected.pubkey_hex, detected.unit, detected.version
     );
+    if let Some(sheet) = detected.price_sheet.as_ref() {
+        println!("{}", format_price_sheet(sheet));
+    }
     Ok(())
+}
+
+/// A one-line, greppable summary of a peer's advertised PriceSheet — the first
+/// product's first mint option, or a `mints=0` form when a product lists none.
+fn format_price_sheet(sheet: &tollgate_protocol::PriceSheet) -> String {
+    let products = sheet.products.len();
+    match sheet.products.first().and_then(|p| p.mints.first()) {
+        Some(mint) => format!(
+            "PRICESHEET products={} mints={} per_second={} per_unit={} mint_unit={}",
+            products,
+            sheet.products.first().map_or(0, |p| p.mints.len()),
+            mint.price_per_second,
+            mint.price_per_unit,
+            mint.mint_unit
+        ),
+        None => format!("PRICESHEET products={products} mints=0"),
+    }
 }
 
 async fn pay(
@@ -161,6 +188,9 @@ async fn pay(
         paid.accepted,
         paid.reason.as_deref().unwrap_or("-")
     );
+    if let Some(sheet) = paid.price_sheet.as_ref() {
+        println!("{}", format_price_sheet(sheet));
+    }
     if !paid.accepted {
         anyhow::bail!(
             "bootstrap rejected: {}",
@@ -168,4 +198,34 @@ async fn pay(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tollgate_protocol::{MintPrice, PriceSheet, ProductOffer};
+
+    #[test]
+    fn format_price_sheet_summarizes_first_mint_option() {
+        let prices = vec![MintPrice {
+            mint_url: "http://m".to_string(),
+            price_per_second: 2,
+            price_per_unit: 7,
+            mint_unit: "sat".to_string(),
+        }];
+        let sheet = PriceSheet::new(vec![ProductOffer::new(1000, &prices, vec![])], 5000, 60000);
+        let line = format_price_sheet(&sheet);
+        assert!(line.contains("products=1"), "{line}");
+        assert!(line.contains("mints=1"), "{line}");
+        assert!(line.contains("per_second=2"), "{line}");
+        assert!(line.contains("per_unit=7"), "{line}");
+        assert!(line.contains("mint_unit=sat"), "{line}");
+    }
+
+    #[test]
+    fn format_price_sheet_handles_product_without_mints() {
+        // A product configured with no accepted mints (the detect-gateway case).
+        let sheet = PriceSheet::new(vec![ProductOffer::new(1000, &[], vec![])], 5000, 60000);
+        assert_eq!(format_price_sheet(&sheet), "PRICESHEET products=1 mints=0");
+    }
 }

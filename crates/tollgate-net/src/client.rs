@@ -15,17 +15,19 @@ use cashu::nuts::{CurrencyUnit, Id, Proof, PublicKey as CashuPublicKey};
 use cashu::secret::Secret;
 
 use tollgate_protocol::{
-    Announce, BootstrapAck, BootstrapToken, MessageType, PROTOCOL_VERSION, PublicKey,
+    Announce, BootstrapAck, BootstrapToken, MessageType, PROTOCOL_VERSION, PriceSheet, PublicKey,
     decode_frames, encode_frame, frame, peek_type,
 };
 
 use crate::config::Identity;
 
-/// Outcome of a detection probe: the peer's identity as we learned it.
+/// Outcome of a detection probe: the peer's identity as we learned it, plus any
+/// PriceSheet it advertised.
 pub struct Detected {
     pub pubkey_hex: String,
     pub unit: String,
     pub version: u8,
+    pub price_sheet: Option<PriceSheet>,
 }
 
 /// Result of a bootstrap payment attempt.
@@ -33,6 +35,7 @@ pub struct Paid {
     pub peer_pubkey_hex: String,
     pub accepted: bool,
     pub reason: Option<String>,
+    pub price_sheet: Option<PriceSheet>,
 }
 
 /// POST `request` (already framed) to a peer's exchange endpoint and return the
@@ -67,6 +70,14 @@ fn find_announce(messages: &[Vec<u8>]) -> Option<Announce> {
         .find_map(|m| Announce::decode(m).ok())
 }
 
+/// Find and decode the first PriceSheet in a set of message bodies.
+fn find_price_sheet(messages: &[Vec<u8>]) -> Option<PriceSheet> {
+    messages
+        .iter()
+        .filter(|m| matches!(peek_type(m), Some(MessageType::PriceSheet)))
+        .find_map(|m| PriceSheet::decode(m).ok())
+}
+
 /// Send our Announce to `base_url` and return the peer's Announce.
 pub async fn detect(base_url: &str, identity: &Identity, unit: &str) -> anyhow::Result<Detected> {
     let body = frame(&our_announce(identity, unit))
@@ -77,6 +88,7 @@ pub async fn detect(base_url: &str, identity: &Identity, unit: &str) -> anyhow::
         pubkey_hex: hex::encode(announce.public_key().as_bytes()),
         unit: announce.unit.clone(),
         version: announce.version,
+        price_sheet: find_price_sheet(&messages),
     })
 }
 
@@ -116,6 +128,7 @@ pub async fn pay(
         peer_pubkey_hex,
         accepted: ack.is_accepted(),
         reason: ack.reason,
+        price_sheet: find_price_sheet(&messages),
     })
 }
 
@@ -157,4 +170,41 @@ fn build_test_token(mint_url: &str, amount_sat: u64) -> anyhow::Result<String> {
     let token = TokenV3::new(mint, vec![proof], None, Some(CurrencyUnit::Sat))
         .map_err(|e| anyhow::anyhow!("building token: {e}"))?;
     Ok(token.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tollgate_protocol::{MintPrice, ProductOffer};
+
+    fn sample_sheet(per_unit: i64) -> Vec<u8> {
+        let prices = vec![MintPrice {
+            mint_url: "http://m".to_string(),
+            price_per_second: 0,
+            price_per_unit: per_unit,
+            mint_unit: "sat".to_string(),
+        }];
+        PriceSheet::new(vec![ProductOffer::new(1000, &prices, vec![])], 5000, 60000).encode()
+    }
+
+    #[test]
+    fn find_price_sheet_picks_the_sheet_among_other_frames() {
+        // A realistic response: Announce, PriceSheet, BootstrapAck.
+        let messages = vec![
+            Announce::new(1, PublicKey::from_bytes([1u8; 33]), "bytes", 0).encode(),
+            sample_sheet(3),
+            BootstrapAck::accepted().encode(),
+        ];
+        let found = find_price_sheet(&messages).expect("a PriceSheet among the frames");
+        assert_eq!(found.products[0].mints[0].price_per_unit, 3);
+    }
+
+    #[test]
+    fn find_price_sheet_returns_none_when_absent() {
+        let messages = vec![
+            Announce::new(1, PublicKey::from_bytes([1u8; 33]), "bytes", 0).encode(),
+            BootstrapAck::accepted().encode(),
+        ];
+        assert!(find_price_sheet(&messages).is_none());
+    }
 }

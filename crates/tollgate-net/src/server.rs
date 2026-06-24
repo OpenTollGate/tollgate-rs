@@ -134,6 +134,7 @@ mod tests {
             identity,
             tollgate_core::Price::default(),
             "bytes",
+            Vec::new(),
         )
     }
 

@@ -8,6 +8,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use serde::Deserialize;
+use tollgate_protocol::{DEFAULT_PRICING_SCALE, MintPrice, PriceSheet, ProductOffer};
+
+/// Metering interval range advertised in the PriceSheet (ms). The server meters
+/// every 5s; the range is what a peer may negotiate to once interval handling
+/// lands (not configurable yet).
+const DEFAULT_MIN_INTERVAL_MS: u32 = 5_000;
+const DEFAULT_MAX_INTERVAL_MS: u32 = 60_000;
 
 /// Node configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -101,6 +108,36 @@ impl Config {
         }
         candidates.push(PathBuf::from("/etc/tollgate/tollgate.yaml"));
         candidates.into_iter().find(|p| p.exists())
+    }
+
+    /// Build the PriceSheet this node advertises: one offer per configured
+    /// product, each priced across all accepted mints. v1 assumes the "sat" unit
+    /// and one rate per product (no per-mint differentiation yet), so whichever
+    /// mint a client picks, the price core charges is the same.
+    pub fn price_sheet(&self) -> PriceSheet {
+        let offers = self
+            .products
+            .iter()
+            .map(|p| {
+                let scale = if p.pricing_scale == 0 {
+                    DEFAULT_PRICING_SCALE
+                } else {
+                    p.pricing_scale
+                };
+                let prices: Vec<MintPrice> = self
+                    .mints
+                    .iter()
+                    .map(|url| MintPrice {
+                        mint_url: url.clone(),
+                        price_per_second: p.price_per_second,
+                        price_per_unit: p.price_per_unit,
+                        mint_unit: "sat".to_string(),
+                    })
+                    .collect();
+                ProductOffer::new(scale, &prices, Vec::new())
+            })
+            .collect();
+        PriceSheet::new(offers, DEFAULT_MIN_INTERVAL_MS, DEFAULT_MAX_INTERVAL_MS)
     }
 }
 
@@ -202,6 +239,52 @@ mod tests {
     fn load_missing_explicit_file_errors() {
         let result = Config::load(Some(Path::new("/nonexistent/tollgate-does-not-exist.yaml")));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn price_sheet_offers_each_product_across_all_mints() {
+        let cfg: Config = serde_yaml::from_str(
+            "mints:\n  - \"http://m1\"\n  - \"http://m2\"\nproducts:\n  - pricing_scale: 1000\n    price_per_second: 0\n    price_per_unit: 7\n",
+        )
+        .unwrap();
+
+        let sheet = cfg.price_sheet();
+        assert_eq!(
+            sheet.interval_ms,
+            (DEFAULT_MIN_INTERVAL_MS, DEFAULT_MAX_INTERVAL_MS)
+        );
+        assert_eq!(sheet.products.len(), 1);
+        let offer = &sheet.products[0];
+        assert_eq!(offer.pricing_scale, 1000);
+        assert_eq!(offer.mints.len(), 2);
+        // Each mint option carries the product's single rate and the sat unit.
+        for mint in &offer.mints {
+            assert_eq!(mint.price_per_unit, 7);
+            assert_eq!(mint.price_per_second, 0);
+            assert_eq!(mint.mint_unit, "sat");
+        }
+        // pricing_scale 0 in config falls back to the default.
+        let zero_scale: Config =
+            serde_yaml::from_str("mints:\n  - \"http://m\"\nproducts:\n  - price_per_unit: 1\n")
+                .unwrap();
+        assert_eq!(
+            zero_scale.price_sheet().products[0].pricing_scale,
+            DEFAULT_PRICING_SCALE
+        );
+    }
+
+    #[test]
+    fn price_sheet_handles_empty_mints_and_empty_products() {
+        // A product but no accepted mints → an offer with zero mint options
+        // (this is the detect-gateway shape).
+        let no_mints: Config = serde_yaml::from_str("products:\n  - price_per_unit: 1\n").unwrap();
+        let sheet = no_mints.price_sheet();
+        assert_eq!(sheet.products.len(), 1);
+        assert!(sheet.products[0].mints.is_empty());
+
+        // No products at all → an empty sheet (a node that sells nothing).
+        let empty: Config = serde_yaml::from_str("{}").unwrap();
+        assert!(empty.price_sheet().products.is_empty());
     }
 
     #[test]

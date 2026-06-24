@@ -48,6 +48,9 @@ struct Inner {
     identity: Arc<Identity>,
     /// Resource unit this node meters ("bytes", "wh", …), sent in our Announce.
     unit: String,
+    /// Our pre-encoded PriceSheet, advertised after Announce on each exchange so
+    /// peers can discover the price and accepted mints. Empty if we sell nothing.
+    price_sheet: Vec<u8>,
 }
 
 impl Driver {
@@ -57,6 +60,7 @@ impl Driver {
         identity: Arc<Identity>,
         price: Price,
         unit: impl Into<String>,
+        price_sheet: Vec<u8>,
     ) -> Self {
         let mut session = Session::new();
         session.set_price(price);
@@ -70,6 +74,7 @@ impl Driver {
             adapter,
             identity,
             unit: unit.into(),
+            price_sheet,
         }))
     }
 
@@ -179,6 +184,12 @@ impl Driver {
         // Announce ourselves back so the peer learns our identity (mutual
         // detection). Queued on the outbox; the transport returns it.
         self.enqueue(peer_hex, self.our_announce()).await;
+        // Advertise our pricing so the peer can discover the price and accepted
+        // mints (a bootstrap client sizes its token from this). Empty for a node
+        // that sells nothing, e.g. a pure client.
+        if !self.0.price_sheet.is_empty() {
+            self.enqueue(peer_hex, self.0.price_sheet.clone()).await;
+        }
     }
 
     /// A peer disconnected — driven by the reaper on idle timeout (and, once the
@@ -359,6 +370,7 @@ mod tests {
             identity,
             Price::default(),
             "bytes",
+            Vec::new(), // no PriceSheet by default
         )
     }
 
@@ -396,6 +408,45 @@ mod tests {
             announce.public_key().as_bytes(),
             &driver.0.identity.public_key.serialize()
         );
+    }
+
+    #[tokio::test]
+    async fn connect_advertises_our_price_sheet_after_announce() {
+        use tollgate_protocol::{MessageType, MintPrice, PriceSheet, ProductOffer, peek_type};
+
+        let prices = vec![MintPrice {
+            mint_url: "http://mint".to_string(),
+            price_per_second: 0,
+            price_per_unit: 5,
+            mint_unit: "sat".to_string(),
+        }];
+        let sheet =
+            PriceSheet::new(vec![ProductOffer::new(1000, &prices, vec![])], 5000, 60000).encode();
+
+        let identity = Arc::new(Identity::load_or_generate(&Config::default()).unwrap());
+        let driver = Driver::new(
+            BootstrapWallet::new(vec![]),
+            IpAdapter::new(),
+            identity,
+            Price::default(),
+            "bytes",
+            sheet,
+        );
+
+        let peer = PeerId(PublicKey::from_bytes([8u8; 33]));
+        let hex = peer_to_hex(peer);
+        driver.peer_connected(&hex, None).await;
+
+        // Announce first, then our PriceSheet.
+        let queued = driver.drain_outbox(&hex).await;
+        assert_eq!(
+            queued.len(),
+            2,
+            "expected Announce + PriceSheet, got {queued:?}"
+        );
+        assert!(matches!(peek_type(&queued[0]), Some(MessageType::Announce)));
+        let advertised = PriceSheet::decode(&queued[1]).expect("our PriceSheet");
+        assert_eq!(advertised.products[0].mints[0].price_per_unit, 5);
     }
 
     #[tokio::test]

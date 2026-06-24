@@ -79,6 +79,36 @@ pub fn product_id(pricing_scale: u32, prices: &[MintPrice], extensions: &[u8]) -
     ProductId(id)
 }
 
+/// Compute a mint option's canonical id — the unambiguous reference an Accept
+/// uses to name the chosen `(mint_url, mint_unit)` pricing option.
+///
+/// Like [`product_id`], this tightens the spec's informal `SHA256(mint_url |
+/// mint_unit)` into a domain-tagged, length-prefixed layout so two
+/// implementations can't disagree on where one field ends and the next begins:
+///
+/// ```text
+/// "tollgate/option-id/v1"
+/// len(mint_url)  : u32 big-endian
+/// mint_url       : raw UTF-8 bytes
+/// len(mint_unit) : u32 big-endian
+/// mint_unit      : raw UTF-8 bytes
+/// ```
+pub fn option_id(mint_url: &str, mint_unit: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"tollgate/option-id/v1");
+    let url = mint_url.as_bytes();
+    hasher.update((url.len() as u32).to_be_bytes());
+    hasher.update(url);
+    let unit = mint_unit.as_bytes();
+    hasher.update((unit.len() as u32).to_be_bytes());
+    hasher.update(unit);
+
+    let digest = hasher.finalize();
+    let mut id = [0u8; 32];
+    id.copy_from_slice(&digest);
+    id
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +161,18 @@ mod tests {
             product_id(DEFAULT_PRICING_SCALE, &sat, b""),
             product_id(DEFAULT_PRICING_SCALE, &msat, b""),
         );
+    }
+
+    #[test]
+    fn option_id_is_stable_and_field_sensitive() {
+        let base = option_id("https://mint.example", "sat");
+        // Deterministic.
+        assert_eq!(base, option_id("https://mint.example", "sat"));
+        // Sensitive to each field.
+        assert_ne!(base, option_id("https://other.example", "sat"));
+        assert_ne!(base, option_id("https://mint.example", "msat"));
+        // Length-prefixing prevents the boundary collision a plain concat has:
+        // ("ab","c") must not equal ("a","bc").
+        assert_ne!(option_id("ab", "c"), option_id("a", "bc"));
     }
 }

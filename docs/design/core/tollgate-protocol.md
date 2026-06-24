@@ -165,7 +165,7 @@ Sent by each peer after Announce. Contains one or more product offerings with pe
       3: <pricing_scale>,          // u32 — default 1000
       4: [                         // array of mint options
         {
-          1: <option_id>,          // bytes(32) — SHA256(mint_url | mint_unit)
+          1: <option_id>,          // bytes(32) — domain-tagged hash of (mint_url, mint_unit); see below
           2: <mint_url>,           // text — mint URL
           3: <price_per_second>,   // i64 — scaled integer
           4: <price_per_unit>,          // i64 — scaled integer
@@ -542,7 +542,7 @@ These are infrequent messages (every 5s at the metering interval, one-time for s
 | Field keys | Small integers, not strings | Compact, avoids string overhead in CBOR |
 | Message discrimination | Integer `type` field (key 0) | Simple, extensible |
 | First message | Announce (protocol version + pubkey) | Identifies TollGate capability before negotiation |
-| Mint option ID | SHA256(mint_url \| mint_unit) | Unambiguous reference to chosen pricing option |
+| Mint option ID | `SHA256("tollgate/option-id/v1" \| len(mint_url) \| mint_url \| len(mint_unit) \| mint_unit)` (lengths u32 big-endian) | Unambiguous reference to chosen pricing option; length-prefixed + domain-tagged like `product_id` so implementations can't disagree on field boundaries |
 | Metering counters | Cumulative since session start, not deltas | Self-healing: lost/duplicated reports don't corrupt accounting |
 | Interval flow | MeteringReport (both) → BalanceUpdate (net debtor only) → Ack | Deterministic netting, only net amount moves |
 | Price changes | Piggybacked on MeteringReport (fields 4-5) | No extra round-trips |

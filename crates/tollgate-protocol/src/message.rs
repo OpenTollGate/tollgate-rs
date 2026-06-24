@@ -6,6 +6,8 @@ use alloc::vec::Vec;
 use minicbor::bytes::{ByteArray, ByteVec};
 use minicbor::{Decode, Encode};
 
+use crate::product::{MintPrice, option_id, product_id};
+
 /// A peer's identity: the raw secp256k1 *compressed* public key (33 bytes).
 ///
 /// Everything in the protocol and core works with these raw bytes. `npub` is
@@ -310,6 +312,105 @@ impl Reject {
     }
 }
 
+/// One mint option inside a [`ProductOffer`]: a mint URL and the price charged
+/// when paying through it. `option_id` is the canonical reference an [`Accept`]
+/// uses to name the chosen option unambiguously. Nested object — no type tag.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(map)]
+pub struct MintOption {
+    #[n(1)]
+    pub option_id: ByteArray<32>,
+    #[n(2)]
+    pub mint_url: String,
+    #[n(3)]
+    pub price_per_second: i64,
+    #[n(4)]
+    pub price_per_unit: i64,
+    #[n(5)]
+    pub mint_unit: String,
+}
+
+impl MintOption {
+    /// Build a wire option from a [`MintPrice`], computing its `option_id`.
+    pub fn from_price(price: &MintPrice) -> Self {
+        Self {
+            option_id: ByteArray::from(option_id(&price.mint_url, &price.mint_unit)),
+            mint_url: price.mint_url.clone(),
+            price_per_second: price.price_per_second,
+            price_per_unit: price.price_per_unit,
+            mint_unit: price.mint_unit.clone(),
+        }
+    }
+}
+
+/// One product offering inside a [`PriceSheet`]: a priced bundle across one or
+/// more mints, identified by its canonical [`product_id`]. Nested object — the
+/// map starts at field 1 and carries no type tag.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(map)]
+pub struct ProductOffer {
+    #[n(1)]
+    pub product_id: ByteArray<32>,
+    /// Opaque, implementation-defined extension bytes, hashed into the id.
+    #[n(2)]
+    pub extensions: ByteVec,
+    #[n(3)]
+    pub pricing_scale: u32,
+    #[n(4)]
+    pub mints: Vec<MintOption>,
+}
+
+impl ProductOffer {
+    /// Build an offer from per-mint prices, computing the canonical `product_id`
+    /// and each mint's `option_id` so the offer is self-describing on the wire.
+    pub fn new(pricing_scale: u32, prices: &[MintPrice], extensions: Vec<u8>) -> Self {
+        let pid = product_id(pricing_scale, prices, &extensions);
+        Self {
+            product_id: ByteArray::from(pid.0),
+            extensions: ByteVec::from(extensions),
+            pricing_scale,
+            mints: prices.iter().map(MintOption::from_price).collect(),
+        }
+    }
+}
+
+/// [`MessageType::PriceSheet`] (0x01): a peer's "take it or leave it" offer, sent
+/// after [`Announce`]. Carries product offerings and the metering interval range
+/// this peer will accept; the other side picks one product + mint option (and,
+/// on the Spilman path, replies with an Accept). In bootstrap-only mode the
+/// client just reads it to learn the price and which mints are accepted, then
+/// sends a [`BootstrapToken`]. See `docs/design/core/tollgate-protocol.md`.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(map)]
+pub struct PriceSheet {
+    #[n(0)]
+    pub type_tag: u8,
+    #[n(1)]
+    pub products: Vec<ProductOffer>,
+    /// `(min_interval_ms, max_interval_ms)` — the acceptable metering interval
+    /// range (CBOR array `[min, max]`).
+    #[n(2)]
+    pub interval_ms: (u32, u32),
+}
+
+impl PriceSheet {
+    pub fn new(products: Vec<ProductOffer>, min_interval_ms: u32, max_interval_ms: u32) -> Self {
+        Self {
+            type_tag: MessageType::PriceSheet.as_u8(),
+            products,
+            interval_ms: (min_interval_ms, max_interval_ms),
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        minicbor::to_vec(self).expect("PriceSheet encodes infallibly")
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, minicbor::decode::Error> {
+        minicbor::decode(bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,6 +468,72 @@ mod tests {
         let back = BootstrapToken::decode(&bytes).expect("decode");
         assert_eq!(back.token_bytes(), b"cashuBsometoken");
         assert_eq!(back.type_tag, MessageType::BootstrapToken.as_u8());
+    }
+
+    #[test]
+    fn price_sheet_round_trips_with_products_and_mints() {
+        use crate::product::MintPrice;
+        use alloc::string::ToString;
+
+        let prices = alloc::vec![
+            MintPrice {
+                mint_url: "https://mint-a.example".to_string(),
+                price_per_second: 0,
+                price_per_unit: 1,
+                mint_unit: "sat".to_string(),
+            },
+            MintPrice {
+                mint_url: "https://mint-b.example".to_string(),
+                price_per_second: 2,
+                price_per_unit: 3,
+                mint_unit: "sat".to_string(),
+            },
+        ];
+        let offer = ProductOffer::new(1000, &prices, alloc::vec![]);
+        let sheet = PriceSheet::new(alloc::vec![offer], 5000, 60000);
+
+        let back = PriceSheet::decode(&sheet.encode()).expect("decode PriceSheet");
+        assert_eq!(sheet, back);
+        assert_eq!(back.type_tag, MessageType::PriceSheet.as_u8());
+        assert_eq!(back.interval_ms, (5000, 60000));
+        assert_eq!(back.products.len(), 1);
+        assert_eq!(back.products[0].mints.len(), 2);
+
+        // The wire option_id matches the canonical helper, and product_id is the
+        // declaration-order-independent fingerprint of the same prices.
+        assert_eq!(
+            back.products[0].mints[0].option_id.as_slice(),
+            &option_id("https://mint-a.example", "sat")
+        );
+        assert_eq!(
+            back.products[0].product_id.as_slice(),
+            &product_id(1000, &prices, b"").0
+        );
+
+        // peek_type identifies it without a full decode.
+        assert_eq!(
+            crate::peek_type(&sheet.encode()),
+            Some(MessageType::PriceSheet)
+        );
+    }
+
+    #[test]
+    fn price_sheet_round_trips_when_empty_or_mintless() {
+        // No products at all (e.g. a pure client that sells nothing).
+        let empty = PriceSheet::new(alloc::vec![], 1000, 2000);
+        assert_eq!(PriceSheet::decode(&empty.encode()).expect("decode"), empty);
+        assert!(empty.products.is_empty());
+
+        // A product with zero mint options (a gateway with no accepted mints).
+        let mintless = PriceSheet::new(
+            alloc::vec![ProductOffer::new(1000, &[], alloc::vec![])],
+            5000,
+            60000,
+        );
+        let back = PriceSheet::decode(&mintless.encode()).expect("decode");
+        assert_eq!(back, mintless);
+        assert_eq!(back.products.len(), 1);
+        assert!(back.products[0].mints.is_empty());
     }
 
     #[test]

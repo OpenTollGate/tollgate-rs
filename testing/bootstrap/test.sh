@@ -48,6 +48,11 @@ GATEWAY_LOG="$(echo "$GATEWAY_LOG" | strip_ansi)"
 echo "$CLIENT_LOG" | grep -q 'PAID .*accepted=true' \
     || fail "client did not report PAID accepted=true"
 
+# 1b. Client discovered the gateway's PriceSheet (the configured per_unit=1
+# rate over the accepted mint), proving price discovery works over the wire.
+echo "$CLIENT_LOG" | grep -qE 'PRICESHEET .*mints=1 .*per_unit=1' \
+    || fail "client did not receive the gateway PriceSheet (mints=1 per_unit=1)"
+
 # 2. Gateway verified the token with the mint.
 echo "$GATEWAY_LOG" | grep -q "bootstrap token verified" \
     || fail "gateway did not log a verified bootstrap token"
