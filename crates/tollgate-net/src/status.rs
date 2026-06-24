@@ -53,8 +53,11 @@ pub struct PeerStatus {
     pub phase: String,
     /// Scaled milli-unit balance.
     pub balance: u64,
+    /// Usage this metering session (since the baseline), matching MeteringReports.
     pub delivered: u64,
     pub received: u64,
+    /// Seconds the current metering session has run (0 if not yet metered).
+    pub metered_secs: u64,
     /// Whether the firewall currently allows delivery (true for `Active`).
     pub allowed: bool,
     /// Whether the metering loop is sampling this peer.
@@ -87,19 +90,21 @@ pub fn render_table(status: &NodeStatus) -> String {
     let _ = writeln!(out, "node {}  unit={}", short(&status.pubkey), status.unit);
     let _ = writeln!(
         out,
-        "{:<13} {:<15} {:<10} {:>9} {:>8} {:>12} {:>6}",
-        "PEER", "IP", "PHASE", "BALANCE", "ACCESS", "DELIVERED", "IDLE"
+        "{:<13} {:<15} {:<10} {:>9} {:>8} {:>10} {:>10} {:>8} {:>6}",
+        "PEER", "IP", "PHASE", "BALANCE", "ACCESS", "SENT", "RECV", "METERED", "IDLE"
     );
     for p in &status.peers {
         let _ = writeln!(
             out,
-            "{:<13} {:<15} {:<10} {:>9} {:>8} {:>12} {:>5}s",
+            "{:<13} {:<15} {:<10} {:>9} {:>8} {:>10} {:>10} {:>7}s {:>5}s",
             short(&p.pubkey),
             p.ip.as_deref().unwrap_or("-"),
             p.phase,
             p.balance,
             if p.allowed { "allowed" } else { "blocked" },
             p.delivered,
+            p.received,
+            p.metered_secs,
             p.idle_ms / 1000,
         );
     }
@@ -186,7 +191,8 @@ mod tests {
                     phase: "Active".to_string(),
                     balance: 6000,
                     delivered: 1200,
-                    received: 0,
+                    received: 340,
+                    metered_secs: 42,
                     allowed: true,
                     metered: true,
                     idle_ms: 1500,
@@ -197,7 +203,8 @@ mod tests {
                     phase: "Suspended".to_string(),
                     balance: 0,
                     delivered: 8000,
-                    received: 0,
+                    received: 120,
+                    metered_secs: 80,
                     allowed: false,
                     metered: false,
                     idle_ms: 9000,
@@ -240,6 +247,10 @@ mod tests {
         let table = render_table(&status);
         assert!(table.contains("allowed"), "{table}");
         assert!(table.contains("blocked"), "{table}");
+        assert!(table.contains("SENT"), "{table}"); // sent-to-peer usage column
+        assert!(table.contains("RECV"), "{table}"); // received-from-peer column
+        assert!(table.contains("340"), "{table}"); // received units
+        assert!(table.contains("42s"), "{table}"); // metering duration
         assert!(
             table.contains("2 peers (1 active, 1 suspended, 0 other)"),
             "{table}"

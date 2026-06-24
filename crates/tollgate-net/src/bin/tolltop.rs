@@ -167,14 +167,10 @@ fn render_peers(frame: &mut ratatui::Frame, area: Rect, s: &NodeStatus) {
         other
     );
 
+    // SENT = units delivered to the peer; RECV = units received from it (matches
+    // the MeteringReport directions). METERED = how long this session has run.
     let head = Row::new([
-        "PEER",
-        "IP",
-        "PHASE",
-        "BALANCE",
-        "ACCESS",
-        "DELIVERED",
-        "IDLE",
+        "PEER", "IP", "PHASE", "BALANCE", "ACCESS", "SENT", "RECV", "METERED", "IDLE",
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
 
@@ -191,6 +187,8 @@ fn render_peers(frame: &mut ratatui::Frame, area: Rect, s: &NodeStatus) {
             Cell::from(p.balance.to_string()),
             access,
             Cell::from(p.delivered.to_string()),
+            Cell::from(p.received.to_string()),
+            Cell::from(format!("{}s", p.metered_secs)),
             Cell::from(format!("{}s", p.idle_ms / 1000)),
         ])
     });
@@ -201,7 +199,9 @@ fn render_peers(frame: &mut ratatui::Frame, area: Rect, s: &NodeStatus) {
         Constraint::Length(11),
         Constraint::Length(10),
         Constraint::Length(8),
-        Constraint::Length(12),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Length(9),
         Constraint::Length(7),
     ];
     let table = Table::new(body, widths)

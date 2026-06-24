@@ -19,7 +19,9 @@ use tollgate_core::metering::Counters;
 use tollgate_core::session::PeerPhase;
 use tollgate_core::time::Millis;
 use tollgate_core::{PeerId, Price, Session};
-use tollgate_protocol::{Announce, PROTOCOL_VERSION, PriceSheet, PublicKey};
+use tollgate_protocol::{
+    Announce, MessageType, PROTOCOL_VERSION, PriceSheet, PublicKey, peek_type,
+};
 
 use tollgate_net::status::{MintStatus, NodeStatus, PeerStatus, PricingStatus, ProductStatus};
 
@@ -246,6 +248,9 @@ impl Driver {
                 PeerStatus {
                     ip: peer_ip.get(&hex).map(|ip| ip.to_string()),
                     idle_ms: last_seen.get(&hex).map_or(0, |t| now.saturating_sub(t.0)),
+                    metered_secs: s
+                        .metering_start
+                        .map_or(0, |start| now.saturating_sub(start.0) / 1000),
                     metered: metered.contains(&hex),
                     allowed: matches!(s.phase, PeerPhase::Active),
                     phase: format!("{:?}", s.phase),
@@ -364,13 +369,16 @@ impl Driver {
     }
 
     async fn enqueue(&self, peer_hex: &str, message: Vec<u8>) {
-        self.0
-            .outbox
-            .lock()
-            .await
-            .entry(peer_hex.to_string())
-            .or_default()
-            .push(message);
+        let mut outbox = self.0.outbox.lock().await;
+        let queue = outbox.entry(peer_hex.to_string()).or_default();
+        // MeteringReports are cumulative and self-healing, so a peer only needs
+        // the latest. Drop any pending report before queuing a fresh one, else a
+        // peer that polls infrequently would accumulate a backlog (the metering
+        // loop emits one every interval whether or not the peer is reading).
+        if matches!(peek_type(&message), Some(MessageType::MeteringReport)) {
+            queue.retain(|f| !matches!(peek_type(f), Some(MessageType::MeteringReport)));
+        }
+        queue.push(message);
     }
 }
 
@@ -529,6 +537,41 @@ mod tests {
 
         driver.execute(Action::StopMetering { peer }).await;
         assert!(!driver.0.metered.lock().await.contains(&hex));
+    }
+
+    #[tokio::test]
+    async fn metering_reports_coalesce_keeping_only_the_latest() {
+        use tollgate_protocol::{MessageType, MeteringReport, peek_type};
+
+        let driver = test_driver();
+        let peer = PeerId(PublicKey::from_bytes([12u8; 33]));
+        let hex = peer_to_hex(peer);
+
+        driver
+            .execute(Action::Send {
+                peer,
+                bytes: MeteringReport::new(1000, 1, 0).encode(),
+            })
+            .await;
+        driver.enqueue(&hex, vec![0xDE, 0xAD]).await; // a non-report frame is preserved
+        driver
+            .execute(Action::Send {
+                peer,
+                bytes: MeteringReport::new(2000, 2, 0).encode(),
+            })
+            .await;
+
+        let drained = driver.drain_outbox(&hex).await;
+        let reports: Vec<_> = drained
+            .iter()
+            .filter(|f| matches!(peek_type(f), Some(MessageType::MeteringReport)))
+            .collect();
+        assert_eq!(reports.len(), 1, "only the latest report is kept");
+        assert_eq!(MeteringReport::decode(reports[0]).unwrap().elapsed_ms, 2000);
+        assert!(
+            drained.iter().any(|f| f == &vec![0xDE, 0xAD]),
+            "non-report frames are preserved"
+        );
     }
 
     #[tokio::test]

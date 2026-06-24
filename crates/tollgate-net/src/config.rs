@@ -36,6 +36,10 @@ pub struct Config {
     pub unit: String,
     /// Path to the Unix control socket served for `tolltop` / status tooling.
     pub control_socket: PathBuf,
+    /// How often (seconds) to sample meters / charge peers / send MeteringReports.
+    /// Lower = finer-grained reports (and faster tests); the drain *rate* is
+    /// unchanged (cost is per elapsed second). Clamped to ≥1.
+    pub metering_interval_secs: u64,
 }
 
 impl Default for Config {
@@ -48,6 +52,7 @@ impl Default for Config {
             firewall: FirewallMode::default(),
             unit: "bytes".to_string(),
             control_socket: PathBuf::from("/tmp/tollgate.sock"),
+            metering_interval_secs: 5,
         }
     }
 }
@@ -288,6 +293,14 @@ mod tests {
         // No products at all → an empty sheet (a node that sells nothing).
         let empty: Config = serde_yaml::from_str("{}").unwrap();
         assert!(empty.price_sheet().products.is_empty());
+    }
+
+    #[test]
+    fn metering_interval_defaults_to_5_and_parses() {
+        let cfg: Config = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(cfg.metering_interval_secs, 5);
+        let cfg: Config = serde_yaml::from_str("metering_interval_secs: 1").unwrap();
+        assert_eq!(cfg.metering_interval_secs, 1);
     }
 
     #[test]

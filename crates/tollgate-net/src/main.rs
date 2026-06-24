@@ -58,6 +58,28 @@ enum Command {
         #[arg(long, default_value_t = 8)]
         amount: u64,
     },
+    /// Pay a peer and stay online: poll for MeteringReports and auto-top-up
+    /// before the balance runs out.
+    Consume {
+        /// Peer HTTP origin, e.g. http://gateway:4747
+        #[arg(long)]
+        peer: String,
+        /// Mint URL to draw tokens on, e.g. http://mint:3338
+        #[arg(long)]
+        mint: String,
+        /// Initial token amount in sats.
+        #[arg(long, default_value_t = 8)]
+        amount: u64,
+        /// Top-up amount in sats (also the low-balance watermark).
+        #[arg(long, default_value_t = 8)]
+        topup: u64,
+        /// Seconds between polls.
+        #[arg(long, default_value_t = 5)]
+        interval: u64,
+        /// Stop after this many polls (0 = run until killed).
+        #[arg(long, default_value_t = 0)]
+        polls: u32,
+    },
 }
 
 #[tokio::main]
@@ -77,6 +99,22 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve { listen } => serve(cfg, identity, listen).await,
         Command::Connect { peer } => connect(&cfg, &identity, &peer).await,
         Command::Pay { peer, mint, amount } => pay(&cfg, &identity, &peer, &mint, amount).await,
+        Command::Consume {
+            peer,
+            mint,
+            amount,
+            topup,
+            interval,
+            polls,
+        } => {
+            let opts = client::ConsumeOpts {
+                amount_sat: amount,
+                topup_sat: topup,
+                interval: std::time::Duration::from_secs(interval),
+                max_polls: (polls > 0).then_some(polls),
+            };
+            consume(&cfg, &identity, &peer, &mint, opts).await
+        }
     }
 }
 
@@ -114,7 +152,9 @@ async fn serve(
         cfg.unit.clone(),
         cfg.price_sheet().encode(),
     );
-    driver.spawn_metering(std::time::Duration::from_secs(5));
+    driver.spawn_metering(std::time::Duration::from_secs(
+        cfg.metering_interval_secs.max(1),
+    ));
     // Reap peers that have gone silent. The HTTP-polling transport has no socket
     // close to observe, so idle-timeout is the disconnect signal; Active peers are
     // kept regardless (they hold paid balance and may consume without polling).
@@ -211,6 +251,23 @@ async fn pay(
         );
     }
     Ok(())
+}
+
+async fn consume(
+    cfg: &config::Config,
+    identity: &config::Identity,
+    peer: &str,
+    mint: &str,
+    opts: client::ConsumeOpts,
+) -> anyhow::Result<()> {
+    tracing::info!(
+        pubkey = %identity.pubkey_hex(),
+        %peer, %mint,
+        amount = opts.amount_sat,
+        topup = opts.topup_sat,
+        "consuming: pay then auto-top-up"
+    );
+    client::consume(peer, identity, &cfg.unit, mint, opts).await
 }
 
 #[cfg(test)]

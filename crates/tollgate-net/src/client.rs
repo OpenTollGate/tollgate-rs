@@ -1,12 +1,13 @@
-//! Minimal client side of the protocol, for integration testing:
+//! Client side of the protocol, for integration testing and manual play:
 //! - [`detect`] — send our Announce and report the peer's Announce back.
 //! - [`pay`] — detect, then send a bootstrap Cashu token and report the ack.
-//!
-//! Intentionally small — pricing negotiation and metering are layered on later.
+//! - [`consume`] — pay, then poll for MeteringReports and auto-top-up before the
+//!   balance runs out, tracking remaining balance against the discovered price.
 
 use anyhow::Context;
 
 use std::str::FromStr;
+use std::time::Duration;
 
 use cashu::Amount;
 use cashu::mint_url::MintUrl;
@@ -14,12 +15,16 @@ use cashu::nuts::nut00::TokenV3;
 use cashu::nuts::{CurrencyUnit, Id, Proof, PublicKey as CashuPublicKey};
 use cashu::secret::Secret;
 
+use tollgate_core::Price;
 use tollgate_protocol::{
-    Announce, BootstrapAck, BootstrapToken, MessageType, PROTOCOL_VERSION, PriceSheet, PublicKey,
-    decode_frames, encode_frame, frame, peek_type,
+    Announce, BootstrapAck, BootstrapToken, MessageType, MeteringReport, PROTOCOL_VERSION,
+    PriceSheet, PublicKey, Reject, decode_frames, encode_frame, frame, peek_type,
 };
 
 use crate::config::Identity;
+
+/// Scale factor between sats and the node's internal milli-unit balance.
+const PRICING_SCALE: u64 = 1000;
 
 /// Outcome of a detection probe: the peer's identity as we learned it, plus any
 /// PriceSheet it advertised.
@@ -78,6 +83,36 @@ fn find_price_sheet(messages: &[Vec<u8>]) -> Option<PriceSheet> {
         .find_map(|m| PriceSheet::decode(m).ok())
 }
 
+/// Find and decode the first MeteringReport in a set of message bodies.
+fn find_metering_report(messages: &[Vec<u8>]) -> Option<MeteringReport> {
+    messages
+        .iter()
+        .filter(|m| matches!(peek_type(m), Some(MessageType::MeteringReport)))
+        .find_map(|m| MeteringReport::decode(m).ok())
+}
+
+/// Whether a balance-exhausted Reject is present in a set of message bodies.
+fn balance_exhausted(messages: &[Vec<u8>]) -> bool {
+    messages
+        .iter()
+        .filter(|m| matches!(peek_type(m), Some(MessageType::Reject)))
+        .filter_map(|m| Reject::decode(m).ok())
+        .any(|r| r.is_balance_exhausted())
+}
+
+/// The price the peer charges, taken from the first mint option of its first
+/// product (v1 advertises a single rate). Zero if it offered no priced mints.
+fn price_from_sheet(sheet: Option<&PriceSheet>) -> Price {
+    sheet
+        .and_then(|s| s.products.first())
+        .and_then(|p| p.mints.first())
+        .map(|m| Price {
+            per_second: m.price_per_second,
+            per_unit: m.price_per_unit,
+        })
+        .unwrap_or_default()
+}
+
 /// Send our Announce to `base_url` and return the peer's Announce.
 pub async fn detect(base_url: &str, identity: &Identity, unit: &str) -> anyhow::Result<Detected> {
     let body = frame(&our_announce(identity, unit))
@@ -130,6 +165,103 @@ pub async fn pay(
         reason: ack.reason,
         price_sheet: find_price_sheet(&messages),
     })
+}
+
+/// Options for [`consume`].
+pub struct ConsumeOpts {
+    /// Sats in the initial bootstrap token.
+    pub amount_sat: u64,
+    /// Sats per top-up (also the low-balance watermark: top up when less than
+    /// this much is left).
+    pub topup_sat: u64,
+    /// How often to poll the peer for MeteringReports.
+    pub interval: Duration,
+    /// Stop after this many polls (`None` = until the process is killed).
+    pub max_polls: Option<u32>,
+}
+
+/// Pay a peer, then poll for MeteringReports and auto-top-up before the balance
+/// runs out — the bootstrap-only "stay online" loop. Remaining balance is tracked
+/// by applying the peer's advertised price to the usage it reports.
+///
+/// Emits greppable `CONSUME …` lines for each stage.
+pub async fn consume(
+    base_url: &str,
+    identity: &Identity,
+    unit: &str,
+    mint_url: &str,
+    opts: ConsumeOpts,
+) -> anyhow::Result<()> {
+    let paid = pay(base_url, identity, unit, mint_url, opts.amount_sat).await?;
+    if !paid.accepted {
+        anyhow::bail!(
+            "initial bootstrap rejected: {}",
+            paid.reason.as_deref().unwrap_or("unknown")
+        );
+    }
+    let price = price_from_sheet(paid.price_sheet.as_ref());
+    println!(
+        "CONSUME start peer={} paid={} sat per_second={} per_unit={}",
+        paid.peer_pubkey_hex, opts.amount_sat, price.per_second, price.per_unit
+    );
+
+    let topup_scaled = opts.topup_sat.saturating_mul(PRICING_SCALE);
+    let mut paid_scaled = opts.amount_sat.saturating_mul(PRICING_SCALE);
+
+    let mut poll = 0u32;
+    while opts.max_polls.is_none_or(|max| poll < max) {
+        poll += 1;
+        tokio::time::sleep(opts.interval).await;
+
+        // Poll: re-announce to receive any queued frames (MeteringReport, Reject).
+        let body = frame(&our_announce(identity, unit))
+            .map_err(|e| anyhow::anyhow!("framing our Announce: {e:?}"))?;
+        let messages = exchange(base_url, body).await?;
+        let cut_off = balance_exhausted(&messages);
+
+        let remaining = match find_metering_report(&messages) {
+            Some(report) => {
+                let cost = price.cost_scaled(report.elapsed_ms, report.delivered);
+                let remaining = paid_scaled.saturating_sub(cost);
+                println!(
+                    "CONSUME poll={poll} delivered={} elapsed_ms={} cost={} remaining={}",
+                    report.delivered, report.elapsed_ms, cost, remaining
+                );
+                remaining
+            }
+            None => {
+                println!(
+                    "CONSUME poll={poll} (no report yet){}",
+                    if cut_off { " cut-off" } else { "" }
+                );
+                paid_scaled // unknown usage; only top up if cut off
+            }
+        };
+
+        if cut_off || remaining < topup_scaled {
+            let top = pay(base_url, identity, unit, mint_url, opts.topup_sat).await?;
+            if top.accepted {
+                // A cut-off means the peer suspended us and reset its metering
+                // baseline on re-admit, so reset our accounting too; a proactive
+                // top-up just adds to the running total.
+                paid_scaled = if cut_off {
+                    topup_scaled
+                } else {
+                    paid_scaled.saturating_add(topup_scaled)
+                };
+                println!(
+                    "CONSUME topup amount={} sat cut_off={cut_off} paid_scaled={paid_scaled}",
+                    opts.topup_sat
+                );
+            } else {
+                println!(
+                    "CONSUME topup amount={} sat rejected={:?}",
+                    opts.topup_sat, top.reason
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Build a syntactically valid cashuA token of `amount_sat` drawn on `mint_url`.

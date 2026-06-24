@@ -3,7 +3,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use tollgate_protocol::{BootstrapAck, BootstrapToken, MessageType, Reject};
+use tollgate_protocol::{BootstrapAck, BootstrapToken, MessageType, MeteringReport, Reject};
 
 use crate::access::AccessLevel;
 use crate::action::Action;
@@ -35,10 +35,14 @@ pub struct PeerSnapshot {
     pub phase: PeerPhase,
     /// Scaled milli-unit balance.
     pub balance: u64,
-    /// Cumulative units delivered to the peer (0 before the first meter sample).
+    /// Units delivered to the peer since the metering baseline — matches the
+    /// MeteringReport sent to the peer. Zero before the first meter sample.
     pub delivered: u64,
-    /// Cumulative units received from the peer.
+    /// Units received from the peer since the metering baseline.
     pub received: u64,
+    /// When the current metering session began, or `None` until the first meter
+    /// sample establishes the baseline. The host computes elapsed against its clock.
+    pub metering_start: Option<Millis>,
 }
 
 /// Per-peer bookkeeping.
@@ -52,6 +56,11 @@ struct PeerSession {
     last_counters: Option<Counters>,
     /// When `last_counters` was taken.
     last_meter_at: Millis,
+    /// Counter values at the metering baseline — subtracted out so the
+    /// MeteringReport carries usage *cumulative since this metering session*.
+    metering_baseline: Counters,
+    /// When the metering baseline was established (for the report's `elapsed_ms`).
+    metering_start: Millis,
 }
 
 impl PeerSession {
@@ -61,6 +70,8 @@ impl PeerSession {
             balance: 0,
             last_counters: None,
             last_meter_at: Millis(0),
+            metering_baseline: Counters::default(),
+            metering_start: Millis(0),
         }
     }
 }
@@ -175,6 +186,8 @@ impl Session {
                             None => {
                                 peer_session.last_counters = Some(counters);
                                 peer_session.last_meter_at = now;
+                                peer_session.metering_baseline = counters;
+                                peer_session.metering_start = now;
                             }
                             Some(prev) => {
                                 let delivered = counters.delivered.saturating_sub(prev.delivered);
@@ -183,6 +196,19 @@ impl Session {
                                 peer_session.last_counters = Some(counters);
                                 peer_session.last_meter_at = now;
                                 peer_session.balance = peer_session.balance.saturating_sub(cost);
+                                // Report usage cumulative since the baseline so the
+                                // peer can track its own balance and top up before
+                                // exhaustion. Coalesced on the host (latest wins).
+                                let baseline = peer_session.metering_baseline;
+                                actions.push(Action::Send {
+                                    peer,
+                                    bytes: MeteringReport::new(
+                                        now.since(peer_session.metering_start),
+                                        counters.delivered.saturating_sub(baseline.delivered),
+                                        counters.received.saturating_sub(baseline.received),
+                                    )
+                                    .encode(),
+                                });
                                 if peer_session.balance == 0 {
                                     peer_session.phase = PeerPhase::Suspended;
                                     // Tell the peer *why* it's being cut so it can
@@ -244,12 +270,24 @@ impl Session {
     pub fn snapshot(&self) -> Vec<PeerSnapshot> {
         self.peers
             .iter()
-            .map(|(peer, s)| PeerSnapshot {
-                peer: *peer,
-                phase: s.phase,
-                balance: s.balance,
-                delivered: s.last_counters.map_or(0, |c| c.delivered),
-                received: s.last_counters.map_or(0, |c| c.received),
+            .map(|(peer, s)| {
+                // Usage cumulative since the baseline (same basis as MeteringReport).
+                let (delivered, received, metering_start) = match s.last_counters {
+                    Some(c) => (
+                        c.delivered.saturating_sub(s.metering_baseline.delivered),
+                        c.received.saturating_sub(s.metering_baseline.received),
+                        Some(s.metering_start),
+                    ),
+                    None => (0, 0, None),
+                };
+                PeerSnapshot {
+                    peer: *peer,
+                    phase: s.phase,
+                    balance: s.balance,
+                    delivered,
+                    received,
+                    metering_start,
+                }
             })
             .collect()
     }
@@ -262,6 +300,36 @@ mod tests {
 
     fn peer(byte: u8) -> PeerId {
         PeerId(PublicKey::from_bytes([byte; 33]))
+    }
+
+    /// Decode the first MeteringReport among a list of actions, if any.
+    fn find_metering_report(actions: &[Action]) -> Option<MeteringReport> {
+        actions.iter().find_map(|a| match a {
+            Action::Send { bytes, .. }
+                if matches!(
+                    tollgate_protocol::peek_type(bytes),
+                    Some(MessageType::MeteringReport)
+                ) =>
+            {
+                MeteringReport::decode(bytes).ok()
+            }
+            _ => None,
+        })
+    }
+
+    /// Decode the first Reject among a list of actions, if any.
+    fn find_reject(actions: &[Action]) -> Option<Reject> {
+        actions.iter().find_map(|a| match a {
+            Action::Send { bytes, .. }
+                if matches!(
+                    tollgate_protocol::peek_type(bytes),
+                    Some(MessageType::Reject)
+                ) =>
+            {
+                Reject::decode(bytes).ok()
+            }
+            _ => None,
+        })
     }
 
     #[test]
@@ -392,11 +460,25 @@ mod tests {
             },
         };
 
-        // First sample establishes the baseline — no charge, no actions.
+        // First sample establishes the baseline — no charge, no report.
         assert!(session.handle(sample(0), Millis(1000)).is_empty());
-        // Deliver 4 units → cost 4, balance 10 → 6, still active.
-        assert!(session.handle(sample(4), Millis(2000)).is_empty());
-        // Deliver 6 more (cumulative 10) → cost 6, balance 6 → 0 → suspend.
+
+        // Deliver 4 units → cost 4, balance 10 → 6, still active. A MeteringReport
+        // is sent carrying usage cumulative since the baseline.
+        let actions = session.handle(sample(4), Millis(2000));
+        let report = find_metering_report(&actions).expect("a MeteringReport");
+        assert_eq!(report.delivered, 4);
+        assert_eq!(report.elapsed_ms, 1000); // 2000 − baseline at 1000
+        assert!(!actions.iter().any(|a| matches!(
+            a,
+            Action::SetAccess {
+                level: AccessLevel::Suspended,
+                ..
+            }
+        )));
+
+        // Deliver 6 more (cumulative 10) → cost 6, balance 6 → 0 → suspend, with a
+        // final MeteringReport and a balance-exhausted Reject.
         let actions = session.handle(sample(10), Millis(3000));
         assert!(actions.iter().any(|a| matches!(
             a,
@@ -410,22 +492,53 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, Action::StopMetering { .. }))
         );
-        // The peer is told why it was cut: a balance-exhausted Reject.
-        let reject_bytes = actions
-            .iter()
-            .find_map(|a| match a {
-                Action::Send { bytes, .. } => Some(bytes.clone()),
-                _ => None,
-            })
-            .expect("a Send action carrying a Reject");
+        assert_eq!(
+            find_metering_report(&actions).expect("report").delivered,
+            10
+        );
         assert!(
-            Reject::decode(&reject_bytes)
-                .expect("decode Reject")
+            find_reject(&actions)
+                .expect("a Reject")
                 .is_balance_exhausted()
         );
 
         // Once suspended, further samples are ignored (no more actions).
         assert!(session.handle(sample(99), Millis(4000)).is_empty());
+    }
+
+    #[test]
+    fn metering_report_is_cumulative_since_the_baseline() {
+        let mut session = Session::new();
+        session.set_price(Price {
+            per_second: 0,
+            per_unit: 1,
+        });
+        let p = peer(11);
+        session.handle(Event::PeerConnected { peer: p }, Millis(0));
+        session.handle(
+            Event::BootstrapVerified {
+                peer: p,
+                amount: 1_000_000,
+                ok: true,
+            },
+            Millis(0),
+        );
+
+        let sample = |d, r| Event::MeterSample {
+            peer: p,
+            counters: Counters {
+                delivered: d,
+                received: r,
+            },
+        };
+
+        // Baseline at non-zero counters (the meter had prior traffic); subtracted out.
+        assert!(session.handle(sample(100, 50), Millis(1000)).is_empty());
+        let actions = session.handle(sample(130, 70), Millis(6000));
+        let report = find_metering_report(&actions).expect("a MeteringReport");
+        assert_eq!(report.delivered, 30); // 130 − 100
+        assert_eq!(report.received, 20); // 70 − 50
+        assert_eq!(report.elapsed_ms, 5000); // 6000 − baseline at 1000
     }
 
     #[test]
@@ -603,9 +716,16 @@ mod tests {
             Millis(0),
         );
 
-        // Baseline, then drain time-cost to exactly zero → suspend.
+        // Baseline (no report), then drain time-cost to exactly zero → suspend.
         assert!(session.handle(sample(), Millis(0)).is_empty());
-        assert!(session.handle(sample(), Millis(50)).is_empty()); // 100 → 50
+        let mid = session.handle(sample(), Millis(50)); // 100 → 50 (report, no suspend)
+        assert!(!mid.iter().any(|a| matches!(
+            a,
+            Action::SetAccess {
+                level: AccessLevel::Suspended,
+                ..
+            }
+        )));
         let actions = session.handle(sample(), Millis(100)); // 50 → 0 → suspend
         assert!(actions.iter().any(|a| matches!(
             a,
@@ -640,8 +760,16 @@ mod tests {
             actions.is_empty(),
             "re-admit must not re-suspend on the gap: {actions:?}"
         );
-        // Metering resumes from the new baseline: 50ms → cost 50, balance 100 → 50.
-        assert!(session.handle(sample(), Millis(10_050)).is_empty());
+        // Metering resumes from the new baseline: 50ms → cost 50, balance 100 → 50
+        // (a report is sent, but no re-suspend — the suspended gap was not billed).
+        let resumed = session.handle(sample(), Millis(10_050));
+        assert!(!resumed.iter().any(|a| matches!(
+            a,
+            Action::SetAccess {
+                level: AccessLevel::Suspended,
+                ..
+            }
+        )));
         assert_eq!(session.peer_phase(&p), Some(PeerPhase::Active));
     }
 
@@ -679,5 +807,6 @@ mod tests {
         assert_eq!(snap[0].balance, 5000 - 3);
         assert_eq!(snap[0].delivered, 3);
         assert_eq!(snap[0].received, 1);
+        assert_eq!(snap[0].metering_start, Some(Millis(1000))); // baseline sample time
     }
 }
