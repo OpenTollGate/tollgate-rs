@@ -1,0 +1,11 @@
+# Child node for the sandbox. Runs `serve` like the gateway, so it has its own
+# control socket (`tolltop` works inside it too). You `exec` in and run
+# `tollgate pay` / `tollgate connect` by hand; a persistent key means repeated
+# pays top up the SAME peer on the gateway (watch one peer's balance change in
+# the gateway's tolltop, rather than spawning a new peer each time).
+#
+# Pay-only: no `products`, so it sells nothing — its own tolltop shows zero peers
+# until something downstream pays it.
+unit: "bytes"
+firewall: sets-only
+secret_key_file: /root/client.key

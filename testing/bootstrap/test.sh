@@ -72,4 +72,11 @@ echo "----- nft paid_peers_v4 -----"; echo "${set_v4:-<empty>}"
 echo "$set_v4" | grep -qF "$client_ip" \
     || fail "granted client IP $client_ip is not in paid_peers_v4 (access not enforced)"
 
-echo "PASS: bootstrap accepted, access granted, and IP enforced in nftables ($client_ip)"
+# 5. The control socket works end to end: tolltop --once reports the paid peer
+# as Active over the gateway's Unix socket.
+status_out="$($COMPOSE exec -T gateway tolltop --once 2>/dev/null || true)"
+echo "----- tolltop --once -----"; echo "${status_out:-<empty>}"
+echo "$status_out" | grep -qE 'Active' \
+    || fail "tolltop did not report an Active peer over the control socket"
+
+echo "PASS: bootstrap accepted, access enforced, and tolltop reports the peer Active"

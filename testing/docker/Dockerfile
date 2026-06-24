@@ -29,8 +29,9 @@ COPY crates ./crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build --release --bin tollgate && \
-    cp target/release/tollgate /tollgate
+    cargo build --release --bin tollgate --bin tolltop && \
+    cp target/release/tollgate /tollgate && \
+    cp target/release/tolltop /tolltop
 
 # ---- Stage 2: runtime ----
 FROM debian:trixie-slim
@@ -41,6 +42,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /tollgate /usr/local/bin/tollgate
+COPY --from=builder /tolltop /usr/local/bin/tolltop
 
 # Default command is overridden per role in docker-compose.
 ENTRYPOINT ["tollgate"]

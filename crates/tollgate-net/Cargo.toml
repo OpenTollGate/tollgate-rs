@@ -32,6 +32,8 @@ cashu = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 bytes = { workspace = true }
+# tolltop TUI (also pulls crossterm as its default backend).
+ratatui = "0.29"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
