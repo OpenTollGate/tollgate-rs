@@ -7,6 +7,7 @@
 mod adapter;
 mod client;
 mod config;
+mod control_server;
 mod driver;
 mod server;
 mod wallet;
@@ -121,6 +122,18 @@ async fn serve(
         std::time::Duration::from_secs(120),
         std::time::Duration::from_secs(30),
     );
+
+    // Serve the FIPS-style control socket so `tolltop` / status tooling can read
+    // live peer state. Best-effort: a bind failure is logged, not fatal.
+    {
+        let driver = driver.clone();
+        let socket = cfg.control_socket.clone();
+        tokio::spawn(async move {
+            if let Err(e) = control_server::serve(&socket, driver).await {
+                tracing::warn!(err = %e, socket = %socket.display(), "control socket stopped");
+            }
+        });
+    }
 
     server::serve(&cfg.listen, driver).await
 }

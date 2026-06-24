@@ -34,6 +34,8 @@ pub struct Config {
     pub firewall: FirewallMode,
     /// Resource unit this node meters, advertised in Announce ("bytes", "wh", …).
     pub unit: String,
+    /// Path to the Unix control socket served for `tolltop` / status tooling.
+    pub control_socket: PathBuf,
 }
 
 impl Default for Config {
@@ -45,6 +47,7 @@ impl Default for Config {
             products: Vec::new(),
             firewall: FirewallMode::default(),
             unit: "bytes".to_string(),
+            control_socket: PathBuf::from("/tmp/tollgate.sock"),
         }
     }
 }

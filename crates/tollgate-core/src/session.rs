@@ -28,6 +28,19 @@ pub enum PeerPhase {
     Closed,
 }
 
+/// An immutable view of one peer's state, for status/monitoring tooling.
+#[derive(Clone, Copy, Debug)]
+pub struct PeerSnapshot {
+    pub peer: PeerId,
+    pub phase: PeerPhase,
+    /// Scaled milli-unit balance.
+    pub balance: u64,
+    /// Cumulative units delivered to the peer (0 before the first meter sample).
+    pub delivered: u64,
+    /// Cumulative units received from the peer.
+    pub received: u64,
+}
+
 /// Per-peer bookkeeping.
 #[derive(Clone, Debug)]
 struct PeerSession {
@@ -223,6 +236,22 @@ impl Session {
     /// `Active` peer holds paid balance and must be kept even while it is silent.
     pub fn peer_phase(&self, peer: &PeerId) -> Option<PeerPhase> {
         self.peers.get(peer).map(|p| p.phase)
+    }
+
+    /// Snapshot every tracked peer's state for inspection (status CLI / TUI).
+    /// Pure read — the host combines this with its own per-peer data (IP, idle
+    /// time) to render a full picture.
+    pub fn snapshot(&self) -> Vec<PeerSnapshot> {
+        self.peers
+            .iter()
+            .map(|(peer, s)| PeerSnapshot {
+                peer: *peer,
+                phase: s.phase,
+                balance: s.balance,
+                delivered: s.last_counters.map_or(0, |c| c.delivered),
+                received: s.last_counters.map_or(0, |c| c.received),
+            })
+            .collect()
     }
 }
 
@@ -614,5 +643,41 @@ mod tests {
         // Metering resumes from the new baseline: 50ms → cost 50, balance 100 → 50.
         assert!(session.handle(sample(), Millis(10_050)).is_empty());
         assert_eq!(session.peer_phase(&p), Some(PeerPhase::Active));
+    }
+
+    #[test]
+    fn snapshot_reports_phase_balance_and_counters() {
+        let mut session = Session::new();
+        session.set_price(Price {
+            per_second: 0,
+            per_unit: 1,
+        });
+        let p = peer(5);
+        session.handle(Event::PeerConnected { peer: p }, Millis(0));
+        session.handle(
+            Event::BootstrapVerified {
+                peer: p,
+                amount: 5000,
+                ok: true,
+            },
+            Millis(0),
+        );
+        let sample = |delivered, received| Event::MeterSample {
+            peer: p,
+            counters: Counters {
+                delivered,
+                received,
+            },
+        };
+        session.handle(sample(0, 0), Millis(1000)); // baseline
+        session.handle(sample(3, 1), Millis(2000)); // deliver 3 → cost 3
+
+        let snap = session.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].peer, p);
+        assert_eq!(snap[0].phase, PeerPhase::Active);
+        assert_eq!(snap[0].balance, 5000 - 3);
+        assert_eq!(snap[0].delivered, 3);
+        assert_eq!(snap[0].received, 1);
     }
 }

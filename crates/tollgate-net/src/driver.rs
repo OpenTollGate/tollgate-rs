@@ -21,6 +21,8 @@ use tollgate_core::time::Millis;
 use tollgate_core::{PeerId, Price, Session};
 use tollgate_protocol::{Announce, PROTOCOL_VERSION, PublicKey};
 
+use tollgate_net::status::{NodeStatus, PeerStatus};
+
 use crate::adapter::IpAdapter;
 use crate::config::Identity;
 use crate::wallet::BootstrapWallet;
@@ -224,6 +226,42 @@ impl Driver {
             .await
             .remove(peer_hex)
             .unwrap_or_default()
+    }
+
+    /// Build a status snapshot of the node and its peers for the control socket.
+    /// Each lock is cloned and released before the next is taken, so this never
+    /// holds two at once — the metering loop locks `metered` then `peer_ip`, so
+    /// holding both here in the other order could otherwise deadlock.
+    pub async fn status(&self) -> NodeStatus {
+        let snaps = self.0.session.lock().await.snapshot();
+        let peer_ip = self.0.peer_ip.lock().await.clone();
+        let last_seen = self.0.last_seen.lock().await.clone();
+        let metered = self.0.metered.lock().await.clone();
+        let now = now_millis().0;
+
+        let peers = snaps
+            .iter()
+            .map(|s| {
+                let hex = peer_to_hex(s.peer);
+                PeerStatus {
+                    ip: peer_ip.get(&hex).map(|ip| ip.to_string()),
+                    idle_ms: last_seen.get(&hex).map_or(0, |t| now.saturating_sub(t.0)),
+                    metered: metered.contains(&hex),
+                    allowed: matches!(s.phase, PeerPhase::Active),
+                    phase: format!("{:?}", s.phase),
+                    balance: s.balance,
+                    delivered: s.delivered,
+                    received: s.received,
+                    pubkey: hex,
+                }
+            })
+            .collect();
+
+        NodeStatus {
+            pubkey: self.0.identity.pubkey_hex(),
+            unit: self.0.unit.clone(),
+            peers,
+        }
     }
 
     /// Run one event through the core session, releasing the lock before any I/O.
@@ -460,6 +498,32 @@ mod tests {
 
         driver.execute(Action::StopMetering { peer }).await;
         assert!(!driver.0.metered.lock().await.contains(&hex));
+    }
+
+    #[tokio::test]
+    async fn status_reports_active_peer_with_ip() {
+        let driver = test_driver();
+        let peer = PeerId(PublicKey::from_bytes([7u8; 33]));
+        let hex = peer_to_hex(peer);
+        driver
+            .peer_connected(&hex, Some("10.0.0.9".parse().unwrap()))
+            .await;
+        let _ = driver
+            .handle(Event::BootstrapVerified {
+                peer,
+                amount: 4242,
+                ok: true,
+            })
+            .await;
+
+        let st = driver.status().await;
+        assert_eq!(st.peers.len(), 1);
+        let p = &st.peers[0];
+        assert_eq!(p.pubkey, hex);
+        assert_eq!(p.phase, "Active");
+        assert_eq!(p.balance, 4242);
+        assert_eq!(p.ip.as_deref(), Some("10.0.0.9"));
+        assert!(p.allowed);
     }
 
     #[tokio::test]
