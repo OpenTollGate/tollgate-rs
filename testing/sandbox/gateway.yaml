@@ -12,6 +12,6 @@ products:
     # 0 keeps paid peers Active indefinitely (no traffic, no drain) — a stable
     # dashboard to explore. Set e.g. 50 to watch balances tick down in tolltop
     # every 5s and flip to Suspended when they hit zero.
-    price_per_second: 0
+    price_per_second: 200
     price_per_unit: 1
 # control_socket defaults to /tmp/tollgate.sock — where `tolltop` looks by default.

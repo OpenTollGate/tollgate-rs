@@ -180,17 +180,41 @@ pub struct ConsumeOpts {
     pub max_polls: Option<u32>,
 }
 
+/// The peer's latest MeteringReport, summarised. `delivered`/`received` are from
+/// the *peer's* perspective: `delivered` is what the peer delivered to us.
+pub struct ReportSummary {
+    pub elapsed_ms: u64,
+    pub delivered: u64,
+    pub received: u64,
+}
+
+/// One observation from the consume loop, handed to its callback each poll.
+pub struct ConsumeEvent {
+    /// 0 for the initial "start" event, then 1, 2, … per poll.
+    pub poll: u32,
+    pub peer_pubkey: String,
+    pub price: Price,
+    pub paid_scaled: u64,
+    pub remaining_scaled: u64,
+    /// The peer's latest report, if one arrived this poll.
+    pub report: Option<ReportSummary>,
+    /// The peer reported us balance-exhausted (cut off).
+    pub cut_off: bool,
+    /// We sent a top-up this poll.
+    pub topped_up: bool,
+}
+
 /// Pay a peer, then poll for MeteringReports and auto-top-up before the balance
 /// runs out — the bootstrap-only "stay online" loop. Remaining balance is tracked
-/// by applying the peer's advertised price to the usage it reports.
-///
-/// Emits greppable `CONSUME …` lines for each stage.
-pub async fn consume(
+/// by applying the peer's advertised price to the usage it reports. `on_event` is
+/// called once per poll (and once at start) so callers can print or record state.
+pub async fn run_consume(
     base_url: &str,
     identity: &Identity,
     unit: &str,
     mint_url: &str,
     opts: ConsumeOpts,
+    mut on_event: impl FnMut(&ConsumeEvent),
 ) -> anyhow::Result<()> {
     let paid = pay(base_url, identity, unit, mint_url, opts.amount_sat).await?;
     if !paid.accepted {
@@ -200,13 +224,20 @@ pub async fn consume(
         );
     }
     let price = price_from_sheet(paid.price_sheet.as_ref());
-    println!(
-        "CONSUME start peer={} paid={} sat per_second={} per_unit={}",
-        paid.peer_pubkey_hex, opts.amount_sat, price.per_second, price.per_unit
-    );
-
+    let peer_pubkey = paid.peer_pubkey_hex;
     let topup_scaled = opts.topup_sat.saturating_mul(PRICING_SCALE);
     let mut paid_scaled = opts.amount_sat.saturating_mul(PRICING_SCALE);
+
+    on_event(&ConsumeEvent {
+        poll: 0,
+        peer_pubkey: peer_pubkey.clone(),
+        price,
+        paid_scaled,
+        remaining_scaled: paid_scaled,
+        report: None,
+        cut_off: false,
+        topped_up: false,
+    });
 
     let mut poll = 0u32;
     while opts.max_polls.is_none_or(|max| poll < max) {
@@ -219,26 +250,14 @@ pub async fn consume(
         let messages = exchange(base_url, body).await?;
         let cut_off = balance_exhausted(&messages);
 
-        let remaining = match find_metering_report(&messages) {
-            Some(report) => {
-                let cost = price.cost_scaled(report.elapsed_ms, report.delivered);
-                let remaining = paid_scaled.saturating_sub(cost);
-                println!(
-                    "CONSUME poll={poll} delivered={} elapsed_ms={} cost={} remaining={}",
-                    report.delivered, report.elapsed_ms, cost, remaining
-                );
-                remaining
-            }
-            None => {
-                println!(
-                    "CONSUME poll={poll} (no report yet){}",
-                    if cut_off { " cut-off" } else { "" }
-                );
-                paid_scaled // unknown usage; only top up if cut off
-            }
-        };
+        let report = find_metering_report(&messages);
+        let cost = report
+            .as_ref()
+            .map_or(0, |r| price.cost_scaled(r.elapsed_ms, r.delivered));
 
-        if cut_off || remaining < topup_scaled {
+        // Top up if cut off, or proactively before the balance dips below a top-up.
+        let mut topped_up = false;
+        if cut_off || paid_scaled.saturating_sub(cost) < topup_scaled {
             let top = pay(base_url, identity, unit, mint_url, opts.topup_sat).await?;
             if top.accepted {
                 // A cut-off means the peer suspended us and reset its metering
@@ -249,19 +268,67 @@ pub async fn consume(
                 } else {
                     paid_scaled.saturating_add(topup_scaled)
                 };
-                println!(
-                    "CONSUME topup amount={} sat cut_off={cut_off} paid_scaled={paid_scaled}",
-                    opts.topup_sat
-                );
-            } else {
-                println!(
-                    "CONSUME topup amount={} sat rejected={:?}",
-                    opts.topup_sat, top.reason
-                );
+                topped_up = true;
             }
         }
+
+        on_event(&ConsumeEvent {
+            poll,
+            peer_pubkey: peer_pubkey.clone(),
+            price,
+            paid_scaled,
+            remaining_scaled: paid_scaled.saturating_sub(cost),
+            report: report.map(|r| ReportSummary {
+                elapsed_ms: r.elapsed_ms,
+                delivered: r.delivered,
+                received: r.received,
+            }),
+            cut_off,
+            topped_up,
+        });
     }
     Ok(())
+}
+
+/// CLI `consume`: run the loop, printing greppable `CONSUME …` lines.
+pub async fn consume(
+    base_url: &str,
+    identity: &Identity,
+    unit: &str,
+    mint_url: &str,
+    opts: ConsumeOpts,
+) -> anyhow::Result<()> {
+    let topup_sat = opts.topup_sat;
+    run_consume(base_url, identity, unit, mint_url, opts, move |ev| {
+        if ev.poll == 0 {
+            println!(
+                "CONSUME start peer={} paid={} sat per_second={} per_unit={}",
+                ev.peer_pubkey,
+                ev.paid_scaled / PRICING_SCALE,
+                ev.price.per_second,
+                ev.price.per_unit
+            );
+            return;
+        }
+        match &ev.report {
+            Some(r) => println!(
+                "CONSUME poll={} delivered={} elapsed_ms={} remaining={}",
+                ev.poll, r.delivered, r.elapsed_ms, ev.remaining_scaled
+            ),
+            None => println!(
+                "CONSUME poll={} (no report yet){}",
+                ev.poll,
+                if ev.cut_off { " cut-off" } else { "" }
+            ),
+        }
+        if ev.topped_up {
+            println!(
+                "CONSUME topup amount={topup_sat} sat cut_off={} paid_scaled={}",
+                ev.cut_off, ev.paid_scaled
+            );
+        }
+    })
+    .await
 }
 
 /// Build a syntactically valid cashuA token of `amount_sat` drawn on `mint_url`.

@@ -147,7 +147,7 @@ async fn serve(
     let driver = driver::Driver::new(
         wallet,
         adapter,
-        identity,
+        identity.clone(),
         price,
         cfg.unit.clone(),
         cfg.price_sheet().encode(),
@@ -155,6 +155,9 @@ async fn serve(
     driver.spawn_metering(std::time::Duration::from_secs(
         cfg.metering_interval_secs.max(1),
     ));
+    // Buy from configured upstreams: pay + auto-top-up each, tracking them as
+    // upstream peers (the mesh's inbound direction).
+    driver.spawn_upstreams(cfg.upstreams.clone(), identity);
     // Reap peers that have gone silent. The HTTP-polling transport has no socket
     // close to observe, so idle-timeout is the disconnect signal; Active peers are
     // kept regardless (they hold paid balance and may consume without polling).

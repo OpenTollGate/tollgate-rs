@@ -1,11 +1,13 @@
-# Child node for the sandbox. Runs `serve` like the gateway, so it has its own
-# control socket (`tolltop` works inside it too). You `exec` in and run
-# `tollgate pay` / `tollgate connect` by hand; a persistent key means repeated
-# pays top up the SAME peer on the gateway (watch one peer's balance change in
-# the gateway's tolltop, rather than spawning a new peer each time).
-#
-# Pay-only: no `products`, so it sells nothing — its own tolltop shows zero peers
-# until something downstream pays it.
+# Child node for the sandbox. Runs `serve` like the gateway, and BUYS from the
+# gateway as an upstream — so the mesh is mutual: the gateway's tolltop shows the
+# client (↓, a customer), and the client's tolltop shows the gateway (↑, a
+# provider it pays). The node pays + auto-tops-up the upstream on its own.
 unit: "bytes"
 firewall: sets-only
 secret_key_file: /root/client.key
+upstreams:
+  - peer: "http://gateway:4747"
+    mint: "http://mint:3338"
+    amount: 20
+    topup: 20
+    interval_secs: 2

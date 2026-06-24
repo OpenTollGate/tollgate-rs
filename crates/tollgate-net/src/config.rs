@@ -40,6 +40,10 @@ pub struct Config {
     /// Lower = finer-grained reports (and faster tests); the drain *rate* is
     /// unchanged (cost is per elapsed second). Clamped to ≥1.
     pub metering_interval_secs: u64,
+    /// Upstream peers this node buys from. On `serve`, it connects, pays, and
+    /// auto-tops-up each, tracking them as upstream peers (the mesh's inbound
+    /// direction — what `tolltop` shows with a `↑` direction).
+    pub upstreams: Vec<UpstreamConfig>,
 }
 
 impl Default for Config {
@@ -53,6 +57,7 @@ impl Default for Config {
             unit: "bytes".to_string(),
             control_socket: PathBuf::from("/tmp/tollgate.sock"),
             metering_interval_secs: 5,
+            upstreams: Vec::new(),
         }
     }
 }
@@ -85,6 +90,35 @@ pub struct ProductConfig {
     pub pricing_scale: u32,
     pub price_per_second: i64,
     pub price_per_unit: i64,
+}
+
+/// An upstream peer this node *buys* from — it connects, pays, and auto-tops-up,
+/// tracking the relationship like any other peer (the inbound/mesh direction).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct UpstreamConfig {
+    /// Peer HTTP origin, e.g. `http://gateway:4747`.
+    pub peer: String,
+    /// Mint to draw bootstrap tokens on.
+    pub mint: String,
+    /// Initial token amount in sats.
+    pub amount: u64,
+    /// Top-up amount in sats (also the low-balance watermark).
+    pub topup: u64,
+    /// Seconds between polls for MeteringReports.
+    pub interval_secs: u64,
+}
+
+impl Default for UpstreamConfig {
+    fn default() -> Self {
+        Self {
+            peer: String::new(),
+            mint: String::new(),
+            amount: 8,
+            topup: 8,
+            interval_secs: 5,
+        }
+    }
 }
 
 impl Config {
@@ -293,6 +327,23 @@ mod tests {
         // No products at all → an empty sheet (a node that sells nothing).
         let empty: Config = serde_yaml::from_str("{}").unwrap();
         assert!(empty.price_sheet().products.is_empty());
+    }
+
+    #[test]
+    fn upstreams_parse_with_field_defaults() {
+        let cfg: Config = serde_yaml::from_str(
+            "upstreams:\n  - peer: \"http://gw:4747\"\n    mint: \"http://m:3338\"\n    amount: 20\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.upstreams.len(), 1);
+        let u = &cfg.upstreams[0];
+        assert_eq!(u.peer, "http://gw:4747");
+        assert_eq!(u.amount, 20);
+        assert_eq!(u.topup, 8); // default
+        assert_eq!(u.interval_secs, 5); // default
+
+        let empty: Config = serde_yaml::from_str("{}").unwrap();
+        assert!(empty.upstreams.is_empty());
     }
 
     #[test]

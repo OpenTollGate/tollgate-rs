@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Mutex;
@@ -26,8 +26,32 @@ use tollgate_protocol::{
 use tollgate_net::status::{MintStatus, NodeStatus, PeerStatus, PricingStatus, ProductStatus};
 
 use crate::adapter::IpAdapter;
-use crate::config::Identity;
+use crate::client;
+use crate::config::{Identity, UpstreamConfig};
 use crate::wallet::BootstrapWallet;
+
+/// What we know about an upstream peer we *buy* from (the mesh's inbound
+/// direction). Updated by the per-upstream consume loop; read by `status()`.
+#[derive(Clone)]
+struct UpstreamState {
+    /// The upstream's pubkey (from its Announce).
+    pubkey: String,
+    /// The upstream's URL (the configured `peer`).
+    url: String,
+    /// What they charge us.
+    price: Price,
+    /// Our remaining scaled balance with them.
+    remaining_scaled: u64,
+    /// Usage from *our* perspective: `sent` to them, `recv` from them.
+    sent: u64,
+    recv: u64,
+    /// Seconds the session has run (from their report's `elapsed_ms`).
+    metered_secs: u64,
+    /// Whether we're currently paid up / online with them.
+    online: bool,
+    /// When we last heard back from them.
+    last_seen: Millis,
+}
 
 /// Shared handle — cheaply cloned (Arc) and given to each connection.
 #[derive(Clone)]
@@ -55,6 +79,10 @@ struct Inner {
     /// Our pre-encoded PriceSheet, advertised after Announce on each exchange so
     /// peers can discover the price and accepted mints. Empty if we sell nothing.
     price_sheet: Vec<u8>,
+    /// Upstream peers we buy from, keyed by URL — the inbound/mesh direction.
+    /// A std mutex so the (sync) consume callback can update it; the critical
+    /// section never spans an await.
+    upstreams: StdMutex<BTreeMap<String, UpstreamState>>,
 }
 
 impl Driver {
@@ -79,6 +107,7 @@ impl Driver {
             identity,
             unit: unit.into(),
             price_sheet,
+            upstreams: StdMutex::new(BTreeMap::new()),
         }))
     }
 
@@ -115,6 +144,91 @@ impl Driver {
                 }
             }
         });
+    }
+
+    /// Spawn one consume loop per configured upstream: connect, pay, and
+    /// auto-top-up, recording each as an upstream peer (the inbound/mesh
+    /// direction) so it shows in status/tolltop. A loop that errors is restarted
+    /// after a short delay.
+    pub fn spawn_upstreams(&self, upstreams: Vec<UpstreamConfig>, identity: Arc<Identity>) {
+        let unit = self.0.unit.clone();
+        for cfg in upstreams {
+            if cfg.peer.is_empty() {
+                continue;
+            }
+            let driver = self.clone();
+            let identity = identity.clone();
+            let unit = unit.clone();
+            tokio::spawn(async move {
+                loop {
+                    let opts = client::ConsumeOpts {
+                        amount_sat: cfg.amount,
+                        topup_sat: cfg.topup,
+                        interval: Duration::from_secs(cfg.interval_secs.max(1)),
+                        max_polls: None,
+                    };
+                    let d = driver.clone();
+                    let url = cfg.peer.clone();
+                    let result = client::run_consume(
+                        &cfg.peer,
+                        &identity,
+                        &unit,
+                        &cfg.mint,
+                        opts,
+                        move |ev| {
+                            d.record_upstream(&url, ev);
+                        },
+                    )
+                    .await;
+                    if let Err(e) = result {
+                        tracing::warn!(peer = %cfg.peer, err = %e, "upstream loop ended; retrying");
+                    }
+                    driver.mark_upstream_offline(&cfg.peer);
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            });
+        }
+    }
+
+    /// Record an observation from an upstream's consume loop (sync — std mutex).
+    fn record_upstream(&self, url: &str, ev: &client::ConsumeEvent) {
+        let mut map = self.0.upstreams.lock().unwrap_or_else(|e| e.into_inner());
+        let state = map.entry(url.to_string()).or_insert_with(|| UpstreamState {
+            pubkey: String::new(),
+            url: url.to_string(),
+            price: Price::default(),
+            remaining_scaled: 0,
+            sent: 0,
+            recv: 0,
+            metered_secs: 0,
+            online: true,
+            last_seen: now_millis(),
+        });
+        state.pubkey = ev.peer_pubkey.clone();
+        state.price = ev.price;
+        state.remaining_scaled = ev.remaining_scaled;
+        state.online = !ev.cut_off;
+        state.last_seen = now_millis();
+        if let Some(r) = &ev.report {
+            // Flip to our perspective: we received what they delivered to us, and
+            // sent them what they received from us.
+            state.recv = r.delivered;
+            state.sent = r.received;
+            state.metered_secs = r.elapsed_ms / 1000;
+        }
+    }
+
+    /// Mark an upstream offline (its loop ended and is retrying).
+    fn mark_upstream_offline(&self, url: &str) {
+        if let Some(s) = self
+            .0
+            .upstreams
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(url)
+        {
+            s.online = false;
+        }
     }
 
     /// Spawn the reaper: every `sweep_every`, drop peers idle longer than
@@ -241,7 +355,8 @@ impl Driver {
         let metered = self.0.metered.lock().await.clone();
         let now = now_millis().0;
 
-        let peers = snaps
+        // Downstream peers: customers we sell to (core session).
+        let mut peers: Vec<PeerStatus> = snaps
             .iter()
             .map(|s| {
                 let hex = peer_to_hex(s.peer);
@@ -257,10 +372,34 @@ impl Driver {
                     balance: s.balance,
                     delivered: s.delivered,
                     received: s.received,
+                    direction: "down".to_string(),
                     pubkey: hex,
                 }
             })
             .collect();
+
+        // Upstream peers: providers we buy from (the inbound/mesh direction).
+        let upstreams = self
+            .0
+            .upstreams
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        for s in upstreams.values() {
+            peers.push(PeerStatus {
+                pubkey: s.pubkey.clone(),
+                ip: Some(s.url.clone()),
+                phase: if s.online { "Active" } else { "Cut-off" }.to_string(),
+                balance: s.remaining_scaled,
+                delivered: s.sent, // SENT to them
+                received: s.recv,  // RECV from them
+                metered_secs: s.metered_secs,
+                allowed: s.online,
+                metered: s.online,
+                idle_ms: now.saturating_sub(s.last_seen.0),
+                direction: "up".to_string(),
+            });
+        }
 
         NodeStatus {
             pubkey: self.0.identity.pubkey_hex(),

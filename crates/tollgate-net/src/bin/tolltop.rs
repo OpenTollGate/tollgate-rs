@@ -167,10 +167,10 @@ fn render_peers(frame: &mut ratatui::Frame, area: Rect, s: &NodeStatus) {
         other
     );
 
-    // SENT = units delivered to the peer; RECV = units received from it (matches
-    // the MeteringReport directions). METERED = how long this session has run.
+    // DIR = ↓ a customer we sell to / ↑ a provider we buy from. SENT/RECV are
+    // from our perspective; METERED = how long this session has run.
     let head = Row::new([
-        "PEER", "IP", "PHASE", "BALANCE", "ACCESS", "SENT", "RECV", "METERED", "IDLE",
+        "DIR", "PEER", "IP", "PHASE", "BALANCE", "ACCESS", "SENT", "RECV", "METERED", "IDLE",
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
 
@@ -181,6 +181,7 @@ fn render_peers(frame: &mut ratatui::Frame, area: Rect, s: &NodeStatus) {
             Cell::from("blocked").style(Style::default().fg(Color::Red))
         };
         Row::new(vec![
+            Cell::from(status::dir_arrow(&p.direction)),
             Cell::from(status::short(&p.pubkey)),
             Cell::from(p.ip.clone().unwrap_or_else(|| "-".to_string())),
             Cell::from(p.phase.clone()),
@@ -194,6 +195,7 @@ fn render_peers(frame: &mut ratatui::Frame, area: Rect, s: &NodeStatus) {
     });
 
     let widths = [
+        Constraint::Length(3),
         Constraint::Length(14),
         Constraint::Length(16),
         Constraint::Length(11),

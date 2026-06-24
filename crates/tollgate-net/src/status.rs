@@ -64,6 +64,19 @@ pub struct PeerStatus {
     pub metered: bool,
     /// Milliseconds since the peer was last heard from.
     pub idle_ms: u64,
+    /// `down` = a customer we sell to (outbound), `up` = a provider we buy from
+    /// (inbound). Defaults to `down` for snapshots from an older node.
+    #[serde(default = "default_direction")]
+    pub direction: String,
+}
+
+fn default_direction() -> String {
+    "down".to_string()
+}
+
+/// A compact arrow for a peer's direction: `↓` we sell to them, `↑` we buy.
+pub fn dir_arrow(direction: &str) -> &'static str {
+    if direction == "up" { "↑" } else { "↓" }
 }
 
 impl NodeStatus {
@@ -90,13 +103,14 @@ pub fn render_table(status: &NodeStatus) -> String {
     let _ = writeln!(out, "node {}  unit={}", short(&status.pubkey), status.unit);
     let _ = writeln!(
         out,
-        "{:<13} {:<15} {:<10} {:>9} {:>8} {:>10} {:>10} {:>8} {:>6}",
-        "PEER", "IP", "PHASE", "BALANCE", "ACCESS", "SENT", "RECV", "METERED", "IDLE"
+        "{:<3} {:<13} {:<15} {:<10} {:>9} {:>8} {:>10} {:>10} {:>8} {:>6}",
+        "DIR", "PEER", "IP", "PHASE", "BALANCE", "ACCESS", "SENT", "RECV", "METERED", "IDLE"
     );
     for p in &status.peers {
         let _ = writeln!(
             out,
-            "{:<13} {:<15} {:<10} {:>9} {:>8} {:>10} {:>10} {:>7}s {:>5}s",
+            "{:<3} {:<13} {:<15} {:<10} {:>9} {:>8} {:>10} {:>10} {:>7}s {:>5}s",
+            dir_arrow(&p.direction),
             short(&p.pubkey),
             p.ip.as_deref().unwrap_or("-"),
             p.phase,
@@ -218,6 +232,7 @@ mod tests {
                     allowed: true,
                     metered: true,
                     idle_ms: 1500,
+                    direction: "down".to_string(),
                 },
                 PeerStatus {
                     pubkey: format!("04{}", "ef".repeat(32)),
@@ -230,6 +245,7 @@ mod tests {
                     allowed: false,
                     metered: false,
                     idle_ms: 9000,
+                    direction: "up".to_string(), // a provider we buy from
                 },
             ],
             pricing: PricingStatus {
@@ -271,6 +287,8 @@ mod tests {
         assert!(table.contains("blocked"), "{table}");
         assert!(table.contains("SENT"), "{table}"); // sent-to-peer usage column
         assert!(table.contains("RECV"), "{table}"); // received-from-peer column
+        assert!(table.contains("↓"), "{table}"); // downstream direction
+        assert!(table.contains("↑"), "{table}"); // upstream direction
         assert!(table.contains("1.50 KB"), "{table}"); // sent, byte-scaled
         assert!(table.contains("340 B"), "{table}"); // received, byte-scaled
         assert!(table.contains("42s"), "{table}"); // metering duration
