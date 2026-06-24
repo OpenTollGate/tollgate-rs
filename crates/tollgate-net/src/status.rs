@@ -102,8 +102,8 @@ pub fn render_table(status: &NodeStatus) -> String {
             p.phase,
             p.balance,
             if p.allowed { "allowed" } else { "blocked" },
-            p.delivered,
-            p.received,
+            fmt_units(p.delivered, &status.unit),
+            fmt_units(p.received, &status.unit),
             p.metered_secs,
             p.idle_ms / 1000,
         );
@@ -167,6 +167,28 @@ pub fn render_pricing(status: &NodeStatus) -> String {
     out
 }
 
+/// Format a usage count for display, scaled to the resource unit being sold.
+/// For `bytes`, step through B/KB/MB/GB/TB (1024-based) with 2 decimals as the
+/// number climbs; any other unit is shown as the raw integer.
+pub fn fmt_units(n: u64, unit: &str) -> String {
+    if unit != "bytes" {
+        return n.to_string();
+    }
+    const STEP: f64 = 1024.0;
+    const SUFFIXES: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
+    let mut value = n as f64;
+    let mut i = 0;
+    while value >= STEP && i < SUFFIXES.len() - 1 {
+        value /= STEP;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{n} B") // whole bytes — no decimals below 1 KB
+    } else {
+        format!("{value:.2} {}", SUFFIXES[i])
+    }
+}
+
 /// Abbreviate a long hex pubkey to `123456…cdef` for display.
 pub fn short(hex: &str) -> String {
     if hex.len() > 12 {
@@ -190,8 +212,8 @@ mod tests {
                     ip: Some("10.0.0.2".to_string()),
                     phase: "Active".to_string(),
                     balance: 6000,
-                    delivered: 1200,
-                    received: 340,
+                    delivered: 1536, // 1.50 KB
+                    received: 340,   // 340 B
                     metered_secs: 42,
                     allowed: true,
                     metered: true,
@@ -249,12 +271,25 @@ mod tests {
         assert!(table.contains("blocked"), "{table}");
         assert!(table.contains("SENT"), "{table}"); // sent-to-peer usage column
         assert!(table.contains("RECV"), "{table}"); // received-from-peer column
-        assert!(table.contains("340"), "{table}"); // received units
+        assert!(table.contains("1.50 KB"), "{table}"); // sent, byte-scaled
+        assert!(table.contains("340 B"), "{table}"); // received, byte-scaled
         assert!(table.contains("42s"), "{table}"); // metering duration
         assert!(
             table.contains("2 peers (1 active, 1 suspended, 0 other)"),
             "{table}"
         );
+    }
+
+    #[test]
+    fn fmt_units_scales_bytes_and_passes_other_units_through() {
+        assert_eq!(fmt_units(0, "bytes"), "0 B");
+        assert_eq!(fmt_units(512, "bytes"), "512 B");
+        assert_eq!(fmt_units(1024, "bytes"), "1.00 KB");
+        assert_eq!(fmt_units(1536, "bytes"), "1.50 KB");
+        assert_eq!(fmt_units(1_572_864, "bytes"), "1.50 MB");
+        assert_eq!(fmt_units(3_221_225_472, "bytes"), "3.00 GB");
+        // Other units are shown raw.
+        assert_eq!(fmt_units(2500, "wh"), "2500");
     }
 
     #[test]

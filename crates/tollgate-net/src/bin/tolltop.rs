@@ -186,8 +186,8 @@ fn render_peers(frame: &mut ratatui::Frame, area: Rect, s: &NodeStatus) {
             Cell::from(p.phase.clone()),
             Cell::from(p.balance.to_string()),
             access,
-            Cell::from(p.delivered.to_string()),
-            Cell::from(p.received.to_string()),
+            Cell::from(status::fmt_units(p.delivered, &s.unit)),
+            Cell::from(status::fmt_units(p.received, &s.unit)),
             Cell::from(format!("{}s", p.metered_secs)),
             Cell::from(format!("{}s", p.idle_ms / 1000)),
         ])
