@@ -68,14 +68,20 @@ async fn http_exchange(
             Some(MessageType::Announce) => match Announce::decode(frame) {
                 Ok(announce) => {
                     let hex = hex::encode(announce.public_key().as_bytes());
-                    tracing::info!(
-                        peer = %hex,
-                        version = announce.version,
-                        unit = %announce.unit,
-                        ip = ?peer_ip,
-                        "peer announced"
-                    );
-                    driver.peer_connected(&hex, peer_ip).await;
+                    // The HTTP transport re-sends Announce on every poll, so only the
+                    // first (a genuinely new peer) is logged at INFO; the keep-alive
+                    // repeats drop to DEBUG to keep the log readable.
+                    if driver.peer_connected(&hex, peer_ip).await {
+                        tracing::info!(
+                            peer = %hex,
+                            version = announce.version,
+                            unit = %announce.unit,
+                            ip = ?peer_ip,
+                            "peer announced"
+                        );
+                    } else {
+                        tracing::debug!(peer = %hex, ip = ?peer_ip, "peer re-announced");
+                    }
                     peer_hex = Some(hex);
                 }
                 Err(e) => tracing::warn!(err = %e, "malformed Announce"),

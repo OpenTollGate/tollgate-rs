@@ -300,12 +300,16 @@ impl Driver {
 
     /// A peer connected — its identity was established by Announce. `ip` is the
     /// source address the firewall will gate (absent in tests without a socket).
-    pub async fn peer_connected(&self, peer_hex: &str, ip: Option<IpAddr>) {
+    /// Returns whether this was a *new* peer, as opposed to a keep-alive
+    /// re-announce (the HTTP transport re-sends Announce every poll) — the caller
+    /// logs the first at INFO and stays quiet after, so polls don't spam the log.
+    pub async fn peer_connected(&self, peer_hex: &str, ip: Option<IpAddr>) -> bool {
         if let Some(ip) = ip {
             self.0.peer_ip.lock().await.insert(peer_hex.to_string(), ip);
         }
         self.touch(peer_hex).await;
         let peer = parse_peer(peer_hex);
+        let is_new = self.0.session.lock().await.peer_phase(&peer).is_none();
         let actions = self.handle(Event::PeerConnected { peer }).await;
         self.dispatch(actions, peer_hex).await;
         // Announce ourselves back so the peer learns our identity (mutual
@@ -317,6 +321,7 @@ impl Driver {
         if !self.0.price_sheet.is_empty() {
             self.enqueue(peer_hex, self.0.price_sheet.clone()).await;
         }
+        is_new
     }
 
     /// A peer disconnected — driven by the reaper on idle timeout (and, once the
