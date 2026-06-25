@@ -167,16 +167,19 @@ fn render_peers(frame: &mut ratatui::Frame, area: Rect, s: &NodeStatus) {
         other
     );
 
-    // One row per peer — a peering is bidirectional. DELIVERED = what we delivered
-    // to them (we charge); RECEIVED = what they delivered to us (they charge); NET
-    // = our net balance (sats, + earner / - spender); DRIFT = metering disagreement
-    // vs their report (billed on the higher value).
+    // One row per peer — a peering is bidirectional. DELIVERED/RECEIVED = units we
+    // delivered to them / they delivered to us. WE_HOLD = their prepayment we hold
+    // (our own ledger — reliable); THEY_HOLD = our prepayment they hold (our
+    // estimate from their reports — trust it only as far as DRIFT allows). NET =
+    // the signed position (+ earner / - spender). DRIFT = metering disagreement.
     let head = Row::new([
         "PEER",
         "IP",
         "STATE",
         "DELIVERED",
         "RECEIVED",
+        "WE_HOLD",
+        "THEY_HOLD",
         "NET",
         "DRIFT",
         "METERED",
@@ -194,6 +197,8 @@ fn render_peers(frame: &mut ratatui::Frame, area: Rect, s: &NodeStatus) {
                 Cell::from(p.state.clone()),
                 Cell::from(status::fmt_units(p.delivered, &s.unit)),
                 Cell::from(status::fmt_units(p.received, &s.unit)),
+                Cell::from(status::fmt_held(p.their_balance)),
+                Cell::from(status::fmt_held(p.our_balance)),
                 net_cell,
                 Cell::from(status::fmt_drift(p.drift)),
                 Cell::from(format!("{}s", p.metered_secs)),
@@ -207,6 +212,8 @@ fn render_peers(frame: &mut ratatui::Frame, area: Rect, s: &NodeStatus) {
         Constraint::Length(11),
         Constraint::Length(11),
         Constraint::Length(8),
+        Constraint::Length(9),
+        Constraint::Length(6),
         Constraint::Length(6),
         Constraint::Length(8),
     ];

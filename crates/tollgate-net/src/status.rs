@@ -119,6 +119,17 @@ pub fn fmt_net(net_scaled: i64) -> String {
     format!("{:+}", net_scaled / 1000)
 }
 
+/// Format a custody balance (scaled milli-units) in sats — what one side holds in
+/// prepayment for the other. `-` when nothing is held, so an absent relationship
+/// shows no (potentially misleading) figure rather than a bare `0`.
+pub fn fmt_held(scaled: i64) -> String {
+    if scaled == 0 {
+        "-".to_string()
+    } else {
+        format!("{}", scaled / 1000)
+    }
+}
+
 /// Format a drift fraction as a percentage, or `-` when not yet comparable.
 pub fn fmt_drift(drift: Option<f64>) -> String {
     match drift {
@@ -128,27 +139,39 @@ pub fn fmt_drift(drift: Option<f64>) -> String {
 }
 
 /// Render the one-shot plain-text table for `tolltop --once`. One row per peer —
-/// a peering is bidirectional: DELIVERED is what we delivered to them (we charge),
-/// RECEIVED is what they delivered to us (they charge), NET is our net balance
-/// (sats; + earner / - spender), DRIFT is metering disagreement vs their report.
+/// a peering is bidirectional: DELIVERED/RECEIVED are units we delivered to / they
+/// delivered to us; WE_HOLD is their prepayment we hold (our own ledger), THEY_HOLD
+/// is our prepayment they hold (our estimate from their reports); NET is the signed
+/// position (+ earner / - spender); DRIFT is metering disagreement vs their report.
 pub fn render_table(status: &NodeStatus) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let _ = writeln!(out, "node {}  unit={}", short(&status.pubkey), status.unit);
     let _ = writeln!(
         out,
-        "{:<13} {:<19} {:<10} {:>11} {:>11} {:>8} {:>6} {:>7}",
-        "PEER", "IP", "STATE", "DELIVERED", "RECEIVED", "NET", "DRIFT", "METERED"
+        "{:<13} {:<19} {:<10} {:>11} {:>11} {:>8} {:>9} {:>6} {:>6} {:>7}",
+        "PEER",
+        "IP",
+        "STATE",
+        "DELIVERED",
+        "RECEIVED",
+        "WE_HOLD",
+        "THEY_HOLD",
+        "NET",
+        "DRIFT",
+        "METERED"
     );
     for p in &status.peers {
         let _ = writeln!(
             out,
-            "{:<13} {:<19} {:<10} {:>11} {:>11} {:>8} {:>6} {:>6}s",
+            "{:<13} {:<19} {:<10} {:>11} {:>11} {:>8} {:>9} {:>6} {:>6} {:>5}s",
             short(&p.pubkey),
             p.ip.as_deref().unwrap_or("-"),
             p.state,
             fmt_units(p.delivered, &status.unit),
             fmt_units(p.received, &status.unit),
+            fmt_held(p.their_balance),
+            fmt_held(p.our_balance),
             fmt_net(p.net_balance()),
             fmt_drift(p.drift),
             p.metered_secs,
@@ -334,6 +357,8 @@ mod tests {
         assert!(table.contains("Suspended"), "{table}");
         assert!(table.contains("1.50 KB"), "{table}"); // delivered, byte-scaled
         assert!(table.contains("340 B"), "{table}"); // received, byte-scaled
+        assert!(table.contains("WE_HOLD"), "{table}"); // their prepayment we hold
+        assert!(table.contains("THEY_HOLD"), "{table}"); // our prepayment they hold
         assert!(table.contains("+6"), "{table}"); // net balance (earner)
         assert!(table.contains("-5"), "{table}"); // net balance (spender)
         assert!(table.contains("2.0%"), "{table}"); // drift
