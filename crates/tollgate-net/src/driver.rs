@@ -173,6 +173,8 @@ impl Driver {
                         interval: Duration::from_secs(cfg.interval_secs.max(1)),
                         max_polls: None,
                         understate_received_pct: 0,
+                        meter_iface: cfg.meter_iface.clone(),
+                        meter_upstream: cfg.meter_upstream,
                     };
                     let d = driver.clone();
                     let url = cfg.peer.clone();

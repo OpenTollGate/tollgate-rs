@@ -84,6 +84,16 @@ enum Command {
         /// drift integration suite.
         #[arg(long, default_value_t = 0, hide = true)]
         understate_received_pct: u8,
+        /// Uplink interface (e.g. eth0) to meter for an independent receive-side
+        /// count, instead of echoing the provider's delivered. Surfaces real
+        /// transit drift. Only correct when this upstream owns the interface.
+        #[arg(long)]
+        meter_iface: Option<String>,
+        /// Meter this upstream by its next-hop MAC (per-peer nftables counter) for
+        /// an independent receive-side count that works even when upstreams share
+        /// an interface. Requires NET_ADMIN.
+        #[arg(long)]
+        meter_upstream: bool,
     },
 }
 
@@ -112,6 +122,8 @@ async fn main() -> anyhow::Result<()> {
             interval,
             polls,
             understate_received_pct,
+            meter_iface,
+            meter_upstream,
         } => {
             let opts = client::ConsumeOpts {
                 amount_sat: amount,
@@ -119,6 +131,8 @@ async fn main() -> anyhow::Result<()> {
                 interval: std::time::Duration::from_secs(interval),
                 max_polls: (polls > 0).then_some(polls),
                 understate_received_pct,
+                meter_iface,
+                meter_upstream,
             };
             consume(&cfg, &identity, &peer, &mint, opts).await
         }

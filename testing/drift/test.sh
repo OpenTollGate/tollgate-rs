@@ -39,7 +39,13 @@ strip_ansi() { sed $'s/\x1b\\[[0-9;]*m//g'; }
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 GATEWAY_LOG="$($COMPOSE logs --no-color gateway 2>/dev/null | strip_ansi)"
+CLIENT_LOG="$($COMPOSE logs --no-color client 2>/dev/null | strip_ansi)"
 echo "----- gateway log -----"; echo "$GATEWAY_LOG"; echo "-----------------------"
+
+# 0. The client metered its received bytes independently, by the upstream's
+#    next-hop MAC — so the drift below is real measurement, not a blind echo.
+echo "$CLIENT_LOG" | grep -qE 'metering upstream by next-hop MAC' \
+    || fail "client did not install the per-peer MAC receive counter"
 
 # 1. The gateway raised the drift warning at least 3 times (the cut-off threshold).
 WARNINGS="$(echo "$GATEWAY_LOG" | grep -c 'metering drift over tolerance' || true)"

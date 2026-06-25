@@ -166,12 +166,12 @@ Access control is enforced via **firewall rules** (nftables, iptables, pf):
 
 ### Per-Peer Metering Counters
 
-`tollgate-core` requires a `MeterStream` per peer with two cumulative counters: `delivered` (bytes we forwarded toward the peer) and `received` (bytes the peer forwarded toward us). On IP, `tollgate-net` builds these by attaching kernel counters to each connected peer.
+`tollgate-core` requires a `MeterStream` per peer with two cumulative counters: `delivered` (bytes we forwarded toward the peer) and `received` (bytes the peer forwarded toward us). On IP, `tollgate-net` builds these by attaching kernel counters to each connected peer. **How a counter matches the peer's traffic depends on which side of the relationship the peer is on** — and getting this right is what lets several peers share one interface.
 
-**nftables accounting (default).** When a peer connects, `tollgate-net` adds two `counter` rules on the `FORWARD` chain — one matching the peer's IP as destination (delivered) and one matching the peer's IP as source (received). The rules carry the peer's pubkey as a comment for traceability. Every metering interval the implementation reads the byte counts, computes the delta against the previous snapshot, and pushes the new cumulative total into the `MeterStream`'s `watch::Sender`. On peer disconnect the rules are removed.
+**Metering a customer — per-IP (default).** When the peer is the source/sink of the forwarded flow — a downstream peer whose traffic *we* forward — its IP is the source or destination of every forwarded packet. `tollgate-net` adds two `counter` rules on the `FORWARD` chain, one matching the peer's IP as destination (delivered) and one as source (received), tagged with the peer's pubkey:
 
 ```
-# Conceptual nftables rules attached when peer 02abc... (10.0.0.42) becomes Active:
+# Conceptual rules for customer 02abc... (10.0.0.42):
 table inet tollgate {
   chain forward {
     ip daddr 10.0.0.42 counter comment "tollgate:02abc..."   # delivered to peer
@@ -180,9 +180,22 @@ table inet tollgate {
 }
 ```
 
-**Interface-level counters.** If the deployment puts each peer on a dedicated interface (VLAN, GRE tunnel, separate WireGuard peer), the kernel's interface rx/tx byte counters can serve as the source instead — slightly cheaper than nftables but requires interface-per-peer provisioning.
+**Metering an upstream — per next-hop MAC.** When the peer is one we *buy* from — it forwards our traffic onward — the forwarded packets carry the far endpoints' IPs, **not** the upstream's, so per-IP rules cannot attribute them. The only field that identifies "this arrived from that upstream" is the **next-hop link address**. `tollgate-net` resolves the upstream's IP to its MAC (the neighbor table) and counts received bytes by it. This is what keeps the multi-homed case correct — several upstreams reachable over one shared L2 segment are still metered independently, because each has a distinct MAC:
 
-The two sources are interchangeable from `tollgate-core`'s perspective; the choice is operational.
+```
+# Conceptual rule for upstream 03def... at next-hop 52:54:00:aa:bb:cc:
+table inet tollgate {
+  chain ingress { type filter hook prerouting priority -300;
+    ether saddr 52:54:00:aa:bb:cc counter comment "tollgate:03def..."   # received from upstream
+  }
+}
+```
+
+The egress (`delivered`-to-upstream) direction can't be matched this way — the next-hop MAC isn't resolved until after the output path — but the upstream meters that same flow as *its* `received`, so the two sides still reconcile (and bill on the higher value; see [tollgate-metering.md](../core/tollgate-metering.md)). This receive-side count is what surfaces real transit drift between two honest nodes, rather than the consumer blindly echoing the provider's figure.
+
+**Interface counters — dedicated link.** If the deployment puts each peer on its own interface (VLAN, GRE tunnel, separate WireGuard peer), the kernel's interface rx/tx byte counters serve as the source directly, with no per-peer rules — simplest when a peer owns its link, but it cannot disambiguate peers that share an interface.
+
+All three sources are interchangeable from `tollgate-core`'s perspective; the choice is operational and per-peer.
 
 ### Peer Metrics
 

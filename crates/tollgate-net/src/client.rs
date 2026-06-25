@@ -67,6 +67,25 @@ fn our_announce(identity: &Identity, unit: &str) -> Vec<u8> {
     Announce::new(PROTOCOL_VERSION, pubkey, unit, 0).encode()
 }
 
+/// Resolve the host of a `base_url` like `http://gateway:4747` to an IP, for
+/// per-peer MAC metering of the upstream. Returns the first resolved address.
+/// IPv4-oriented (the MAC counter reads `/proc/net/arp`); `None` on failure.
+fn resolve_host_ip(base_url: &str) -> Option<std::net::IpAddr> {
+    use std::net::ToSocketAddrs;
+    let authority = base_url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split('/')
+        .next()?;
+    // ToSocketAddrs needs a port; default to the TollGate port if none is given.
+    let with_port = if authority.contains(':') {
+        authority.to_string()
+    } else {
+        format!("{authority}:4747")
+    };
+    with_port.to_socket_addrs().ok()?.next().map(|sa| sa.ip())
+}
+
 /// Find and decode the first peer Announce in a set of message bodies.
 fn find_announce(messages: &[Vec<u8>]) -> Option<Announce> {
     messages
@@ -182,6 +201,17 @@ pub struct ConsumeOpts {
     /// by this percentage, so the provider sees metering drift. 0 = report
     /// honestly. Used by the drift integration suite to exercise the cut-off path.
     pub understate_received_pct: u8,
+    /// Uplink interface to meter for an *independent* receive-side count (e.g.
+    /// `eth0`). When set, we report what we actually received over the link rather
+    /// than echoing the provider's `delivered` — this is what surfaces real transit
+    /// drift. `None` falls back to acknowledging the provider's count. Only correct
+    /// when this upstream owns the interface; for shared links use `meter_upstream`.
+    pub meter_iface: Option<String>,
+    /// Meter this upstream by its next-hop MAC (a per-peer nftables counter),
+    /// giving an independent receive-side count that stays correct even when
+    /// several upstreams share one interface. Takes priority over `meter_iface`.
+    /// See `docs/design/network-peering/peering-ip.md`.
+    pub meter_upstream: bool,
 }
 
 /// The peer's latest MeteringReport, summarised. `delivered`/`received` are from
@@ -250,16 +280,36 @@ pub async fn run_consume(
     // consumer's half of the bidirectional metering exchange. We report it back so
     // the provider can reconcile it against its own `delivered` and detect drift.
     let mut acked_received: u64 = 0;
+    // Independent receive-side measurement source, in priority order: a per-peer
+    // next-hop MAC counter (correct even when upstreams share an interface), else a
+    // dedicated uplink interface, else none (echo the provider's count). See
+    // docs/design/network-peering/peering-ip.md.
+    let upstream_ip = opts
+        .meter_upstream
+        .then(|| resolve_host_ip(base_url))
+        .flatten();
+    let raw_received = |upstream_ip: Option<std::net::IpAddr>| -> u64 {
+        if let Some(ip) = upstream_ip {
+            crate::adapter::read_upstream_received(ip)
+        } else if let Some(iface) = opts.meter_iface.as_deref() {
+            crate::adapter::read_iface_counters(iface).received
+        } else {
+            0
+        }
+    };
+    // Counters are cumulative since boot/install; subtract this baseline to get
+    // bytes since session start (re-captured on re-admit below).
+    let mut meter_baseline: u64 = raw_received(upstream_ip);
     while opts.max_polls.is_none_or(|max| poll < max) {
         poll += 1;
         tokio::time::sleep(opts.interval).await;
 
         // Poll: re-announce to receive any queued frames (MeteringReport, Reject),
-        // and send back our own MeteringReport acknowledging what we've received so
-        // far. v1 acknowledges the provider's delivered count (we have no
-        // independent receive-side meter yet — that, which would surface real
-        // transit loss, is future work); reporting it still closes the protocol
-        // loop so the provider's drift/settlement path is exercised end to end.
+        // and send back our own MeteringReport with what we've received so far — the
+        // consumer's half of the bidirectional exchange. With an uplink meter that's
+        // an independent measurement (surfacing real transit drift); otherwise we
+        // acknowledge the provider's own count. Either way it closes the loop so the
+        // provider's drift/settlement path runs end to end.
         let mut body = Vec::new();
         encode_frame(&our_announce(identity, unit), &mut body)
             .map_err(|e| anyhow::anyhow!("framing our Announce: {e:?}"))?;
@@ -271,18 +321,28 @@ pub async fn run_consume(
         let messages = exchange(base_url, body).await?;
         let cut_off = balance_exhausted(&messages);
         if cut_off {
-            // Re-admit resets the provider's metering baseline, so drop our
-            // acknowledged total too — otherwise we'd report a stale (large) count
-            // against the provider's fresh (small) one and trip a false drift alarm.
+            // Re-admit resets the provider's metering baseline, so restart ours too
+            // — otherwise we'd report a stale (large) count against the provider's
+            // fresh (small) one and trip a false drift alarm.
             acked_received = 0;
+            meter_baseline = raw_received(upstream_ip);
         }
 
         let report = find_metering_report(&messages);
-        if let Some(r) = report.as_ref() {
-            // Acknowledge the provider's cumulative delivered as our received for
-            // the next poll (self-healing: the latest total always wins). Fault
-            // injection deflates it to simulate a peer that lies or under-counts.
-            let keep = 100u64.saturating_sub(opts.understate_received_pct.min(100) as u64);
+        // Update what we'll acknowledge next poll. Fault injection deflates it to
+        // simulate a peer that lies or under-counts.
+        let keep = 100u64.saturating_sub(opts.understate_received_pct.min(100) as u64);
+        if upstream_ip.is_some() || opts.meter_iface.is_some() {
+            // Independent receive-side measurement (per-peer MAC counter or uplink
+            // interface) since the session baseline.
+            if let Some(ip) = upstream_ip {
+                crate::adapter::ensure_upstream_counter(ip);
+            }
+            let measured = raw_received(upstream_ip).saturating_sub(meter_baseline);
+            acked_received = measured.saturating_mul(keep) / 100;
+        } else if let Some(r) = report.as_ref() {
+            // Fallback: acknowledge the provider's cumulative delivered (self-healing
+            // — the latest total wins).
             acked_received = r.delivered.saturating_mul(keep) / 100;
         }
         let cost = report

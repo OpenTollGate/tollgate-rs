@@ -1,8 +1,9 @@
 # Drift suite: a lying / malfunctioning peer is cut off after persistent metering
 # drift. Same transit topology as the traffic demo (real bytes forwarded through
-# the gateway), but the client UNDER-REPORTS what it received by 50%
-# (--understate-received-pct 50). The gateway meters what it actually delivered,
-# sees the consumer's acknowledgement fall far short, and after 3 consecutive
+# the gateway). The client meters what it actually received INDEPENDENTLY — by the
+# gateway's next-hop MAC (--meter-upstream), correct even when peers share an
+# interface — then UNDER-REPORTS it by 50% (--understate-received-pct 50). The
+# gateway compares its own delivered against that, and after 3 consecutive
 # over-tolerance intervals warns then suspends the peer.
 #
 #   edge net (172.30.0.0/24)         uplink net (172.31.0.0/24)
@@ -93,7 +94,8 @@ services:
         ip route add 172.31.0.0/24 via 172.30.0.10;
         tollgate --config /etc/tollgate/tollgate.yaml consume
         --peer http://gateway:4747 --mint http://mint:3338
-        --amount 20000 --topup 10000 --interval 1 --understate-received-pct 50 &
+        --amount 20000 --topup 10000 --interval 1
+        --meter-upstream --understate-received-pct 50 &
         sleep 4;
         timeout 12 ping -i 0.05 -s 1400 172.31.0.20 >/dev/null 2>&1 || true;
         sleep 2;

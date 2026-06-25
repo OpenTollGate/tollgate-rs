@@ -107,6 +107,17 @@ pub struct UpstreamConfig {
     pub topup: u64,
     /// Seconds between polls for MeteringReports.
     pub interval_secs: u64,
+    /// Uplink interface facing this upstream (e.g. `eth0`) to meter for an
+    /// independent receive-side count. When set, we report the bytes we actually
+    /// received over the link instead of echoing the provider's `delivered`,
+    /// surfacing real transit drift. Absent = acknowledge the provider's count.
+    /// Only correct when this upstream owns the interface; for shared links set
+    /// `meter_upstream`.
+    pub meter_iface: Option<String>,
+    /// Meter this upstream by its next-hop MAC (a per-peer nftables counter) for an
+    /// independent receive-side count that stays correct when several upstreams
+    /// share an interface. Requires NET_ADMIN. Takes priority over `meter_iface`.
+    pub meter_upstream: bool,
 }
 
 impl Default for UpstreamConfig {
@@ -117,6 +128,8 @@ impl Default for UpstreamConfig {
             amount: 8,
             topup: 8,
             interval_secs: 5,
+            meter_iface: None,
+            meter_upstream: false,
         }
     }
 }
