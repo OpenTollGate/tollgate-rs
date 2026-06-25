@@ -23,7 +23,9 @@ use tollgate_protocol::{
     Announce, MessageType, PROTOCOL_VERSION, PriceSheet, PublicKey, peek_type,
 };
 
-use tollgate_net::status::{MintStatus, NodeStatus, PeerStatus, PricingStatus, ProductStatus};
+use tollgate_net::status::{
+    MintStatus, NodeStatus, PeerStatus, Pricing, PricingStatus, ProductStatus,
+};
 
 use crate::adapter::IpAdapter;
 use crate::client;
@@ -76,6 +78,8 @@ struct Inner {
     identity: Arc<Identity>,
     /// Resource unit this node meters ("bytes", "wh", …), sent in our Announce.
     unit: String,
+    /// What we charge peers for our delivery (v1: one price for all).
+    our_price: Price,
     /// Our pre-encoded PriceSheet, advertised after Announce on each exchange so
     /// peers can discover the price and accepted mints. Empty if we sell nothing.
     price_sheet: Vec<u8>,
@@ -106,6 +110,7 @@ impl Driver {
             adapter,
             identity,
             unit: unit.into(),
+            our_price: price,
             price_sheet,
             upstreams: StdMutex::new(BTreeMap::new()),
         }))
@@ -352,59 +357,81 @@ impl Driver {
         let snaps = self.0.session.lock().await.snapshot();
         let peer_ip = self.0.peer_ip.lock().await.clone();
         let last_seen = self.0.last_seen.lock().await.clone();
-        let metered = self.0.metered.lock().await.clone();
         let now = now_millis().0;
+        let our_price = Pricing {
+            price_per_second: self.0.our_price.per_second,
+            price_per_unit: self.0.our_price.per_unit,
+        };
 
-        // Downstream peers: customers we sell to (core session).
-        let mut peers: Vec<PeerStatus> = snaps
-            .iter()
-            .map(|s| {
-                let hex = peer_to_hex(s.peer);
+        // A peering is bidirectional, so each peer is ONE entry keyed by pubkey.
+        // The core session fills the outbound side (we deliver to them, they prepay
+        // us); the upstream loops fill the inbound side (they deliver to us, we
+        // prepay them). A peer that's both is merged.
+        let mut by_pubkey: BTreeMap<String, PeerStatus> = BTreeMap::new();
+
+        for s in &snaps {
+            let hex = peer_to_hex(s.peer);
+            by_pubkey.insert(
+                hex.clone(),
                 PeerStatus {
                     ip: peer_ip.get(&hex).map(|ip| ip.to_string()),
-                    idle_ms: last_seen.get(&hex).map_or(0, |t| now.saturating_sub(t.0)),
+                    state: format!("{:?}", s.phase),
+                    delivered: s.delivered,
+                    received: s.received,
+                    our_price: our_price.clone(),
+                    their_price: Pricing::default(),
+                    their_balance: s.balance,
+                    our_balance: 0,
                     metered_secs: s
                         .metering_start
                         .map_or(0, |start| now.saturating_sub(start.0) / 1000),
-                    metered: metered.contains(&hex),
-                    allowed: matches!(s.phase, PeerPhase::Active),
-                    phase: format!("{:?}", s.phase),
-                    balance: s.balance,
-                    delivered: s.delivered,
-                    received: s.received,
-                    direction: "down".to_string(),
+                    idle_ms: last_seen.get(&hex).map_or(0, |t| now.saturating_sub(t.0)),
+                    drift: None,
                     pubkey: hex,
-                }
-            })
-            .collect();
+                },
+            );
+        }
 
-        // Upstream peers: providers we buy from (the inbound/mesh direction).
         let upstreams = self
             .0
             .upstreams
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        for s in upstreams.values() {
-            peers.push(PeerStatus {
-                pubkey: s.pubkey.clone(),
-                ip: Some(s.url.clone()),
-                phase: if s.online { "Active" } else { "Cut-off" }.to_string(),
-                balance: s.remaining_scaled,
-                delivered: s.sent, // SENT to them
-                received: s.recv,  // RECV from them
-                metered_secs: s.metered_secs,
-                allowed: s.online,
-                metered: s.online,
-                idle_ms: now.saturating_sub(s.last_seen.0),
-                direction: "up".to_string(),
-            });
+        for u in upstreams.values() {
+            let up_idle = now.saturating_sub(u.last_seen.0);
+            let entry = by_pubkey
+                .entry(u.pubkey.clone())
+                .or_insert_with(|| PeerStatus {
+                    pubkey: u.pubkey.clone(),
+                    ip: Some(u.url.clone()),
+                    state: if u.online { "Active" } else { "Cut-off" }.to_string(),
+                    delivered: 0,
+                    received: 0,
+                    our_price: our_price.clone(),
+                    their_price: Pricing::default(),
+                    their_balance: 0,
+                    our_balance: 0,
+                    metered_secs: 0,
+                    idle_ms: up_idle,
+                    drift: None,
+                });
+            // Fill the inbound (we-buy) side; usage is the same flow both sides see.
+            entry.delivered = entry.delivered.max(u.sent);
+            entry.received = entry.received.max(u.recv);
+            entry.their_price = Pricing {
+                price_per_second: u.price.per_second,
+                price_per_unit: u.price.per_unit,
+            };
+            entry.our_balance = u.remaining_scaled;
+            entry.metered_secs = entry.metered_secs.max(u.metered_secs);
+            entry.idle_ms = entry.idle_ms.min(up_idle);
         }
 
         NodeStatus {
             pubkey: self.0.identity.pubkey_hex(),
             unit: self.0.unit.clone(),
-            peers,
+            peers: by_pubkey.into_values().collect(),
             pricing: decode_pricing(&self.0.price_sheet),
         }
     }
@@ -733,10 +760,11 @@ mod tests {
         assert_eq!(st.peers.len(), 1);
         let p = &st.peers[0];
         assert_eq!(p.pubkey, hex);
-        assert_eq!(p.phase, "Active");
-        assert_eq!(p.balance, 4242);
+        assert_eq!(p.state, "Active");
+        assert_eq!(p.their_balance, 4242); // they prepaid us (outbound)
+        assert_eq!(p.our_balance, 0);
         assert_eq!(p.ip.as_deref(), Some("10.0.0.9"));
-        assert!(p.allowed);
+        assert_eq!(p.net_balance(), 4242); // net earner
     }
 
     #[tokio::test]

@@ -27,11 +27,13 @@ socket — exec into either and just run tolltop:
       tolltop          # live TUI (press q to quit)
       tolltop --once   # one-shot table
   $CF exec -it client bash
-      tolltop          # the child's view: the gateway as a ↑ provider it pays
+      tolltop          # the child's view: the gateway as a peer it pays
 
-The client already buys from the gateway (an upstream in its config), so the mesh
-is mutual out of the box: the gateway shows the client as a ↓ customer, the client
-shows the gateway as a ↑ provider. You can also pay the gateway by hand:
+The client already buys from the gateway (an upstream in its config), so the
+peering is mutual out of the box: each node shows the other as ONE bidirectional
+peer — DELIVERED (what we delivered, we charge) / RECEIVED (what they delivered,
+they charge) and a NET balance (+ net earner / - net spender). You can also pay
+the gateway by hand:
 
   $CF exec -it client bash
       tollgate pay --peer http://gateway:4747 --mint http://mint:3338 --amount 20

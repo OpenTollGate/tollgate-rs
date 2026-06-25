@@ -44,49 +44,66 @@ pub struct MintStatus {
     pub price_per_unit: i64,
 }
 
-/// One peer's state as the node sees it.
+/// A peer's price for delivering resources, signed (`≤0` = free / it pays).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Pricing {
+    pub price_per_second: i64,
+    pub price_per_unit: i64,
+}
+
+/// One peer relationship, as the node sees it. A TollGate peering is inherently
+/// **bidirectional** — both nodes meter what they `delivered` and charge for it
+/// at their own (signed) price — so a single peer carries both directions. All
+/// fields are from *our* perspective.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerStatus {
     pub pubkey: String,
     pub ip: Option<String>,
-    /// Lifecycle phase: `New`, `BootstrapPending`, `Active`, `Suspended`, `Closed`.
-    pub phase: String,
-    /// Scaled milli-unit balance.
-    pub balance: u64,
-    /// Usage this metering session (since the baseline), matching MeteringReports.
+    /// Access state: `Active`, `Suspended`, `New`, `Cut-off`, …
+    pub state: String,
+    /// Units we delivered to them this session (we charge for this).
     pub delivered: u64,
+    /// Units we received from them this session (they charge for this).
     pub received: u64,
-    /// Seconds the current metering session has run (0 if not yet metered).
+    /// What we charge them for our delivery.
+    #[serde(default)]
+    pub our_price: Pricing,
+    /// What they charge us for their delivery.
+    #[serde(default)]
+    pub their_price: Pricing,
+    /// Their prepaid balance with us (scaled), draining as we deliver. 0 when we
+    /// don't sell to them.
+    pub their_balance: u64,
+    /// Our prepaid balance with them (scaled), draining as they deliver. 0 when
+    /// we don't buy from them.
+    pub our_balance: u64,
+    /// Seconds the metering session has run.
     pub metered_secs: u64,
-    /// Whether the firewall currently allows delivery (true for `Active`).
-    pub allowed: bool,
-    /// Whether the metering loop is sampling this peer.
-    pub metered: bool,
     /// Milliseconds since the peer was last heard from.
     pub idle_ms: u64,
-    /// `down` = a customer we sell to (outbound), `up` = a provider we buy from
-    /// (inbound). Defaults to `down` for snapshots from an older node.
-    #[serde(default = "default_direction")]
-    pub direction: String,
+    /// Metering drift vs the peer's own count, as a fraction (0.02 = 2% transit
+    /// loss). `None` until we have both our measurement and the peer's report to
+    /// compare — billing uses the higher value, but we surface the discrepancy.
+    #[serde(default)]
+    pub drift: Option<f64>,
 }
 
-fn default_direction() -> String {
-    "down".to_string()
-}
-
-/// A compact arrow for a peer's direction: `↓` we sell to them, `↑` we buy.
-pub fn dir_arrow(direction: &str) -> &'static str {
-    if direction == "up" { "↑" } else { "↓" }
+impl PeerStatus {
+    /// Net balance position with this peer (scaled): `+` we're a net earner
+    /// (they've prepaid us more than we've prepaid them), `-` a net spender.
+    pub fn net_balance(&self) -> i64 {
+        self.their_balance as i64 - self.our_balance as i64
+    }
 }
 
 impl NodeStatus {
-    /// `(active, suspended, other)` peer counts.
-    pub fn phase_counts(&self) -> (usize, usize, usize) {
+    /// `(active, suspended, other)` peer counts by access state.
+    pub fn state_counts(&self) -> (usize, usize, usize) {
         let mut active = 0;
         let mut suspended = 0;
         let mut other = 0;
         for p in &self.peers {
-            match p.phase.as_str() {
+            match p.state.as_str() {
                 "Active" => active += 1,
                 "Suspended" => suspended += 1,
                 _ => other += 1,
@@ -96,33 +113,47 @@ impl NodeStatus {
     }
 }
 
-/// Render the one-shot plain-text table for `tollgate status`.
+/// Format a net balance (scaled milli-units) in sats with a sign.
+pub fn fmt_net(net_scaled: i64) -> String {
+    format!("{:+}", net_scaled / 1000)
+}
+
+/// Format a drift fraction as a percentage, or `-` when not yet comparable.
+pub fn fmt_drift(drift: Option<f64>) -> String {
+    match drift {
+        Some(d) => format!("{:.1}%", d * 100.0),
+        None => "-".to_string(),
+    }
+}
+
+/// Render the one-shot plain-text table for `tolltop --once`. One row per peer —
+/// a peering is bidirectional: DELIVERED is what we delivered to them (we charge),
+/// RECEIVED is what they delivered to us (they charge), NET is our net balance
+/// (sats; + earner / - spender), DRIFT is metering disagreement vs their report.
 pub fn render_table(status: &NodeStatus) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let _ = writeln!(out, "node {}  unit={}", short(&status.pubkey), status.unit);
     let _ = writeln!(
         out,
-        "{:<3} {:<13} {:<15} {:<10} {:>9} {:>8} {:>10} {:>10} {:>8} {:>6}",
-        "DIR", "PEER", "IP", "PHASE", "BALANCE", "ACCESS", "SENT", "RECV", "METERED", "IDLE"
+        "{:<13} {:<19} {:<10} {:>11} {:>11} {:>8} {:>6} {:>7}",
+        "PEER", "IP", "STATE", "DELIVERED", "RECEIVED", "NET", "DRIFT", "METERED"
     );
     for p in &status.peers {
         let _ = writeln!(
             out,
-            "{:<3} {:<13} {:<15} {:<10} {:>9} {:>8} {:>10} {:>10} {:>7}s {:>5}s",
-            dir_arrow(&p.direction),
+            "{:<13} {:<19} {:<10} {:>11} {:>11} {:>8} {:>6} {:>6}s",
             short(&p.pubkey),
             p.ip.as_deref().unwrap_or("-"),
-            p.phase,
-            p.balance,
-            if p.allowed { "allowed" } else { "blocked" },
+            p.state,
             fmt_units(p.delivered, &status.unit),
             fmt_units(p.received, &status.unit),
+            fmt_net(p.net_balance()),
+            fmt_drift(p.drift),
             p.metered_secs,
-            p.idle_ms / 1000,
         );
     }
-    let (a, s, o) = status.phase_counts();
+    let (a, s, o) = status.state_counts();
     let _ = write!(
         out,
         "{} peers ({} active, {} suspended, {} other)",
@@ -221,31 +252,41 @@ mod tests {
             pubkey: format!("02{}", "ab".repeat(32)),
             unit: "bytes".to_string(),
             peers: vec![
+                // A customer we sell to (we deliver, they prepay us).
                 PeerStatus {
                     pubkey: format!("03{}", "cd".repeat(32)),
                     ip: Some("10.0.0.2".to_string()),
-                    phase: "Active".to_string(),
-                    balance: 6000,
-                    delivered: 1536, // 1.50 KB
-                    received: 340,   // 340 B
+                    state: "Active".to_string(),
+                    delivered: 1536, // 1.50 KB delivered to them
+                    received: 340,   // 340 B received from them
+                    our_price: Pricing {
+                        price_per_second: 0,
+                        price_per_unit: 1,
+                    },
+                    their_price: Pricing::default(),
+                    their_balance: 6000, // they prepaid us → net earner
+                    our_balance: 0,
                     metered_secs: 42,
-                    allowed: true,
-                    metered: true,
                     idle_ms: 1500,
-                    direction: "down".to_string(),
+                    drift: Some(0.02), // 2% transit loss vs their report
                 },
+                // A provider we buy from (they deliver, we prepay them).
                 PeerStatus {
                     pubkey: format!("04{}", "ef".repeat(32)),
                     ip: None,
-                    phase: "Suspended".to_string(),
-                    balance: 0,
-                    delivered: 8000,
-                    received: 120,
+                    state: "Suspended".to_string(),
+                    delivered: 120,
+                    received: 8000,
+                    our_price: Pricing::default(),
+                    their_price: Pricing {
+                        price_per_second: 0,
+                        price_per_unit: 1,
+                    },
+                    their_balance: 0,
+                    our_balance: 5000, // we prepaid them → net spender
                     metered_secs: 80,
-                    allowed: false,
-                    metered: false,
                     idle_ms: 9000,
-                    direction: "up".to_string(), // a provider we buy from
+                    drift: None,
                 },
             ],
             pricing: PricingStatus {
@@ -273,24 +314,28 @@ mod tests {
         assert!(!json.contains('\n'));
         let back: NodeStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(back.peers.len(), 2);
-        assert_eq!(back.peers[0].phase, "Active");
-        assert!(!back.peers[1].allowed);
+        assert_eq!(back.peers[0].state, "Active");
+        assert_eq!(back.peers[0].net_balance(), 6000); // net earner
+        assert_eq!(back.peers[0].drift, Some(0.02));
+        assert_eq!(back.peers[1].net_balance(), -5000); // net spender
+        assert_eq!(back.peers[1].drift, None);
     }
 
     #[test]
-    fn phase_counts_and_table_render() {
+    fn state_counts_and_table_render() {
         let status = sample();
-        assert_eq!(status.phase_counts(), (1, 1, 0));
+        assert_eq!(status.state_counts(), (1, 1, 0));
 
         let table = render_table(&status);
-        assert!(table.contains("allowed"), "{table}");
-        assert!(table.contains("blocked"), "{table}");
-        assert!(table.contains("SENT"), "{table}"); // sent-to-peer usage column
-        assert!(table.contains("RECV"), "{table}"); // received-from-peer column
-        assert!(table.contains("↓"), "{table}"); // downstream direction
-        assert!(table.contains("↑"), "{table}"); // upstream direction
-        assert!(table.contains("1.50 KB"), "{table}"); // sent, byte-scaled
+        assert!(table.contains("DELIVERED"), "{table}"); // doc terminology
+        assert!(table.contains("RECEIVED"), "{table}");
+        assert!(table.contains("Active"), "{table}");
+        assert!(table.contains("Suspended"), "{table}");
+        assert!(table.contains("1.50 KB"), "{table}"); // delivered, byte-scaled
         assert!(table.contains("340 B"), "{table}"); // received, byte-scaled
+        assert!(table.contains("+6"), "{table}"); // net balance (earner)
+        assert!(table.contains("-5"), "{table}"); // net balance (spender)
+        assert!(table.contains("2.0%"), "{table}"); // drift
         assert!(table.contains("42s"), "{table}"); // metering duration
         assert!(
             table.contains("2 peers (1 active, 1 suspended, 0 other)"),

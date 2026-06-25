@@ -158,7 +158,7 @@ fn render_peers(frame: &mut ratatui::Frame, area: Rect, s: &NodeStatus) {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::widgets::{Block, Borders, Cell, Row, Table};
 
-    let (active, suspended, other) = s.phase_counts();
+    let (active, suspended, other) = s.state_counts();
     let title = format!(
         "peers: {} ({}A {}S {}O)",
         s.peers.len(),
@@ -167,44 +167,48 @@ fn render_peers(frame: &mut ratatui::Frame, area: Rect, s: &NodeStatus) {
         other
     );
 
-    // DIR = ↓ a customer we sell to / ↑ a provider we buy from. SENT/RECV are
-    // from our perspective; METERED = how long this session has run.
+    // One row per peer — a peering is bidirectional. DELIVERED = what we delivered
+    // to them (we charge); RECEIVED = what they delivered to us (they charge); NET
+    // = our net balance (sats, + earner / - spender); DRIFT = metering disagreement
+    // vs their report (billed on the higher value).
     let head = Row::new([
-        "DIR", "PEER", "IP", "PHASE", "BALANCE", "ACCESS", "SENT", "RECV", "METERED", "IDLE",
+        "PEER",
+        "IP",
+        "STATE",
+        "DELIVERED",
+        "RECEIVED",
+        "NET",
+        "DRIFT",
+        "METERED",
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
 
-    let body = s.peers.iter().map(|p| {
-        let access = if p.allowed {
-            Cell::from("allowed").style(Style::default().fg(Color::Green))
-        } else {
-            Cell::from("blocked").style(Style::default().fg(Color::Red))
-        };
-        Row::new(vec![
-            Cell::from(status::dir_arrow(&p.direction)),
-            Cell::from(status::short(&p.pubkey)),
-            Cell::from(p.ip.clone().unwrap_or_else(|| "-".to_string())),
-            Cell::from(p.phase.clone()),
-            Cell::from(p.balance.to_string()),
-            access,
-            Cell::from(status::fmt_units(p.delivered, &s.unit)),
-            Cell::from(status::fmt_units(p.received, &s.unit)),
-            Cell::from(format!("{}s", p.metered_secs)),
-            Cell::from(format!("{}s", p.idle_ms / 1000)),
-        ])
-    });
+    let body =
+        s.peers.iter().map(|p| {
+            let net = p.net_balance();
+            let net_cell = Cell::from(status::fmt_net(net))
+                .style(Style::default().fg(if net >= 0 { Color::Green } else { Color::Red }));
+            Row::new(vec![
+                Cell::from(status::short(&p.pubkey)),
+                Cell::from(p.ip.clone().unwrap_or_else(|| "-".to_string())),
+                Cell::from(p.state.clone()),
+                Cell::from(status::fmt_units(p.delivered, &s.unit)),
+                Cell::from(status::fmt_units(p.received, &s.unit)),
+                net_cell,
+                Cell::from(status::fmt_drift(p.drift)),
+                Cell::from(format!("{}s", p.metered_secs)),
+            ])
+        });
 
     let widths = [
-        Constraint::Length(3),
         Constraint::Length(14),
-        Constraint::Length(16),
+        Constraint::Length(20),
+        Constraint::Length(10),
         Constraint::Length(11),
-        Constraint::Length(10),
+        Constraint::Length(11),
         Constraint::Length(8),
-        Constraint::Length(10),
-        Constraint::Length(10),
-        Constraint::Length(9),
-        Constraint::Length(7),
+        Constraint::Length(6),
+        Constraint::Length(8),
     ];
     let table = Table::new(body, widths)
         .header(head)
