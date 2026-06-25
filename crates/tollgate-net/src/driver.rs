@@ -50,6 +50,8 @@ struct UpstreamState {
     recv: u64,
     /// Seconds the session has run (from their report's `elapsed_ms`).
     metered_secs: u64,
+    /// Buy-side metering drift: their claimed delivery vs what we measured receiving.
+    drift: Option<f64>,
     /// Whether we're currently paid up / online with them.
     online: bool,
     /// When we last heard back from them.
@@ -210,12 +212,14 @@ impl Driver {
             sent: 0,
             recv: 0,
             metered_secs: 0,
+            drift: None,
             online: true,
             last_seen: now_millis(),
         });
         state.pubkey = ev.peer_pubkey.clone();
         state.price = ev.price;
         state.remaining_scaled = ev.remaining_scaled;
+        state.drift = ev.drift;
         state.online = !ev.cut_off;
         state.last_seen = now_millis();
         if let Some(r) = &ev.report {
@@ -435,6 +439,9 @@ impl Driver {
             entry.our_balance = u.remaining_scaled;
             entry.metered_secs = entry.metered_secs.max(u.metered_secs);
             entry.idle_ms = entry.idle_ms.min(up_idle);
+            // Surface buy-side drift when the sell side hasn't already set drift
+            // (a buy-only peer); a bidirectional peer keeps its sell-side figure.
+            entry.drift = entry.drift.or(u.drift);
         }
 
         NodeStatus {
@@ -814,6 +821,32 @@ mod tests {
         assert_eq!(pricing.products[0].mints[0].price_per_unit, 9);
         assert_eq!(pricing.min_interval_ms, 5000);
         assert_eq!(pricing.max_interval_ms, 60000);
+    }
+
+    #[tokio::test]
+    async fn status_surfaces_buy_side_drift_from_an_upstream() {
+        let driver = test_driver();
+        let peer = PeerId(PublicKey::from_bytes([15u8; 33]));
+        let hex = peer_to_hex(peer);
+        // An observation from a consume loop carrying buy-side drift — the provider's
+        // claimed delivery diverged from what we independently measured receiving.
+        let ev = client::ConsumeEvent {
+            poll: 1,
+            peer_pubkey: hex.clone(),
+            price: Price::default(),
+            paid_scaled: 10_000,
+            remaining_scaled: 7_000,
+            report: None,
+            cut_off: false,
+            topped_up: false,
+            drift: Some(0.12),
+        };
+        driver.record_upstream("http://up:4747", &ev);
+
+        let st = driver.status().await;
+        let p = st.peers.iter().find(|p| p.pubkey == hex).expect("upstream peer");
+        assert_eq!(p.drift, Some(0.12)); // buy-side drift reaches the status snapshot
+        assert_eq!(p.our_balance, 7_000); // they hold our remaining prepayment
     }
 
     #[tokio::test]

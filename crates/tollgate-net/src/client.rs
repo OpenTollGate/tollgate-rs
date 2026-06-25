@@ -238,6 +238,10 @@ pub struct ConsumeEvent {
     pub cut_off: bool,
     /// We sent a top-up this poll.
     pub topped_up: bool,
+    /// Buy-side metering drift: how far the provider's claimed `delivered` diverges
+    /// from what we independently measured receiving, as a fraction. `None` until
+    /// we have a meter and a report to compare.
+    pub drift: Option<f64>,
 }
 
 /// Pay a peer, then poll for MeteringReports and auto-top-up before the balance
@@ -273,6 +277,7 @@ pub async fn run_consume(
         report: None,
         cut_off: false,
         topped_up: false,
+        drift: None,
     });
 
     let mut poll = 0u32;
@@ -329,25 +334,41 @@ pub async fn run_consume(
         }
 
         let report = find_metering_report(&messages);
-        // Update what we'll acknowledge next poll. Fault injection deflates it to
-        // simulate a peer that lies or under-counts.
-        let keep = 100u64.saturating_sub(opts.understate_received_pct.min(100) as u64);
-        if upstream_ip.is_some() || opts.meter_iface.is_some() {
-            // Independent receive-side measurement (per-peer MAC counter or uplink
-            // interface) since the session baseline.
+        // Our own independent measurement of what we received this session (per-peer
+        // MAC counter or uplink interface), if we have a meter; `None` = no meter.
+        let measured: Option<u64> = if upstream_ip.is_some() || opts.meter_iface.is_some() {
             if let Some(ip) = upstream_ip {
                 crate::adapter::ensure_upstream_counter(ip);
             }
-            let measured = raw_received(upstream_ip).saturating_sub(meter_baseline);
-            acked_received = measured.saturating_mul(keep) / 100;
-        } else if let Some(r) = report.as_ref() {
-            // Fallback: acknowledge the provider's cumulative delivered (self-healing
-            // — the latest total wins).
-            acked_received = r.delivered.saturating_mul(keep) / 100;
+            Some(raw_received(upstream_ip).saturating_sub(meter_baseline))
+        } else {
+            None
+        };
+        // What we acknowledge to the provider next poll: our measurement when we
+        // have one, else the provider's own count (self-healing — latest wins).
+        // Fault injection deflates it to simulate a peer that lies or under-counts.
+        let keep = 100u64.saturating_sub(opts.understate_received_pct.min(100) as u64);
+        if let Some(rx) = measured.or_else(|| report.as_ref().map(|r| r.delivered)) {
+            acked_received = rx.saturating_mul(keep) / 100;
         }
-        let cost = report
-            .as_ref()
-            .map_or(0, |r| price.cost_scaled(r.elapsed_ms, r.delivered));
+        // Buy-side reconciliation: bill on the higher of the provider's claim and
+        // our own receipt — the metering spec's rule, so both sides agree and our
+        // `remaining` reflects what we actually consumed, not just the provider's
+        // word. Buy-side drift surfaces a provider whose claim diverges from what we
+        // measured — the consumer's mirror of the seller's transit-loss check.
+        let mut drift = None;
+        let cost = match report.as_ref() {
+            Some(r) => {
+                if let Some(m) = measured {
+                    if r.delivered > 0 {
+                        drift = Some(r.delivered.abs_diff(m) as f64 / r.delivered as f64);
+                    }
+                }
+                let billable = measured.map_or(r.delivered, |m| r.delivered.max(m));
+                price.cost_scaled(r.elapsed_ms, billable)
+            }
+            None => 0,
+        };
 
         // Top up if cut off, or proactively before the balance dips below a top-up
         // — the watermark policy described under "Proactive Top-Up" in
@@ -383,6 +404,7 @@ pub async fn run_consume(
             }),
             cut_off,
             topped_up,
+            drift,
         });
     }
     Ok(())
