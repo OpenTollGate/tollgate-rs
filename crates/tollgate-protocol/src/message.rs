@@ -281,6 +281,9 @@ pub struct Reject {
 }
 
 impl Reject {
+    /// Metering measurements diverged beyond the configured tolerance (transit
+    /// loss). Reason code per `docs/design/core/tollgate-protocol.md`.
+    pub const CODE_TRANSIT_LOSS: u8 = 0x07;
     /// Balance exhausted — the peer must top up (or upgrade to Spilman) to
     /// resume. See `docs/design/core/tollgate-bootstrap.md`.
     pub const CODE_BALANCE_EXHAUSTED: u8 = 0x09;
@@ -298,9 +301,21 @@ impl Reject {
         Self::new(Self::CODE_BALANCE_EXHAUSTED, None)
     }
 
+    /// A transit-loss-tolerance-exceeded warning: our metering and the peer's
+    /// disagree by more than the tolerance. Billing still proceeds (on the higher
+    /// value); this tells the peer to investigate before the relationship is cut.
+    pub fn transit_loss() -> Self {
+        Self::new(Self::CODE_TRANSIT_LOSS, None)
+    }
+
     /// Whether this rejection is the balance-exhausted signal.
     pub fn is_balance_exhausted(&self) -> bool {
         self.code == Self::CODE_BALANCE_EXHAUSTED
+    }
+
+    /// Whether this rejection is the transit-loss warning.
+    pub fn is_transit_loss(&self) -> bool {
+        self.code == Self::CODE_TRANSIT_LOSS
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -551,6 +566,16 @@ mod tests {
         assert!(!other.is_balance_exhausted());
         let back = Reject::decode(&other.encode()).expect("decode");
         assert_eq!(back.reason.as_deref(), Some("mint unreachable"));
+    }
+
+    #[test]
+    fn reject_round_trips_and_flags_transit_loss() {
+        let reject = Reject::transit_loss();
+        assert_eq!(reject.code, Reject::CODE_TRANSIT_LOSS);
+        assert!(reject.is_transit_loss());
+        assert!(!reject.is_balance_exhausted());
+        let back = Reject::decode(&reject.encode()).expect("decode");
+        assert_eq!(reject, back);
     }
 
     #[test]

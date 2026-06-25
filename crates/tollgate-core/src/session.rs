@@ -8,7 +8,7 @@ use tollgate_protocol::{BootstrapAck, BootstrapToken, MessageType, MeteringRepor
 use crate::access::AccessLevel;
 use crate::action::Action;
 use crate::event::Event;
-use crate::metering::Counters;
+use crate::metering::{Counters, reconcile};
 use crate::peer::PeerId;
 use crate::pricing::Price;
 use crate::time::Millis;
@@ -43,6 +43,33 @@ pub struct PeerSnapshot {
     /// When the current metering session began, or `None` until the first meter
     /// sample establishes the baseline. The host computes elapsed against its clock.
     pub metering_start: Option<Millis>,
+    /// Metering drift on the delivery we charge for: how far the peer's reported
+    /// `received` diverges from our own `delivered`, as a fraction (0.02 = 2%).
+    /// `None` until the peer has sent a MeteringReport we can compare against.
+    pub drift: Option<f64>,
+}
+
+/// How a node reconciles metering disagreement with a peer. Defaults follow
+/// `docs/design/core/tollgate-metering.md`: 5% tolerance, close after 3
+/// consecutive intervals over tolerance.
+#[derive(Clone, Copy, Debug)]
+pub struct MeteringPolicy {
+    /// Drift tolerance in basis points (500 = 5%). Within it, both sides bill on
+    /// the higher value and merely note the discrepancy; beyond it, the peer is
+    /// warned (Reject: transit loss).
+    pub tolerance_bps: u32,
+    /// Consecutive over-tolerance intervals before the peer is suspended for
+    /// renegotiation.
+    pub max_streak: u8,
+}
+
+impl Default for MeteringPolicy {
+    fn default() -> Self {
+        Self {
+            tolerance_bps: 500,
+            max_streak: 3,
+        }
+    }
 }
 
 /// Per-peer bookkeeping.
@@ -61,6 +88,17 @@ struct PeerSession {
     metering_baseline: Counters,
     /// When the metering baseline was established (for the report's `elapsed_ms`).
     metering_start: Millis,
+    /// The peer's last reported counters (cumulative since its baseline), from its
+    /// inbound MeteringReport. `received` is what it says it got from us — compared
+    /// against our `delivered` to detect drift and bill on the higher value.
+    peer_report: Option<Counters>,
+    /// Units already billed (cumulative since baseline). Billing charges the
+    /// reconciled higher value, so this tracks the running total to charge only
+    /// the increment each interval — robust to reports arriving between samples.
+    billed_units: u64,
+    /// Consecutive metering intervals whose drift exceeded tolerance. Reset to 0
+    /// on any in-tolerance interval; triggers suspension at `policy.max_streak`.
+    over_tolerance_streak: u8,
 }
 
 impl PeerSession {
@@ -72,7 +110,23 @@ impl PeerSession {
             last_meter_at: Millis(0),
             metering_baseline: Counters::default(),
             metering_start: Millis(0),
+            peer_report: None,
+            billed_units: 0,
+            over_tolerance_streak: 0,
         }
+    }
+
+    /// Reset per-metering-session state when a fresh baseline is established (first
+    /// sample after activation or re-admit) so usage, billing, and drift all start
+    /// from zero and aren't compared across baselines.
+    fn reset_metering(&mut self, counters: Counters, now: Millis) {
+        self.last_counters = Some(counters);
+        self.last_meter_at = now;
+        self.metering_baseline = counters;
+        self.metering_start = now;
+        self.peer_report = None;
+        self.billed_units = 0;
+        self.over_tolerance_streak = 0;
     }
 }
 
@@ -83,6 +137,8 @@ pub struct Session {
     peers: BTreeMap<PeerId, PeerSession>,
     /// The rate this node charges peers for delivery (v1: one rate for all).
     price: Price,
+    /// How metering disagreement with a peer is reconciled.
+    policy: MeteringPolicy,
 }
 
 impl Session {
@@ -94,6 +150,11 @@ impl Session {
     /// per-peer pricing arrives with PriceSheet negotiation.
     pub fn set_price(&mut self, price: Price) {
         self.price = price;
+    }
+
+    /// Set the metering reconciliation policy (drift tolerance + escalation).
+    pub fn set_metering_policy(&mut self, policy: MeteringPolicy) {
+        self.policy = policy;
     }
 
     /// Drive the state machine with one event. `now` is the host's monotonic
@@ -124,17 +185,35 @@ impl Session {
                 // Decode the message type and dispatch. The bootstrap-only path
                 // turns a BootstrapToken (0x07) into a token-verification request
                 // carrying the actual Cashu token bytes.
-                // TODO: handle Announce, PriceSheet, Accept, MeteringReport, etc.
-                if let Some(MessageType::BootstrapToken) = tollgate_protocol::peek_type(&bytes) {
-                    if let Ok(msg) = BootstrapToken::decode(&bytes) {
-                        if let Some(peer_session) = self.peers.get_mut(&peer) {
-                            peer_session.phase = PeerPhase::BootstrapPending;
-                            actions.push(Action::VerifyBootstrapToken {
-                                peer,
-                                token: msg.token_bytes(),
-                            });
+                // TODO: handle Announce, PriceSheet, Accept, etc.
+                match tollgate_protocol::peek_type(&bytes) {
+                    Some(MessageType::BootstrapToken) => {
+                        if let Ok(msg) = BootstrapToken::decode(&bytes) {
+                            if let Some(peer_session) = self.peers.get_mut(&peer) {
+                                peer_session.phase = PeerPhase::BootstrapPending;
+                                actions.push(Action::VerifyBootstrapToken {
+                                    peer,
+                                    token: msg.token_bytes(),
+                                });
+                            }
                         }
                     }
+                    // The peer's metering report: its own (cumulative) tally of what
+                    // it delivered to and received from us. We store it; the next
+                    // MeterSample reconciles it against our counters (drift + bill on
+                    // the higher value). The peer's `received` is what it got from us,
+                    // so it lines up with our `delivered`.
+                    Some(MessageType::MeteringReport) => {
+                        if let Ok(report) = MeteringReport::decode(&bytes) {
+                            if let Some(peer_session) = self.peers.get_mut(&peer) {
+                                peer_session.peer_report = Some(Counters {
+                                    delivered: report.delivered,
+                                    received: report.received,
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
 
@@ -178,46 +257,92 @@ impl Session {
 
             Event::MeterSample { peer, counters } => {
                 let price = self.price;
+                let policy = self.policy;
                 if let Some(peer_session) = self.peers.get_mut(&peer) {
                     if peer_session.phase == PeerPhase::Active {
                         match peer_session.last_counters {
                             // First reading after activation: establish the
                             // baseline, charge nothing.
                             None => {
-                                peer_session.last_counters = Some(counters);
-                                peer_session.last_meter_at = now;
-                                peer_session.metering_baseline = counters;
-                                peer_session.metering_start = now;
+                                peer_session.reset_metering(counters, now);
                             }
-                            Some(prev) => {
-                                let delivered = counters.delivered.saturating_sub(prev.delivered);
+                            Some(_prev) => {
                                 let elapsed = now.since(peer_session.last_meter_at);
-                                let cost = price.cost_scaled(elapsed, delivered);
+                                let baseline = peer_session.metering_baseline;
+                                // Our own tallies, cumulative since the baseline.
+                                let our_delivered =
+                                    counters.delivered.saturating_sub(baseline.delivered);
+                                let our_received =
+                                    counters.received.saturating_sub(baseline.received);
+
+                                // The peer's tally of what it received from us — the
+                                // same flow as our `delivered`. Bill on the higher of
+                                // the two (transit-loss resolution); charge only the
+                                // increment since we last billed so a report arriving
+                                // between samples doesn't double-charge.
+                                let peer_received = peer_session.peer_report.map(|r| r.received);
+                                let billable = match peer_received {
+                                    Some(r) => reconcile(our_delivered, r),
+                                    None => our_delivered,
+                                };
+                                let new_units = billable.saturating_sub(peer_session.billed_units);
+                                let cost = price.cost_scaled(elapsed, new_units);
+                                peer_session.billed_units = billable;
                                 peer_session.last_counters = Some(counters);
                                 peer_session.last_meter_at = now;
                                 peer_session.balance = peer_session.balance.saturating_sub(cost);
-                                // Report usage cumulative since the baseline so the
+
+                                // Drift = |our_delivered − peer_received| / our_delivered.
+                                // Compared as integers (diff·10000 vs delivered·bps) to
+                                // keep the hot path float-free; over tolerance warns the
+                                // peer, and persistence suspends for renegotiation.
+                                if let Some(r) = peer_received {
+                                    let diff = our_delivered.abs_diff(r);
+                                    let over = our_delivered > 0
+                                        && (diff as u128) * 10_000
+                                            > (our_delivered as u128)
+                                                * (policy.tolerance_bps as u128);
+                                    if over {
+                                        peer_session.over_tolerance_streak =
+                                            peer_session.over_tolerance_streak.saturating_add(1);
+                                        actions.push(Action::Send {
+                                            peer,
+                                            bytes: Reject::transit_loss().encode(),
+                                        });
+                                    } else {
+                                        peer_session.over_tolerance_streak = 0;
+                                    }
+                                }
+
+                                // Report our usage cumulative since the baseline so the
                                 // peer can track its own balance and top up before
                                 // exhaustion. Coalesced on the host (latest wins).
-                                let baseline = peer_session.metering_baseline;
                                 actions.push(Action::Send {
                                     peer,
                                     bytes: MeteringReport::new(
                                         now.since(peer_session.metering_start),
-                                        counters.delivered.saturating_sub(baseline.delivered),
-                                        counters.received.saturating_sub(baseline.received),
+                                        our_delivered,
+                                        our_received,
                                     )
                                     .encode(),
                                 });
-                                if peer_session.balance == 0 {
+
+                                // Cut the peer on exhaustion, or after persistent
+                                // over-tolerance drift (close & renegotiate). The
+                                // transit-loss warning was already sent above.
+                                let exhausted = peer_session.balance == 0;
+                                let drift_persisted =
+                                    peer_session.over_tolerance_streak >= policy.max_streak;
+                                if exhausted || drift_persisted {
                                     peer_session.phase = PeerPhase::Suspended;
-                                    // Tell the peer *why* it's being cut so it can
-                                    // top up (or upgrade to Spilman) rather than
-                                    // silently losing connectivity.
-                                    actions.push(Action::Send {
-                                        peer,
-                                        bytes: Reject::balance_exhausted().encode(),
-                                    });
+                                    if exhausted {
+                                        // Tell the peer *why* it's being cut so it can
+                                        // top up rather than silently losing access.
+                                        actions.push(Action::Send {
+                                            peer,
+                                            bytes: Reject::balance_exhausted().encode(),
+                                        });
+                                    }
                                     actions.push(Action::SetAccess {
                                         peer,
                                         level: AccessLevel::Suspended,
@@ -280,6 +405,15 @@ impl Session {
                     ),
                     None => (0, 0, None),
                 };
+                // Drift of the peer's reported `received` against our `delivered` on
+                // the flow we charge for. Pure arithmetic (no_std-safe): the integer
+                // `abs_diff` keeps it exact before the single divide.
+                let drift = match s.peer_report {
+                    Some(r) if delivered > 0 => {
+                        Some(delivered.abs_diff(r.received) as f64 / delivered as f64)
+                    }
+                    _ => None,
+                };
                 PeerSnapshot {
                     peer: *peer,
                     phase: s.phase,
@@ -287,6 +421,7 @@ impl Session {
                     delivered,
                     received,
                     metering_start,
+                    drift,
                 }
             })
             .collect()
@@ -808,5 +943,231 @@ mod tests {
         assert_eq!(snap[0].delivered, 3);
         assert_eq!(snap[0].received, 1);
         assert_eq!(snap[0].metering_start, Some(Millis(1000))); // baseline sample time
+    }
+
+    /// Whether any action is a transit-loss Reject (the drift warning).
+    fn has_transit_loss(actions: &[Action]) -> bool {
+        actions.iter().any(|a| {
+            matches!(a, Action::Send { bytes, .. }
+                if matches!(
+                    tollgate_protocol::peek_type(bytes),
+                    Some(MessageType::Reject)
+                ) && Reject::decode(bytes).map(|r| r.is_transit_loss()).unwrap_or(false))
+        })
+    }
+
+    /// Whether any action suspends the peer's access.
+    fn suspends_access(actions: &[Action]) -> bool {
+        actions.iter().any(|a| {
+            matches!(
+                a,
+                Action::SetAccess {
+                    level: AccessLevel::Suspended,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// A peer's MeteringReport claiming it received `r` units from us (cumulative).
+    fn peer_received(p: PeerId, r: u64) -> Event {
+        Event::MessageReceived {
+            peer: p,
+            bytes: MeteringReport::new(0, 0, r).encode(),
+        }
+    }
+
+    #[test]
+    fn drift_within_tolerance_bills_higher_value_and_reports_drift() {
+        let mut session = Session::new();
+        session.set_price(Price {
+            per_second: 0,
+            per_unit: 1,
+        });
+        let p = peer(20);
+        session.handle(Event::PeerConnected { peer: p }, Millis(0));
+        session.handle(
+            Event::BootstrapVerified {
+                peer: p,
+                amount: 1000,
+                ok: true,
+            },
+            Millis(0),
+        );
+        let sample = |d| Event::MeterSample {
+            peer: p,
+            counters: Counters {
+                delivered: d,
+                received: 0,
+            },
+        };
+
+        session.handle(sample(0), Millis(1000)); // baseline
+
+        // The peer claims it received MORE than we delivered (103 vs 100): 3% drift,
+        // within the 5% tolerance. We bill on the higher (peer's) value, no warning.
+        session.handle(peer_received(p, 103), Millis(1500));
+        let actions = session.handle(sample(100), Millis(2000));
+        assert!(
+            !has_transit_loss(&actions),
+            "3% is within tolerance — no warning"
+        );
+        assert!(!suspends_access(&actions));
+
+        let snap = &session.snapshot()[0];
+        assert_eq!(
+            snap.balance,
+            1000 - 103,
+            "billed the higher (peer's) value, not our 100"
+        );
+        assert_eq!(snap.delivered, 100);
+        let drift = snap.drift.expect("drift known once the peer has reported");
+        assert!((drift - 0.03).abs() < 1e-9, "drift {drift} ≈ 0.03");
+    }
+
+    #[test]
+    fn drift_over_tolerance_warns_but_one_interval_stays_active() {
+        let mut session = Session::new();
+        session.set_price(Price {
+            per_second: 0,
+            per_unit: 1,
+        });
+        let p = peer(21);
+        session.handle(Event::PeerConnected { peer: p }, Millis(0));
+        session.handle(
+            Event::BootstrapVerified {
+                peer: p,
+                amount: 1_000_000,
+                ok: true,
+            },
+            Millis(0),
+        );
+        let sample = |d| Event::MeterSample {
+            peer: p,
+            counters: Counters {
+                delivered: d,
+                received: 0,
+            },
+        };
+
+        session.handle(sample(0), Millis(1000)); // baseline
+        // Peer admits only 80 of our 100 delivered → 20% drift, over the 5% tolerance.
+        session.handle(peer_received(p, 80), Millis(1500));
+        let actions = session.handle(sample(100), Millis(2000));
+        assert!(
+            has_transit_loss(&actions),
+            "over tolerance → transit-loss warning"
+        );
+        assert!(
+            !suspends_access(&actions),
+            "one bad interval doesn't cut the peer"
+        );
+        assert_eq!(session.peer_phase(&p), Some(PeerPhase::Active));
+    }
+
+    #[test]
+    fn persistent_drift_suspends_after_three_intervals() {
+        let mut session = Session::new();
+        session.set_price(Price {
+            per_second: 0,
+            per_unit: 1,
+        });
+        let p = peer(22);
+        session.handle(Event::PeerConnected { peer: p }, Millis(0));
+        session.handle(
+            Event::BootstrapVerified {
+                peer: p,
+                amount: 1_000_000,
+                ok: true,
+            },
+            Millis(0),
+        );
+        let sample = |d| Event::MeterSample {
+            peer: p,
+            counters: Counters {
+                delivered: d,
+                received: 0,
+            },
+        };
+
+        session.handle(sample(0), Millis(1000)); // baseline
+
+        // A lying/malfunctioning peer that consistently under-reports its received
+        // count by ~20% (we deliver 100 more each interval; it only ever admits 80).
+        session.handle(peer_received(p, 80), Millis(1500));
+        let a1 = session.handle(sample(100), Millis(2000));
+        assert!(has_transit_loss(&a1) && !suspends_access(&a1), "strike 1");
+
+        session.handle(peer_received(p, 160), Millis(2500));
+        let a2 = session.handle(sample(200), Millis(3000));
+        assert!(has_transit_loss(&a2) && !suspends_access(&a2), "strike 2");
+        assert_eq!(session.peer_phase(&p), Some(PeerPhase::Active));
+
+        session.handle(peer_received(p, 240), Millis(3500));
+        let a3 = session.handle(sample(300), Millis(4000));
+        // Strike 3: the peer is cut for renegotiation — access suspended, metering
+        // stopped — even though its balance is nowhere near exhausted.
+        assert!(
+            suspends_access(&a3),
+            "3rd over-tolerance interval suspends the peer"
+        );
+        assert!(a3.iter().any(|x| matches!(x, Action::StopMetering { .. })));
+        assert_eq!(session.peer_phase(&p), Some(PeerPhase::Suspended));
+        assert!(
+            find_reject(&a3).is_none_or(|r| !r.is_balance_exhausted()),
+            "suspension is from drift, not balance exhaustion"
+        );
+
+        // Once suspended, further samples are ignored — the peer is effectively cut.
+        session.handle(peer_received(p, 320), Millis(4500));
+        assert!(session.handle(sample(400), Millis(5000)).is_empty());
+    }
+
+    #[test]
+    fn an_in_tolerance_interval_resets_the_drift_streak() {
+        let mut session = Session::new();
+        session.set_price(Price {
+            per_second: 0,
+            per_unit: 1,
+        });
+        let p = peer(23);
+        session.handle(Event::PeerConnected { peer: p }, Millis(0));
+        session.handle(
+            Event::BootstrapVerified {
+                peer: p,
+                amount: 1_000_000,
+                ok: true,
+            },
+            Millis(0),
+        );
+        let sample = |d| Event::MeterSample {
+            peer: p,
+            counters: Counters {
+                delivered: d,
+                received: 0,
+            },
+        };
+
+        session.handle(sample(0), Millis(1000)); // baseline
+
+        // Two over-tolerance intervals (strikes 1, 2)…
+        session.handle(peer_received(p, 80), Millis(1500));
+        session.handle(sample(100), Millis(2000));
+        session.handle(peer_received(p, 160), Millis(2500));
+        session.handle(sample(200), Millis(3000));
+
+        // …then a clean interval (295 of 300 → 1.7% drift) resets the streak.
+        session.handle(peer_received(p, 295), Millis(3500));
+        let clean = session.handle(sample(300), Millis(4000));
+        assert!(!has_transit_loss(&clean), "1.7% is within tolerance");
+
+        // Two more bad intervals only climb back to strike 2 — never suspended.
+        session.handle(peer_received(p, 375), Millis(4500));
+        let a4 = session.handle(sample(400), Millis(5000));
+        session.handle(peer_received(p, 470), Millis(5500));
+        let a5 = session.handle(sample(500), Millis(6000));
+        assert!(has_transit_loss(&a4) && has_transit_loss(&a5));
+        assert!(!suspends_access(&a4) && !suspends_access(&a5));
+        assert_eq!(session.peer_phase(&p), Some(PeerPhase::Active));
     }
 }

@@ -171,6 +171,7 @@ impl Driver {
                         topup_sat: cfg.topup,
                         interval: Duration::from_secs(cfg.interval_secs.max(1)),
                         max_polls: None,
+                        understate_received_pct: 0,
                     };
                     let d = driver.clone();
                     let url = cfg.peer.clone();
@@ -386,7 +387,7 @@ impl Driver {
                         .metering_start
                         .map_or(0, |start| now.saturating_sub(start.0) / 1000),
                     idle_ms: last_seen.get(&hex).map_or(0, |t| now.saturating_sub(t.0)),
-                    drift: None,
+                    drift: s.drift,
                     pubkey: hex,
                 },
             );
@@ -488,7 +489,18 @@ impl Driver {
                 }
             }
             Action::Send { peer, bytes } => {
-                self.enqueue(&peer_to_hex(peer), bytes).await;
+                let hex = peer_to_hex(peer);
+                // A transit-loss Reject is the metering-drift warning. Log it so an
+                // operator (or integration test) can watch drift escalate toward the
+                // cut, distinct from a balance-exhaustion suspension.
+                if matches!(peek_type(&bytes), Some(MessageType::Reject))
+                    && tollgate_protocol::Reject::decode(&bytes)
+                        .map(|r| r.is_transit_loss())
+                        .unwrap_or(false)
+                {
+                    tracing::warn!(peer = %hex, "metering drift over tolerance (transit-loss warning)");
+                }
+                self.enqueue(&hex, bytes).await;
             }
             Action::StartMetering { peer } => {
                 let hex = peer_to_hex(peer);
@@ -832,5 +844,105 @@ mod tests {
             Some(PeerPhase::Active)
         );
         assert!(driver.0.last_seen.lock().await.contains_key(&active_hex));
+    }
+
+    /// Whether any queued frame is a transit-loss Reject (the drift warning).
+    fn frames_have_transit_loss(frames: &[Vec<u8>]) -> bool {
+        use tollgate_protocol::{MessageType, Reject, peek_type};
+        frames.iter().any(|f| {
+            matches!(peek_type(f), Some(MessageType::Reject))
+                && Reject::decode(f)
+                    .map(|r| r.is_transit_loss())
+                    .unwrap_or(false)
+        })
+    }
+
+    /// End-to-end through the driver: a peer that consistently under-reports what
+    /// it received (a meter that lies or malfunctions) is warned each interval and
+    /// cut off after the third, then reaped once idle — fully disconnected.
+    #[tokio::test]
+    async fn lying_peer_is_warned_then_suspended_after_three_drift_intervals() {
+        use tollgate_protocol::MeteringReport;
+
+        // Charge per unit so metering runs; default policy = 5% tolerance, cut at 3.
+        let identity = Arc::new(Identity::load_or_generate(&Config::default()).unwrap());
+        let driver = Driver::new(
+            BootstrapWallet::new(vec![]),
+            IpAdapter::new(),
+            identity,
+            Price {
+                per_second: 0,
+                per_unit: 1,
+            },
+            "bytes",
+            Vec::new(),
+        );
+
+        let peer = PeerId(PublicKey::from_bytes([9u8; 33]));
+        let hex = peer_to_hex(peer);
+        driver
+            .peer_connected(&hex, Some("10.0.0.9".parse().unwrap()))
+            .await;
+        // A large balance, so any suspension is from drift — never exhaustion.
+        let _ = driver
+            .handle(Event::BootstrapVerified {
+                peer,
+                amount: 1_000_000,
+                ok: true,
+            })
+            .await;
+        driver.drain_outbox(&hex).await; // clear announce / bootstrap-ack frames
+
+        // Baseline reading: establishes the metering start, charges nothing.
+        driver.meter(&hex, Counters::default()).await;
+
+        // One interval: the peer claims it received `r`, then our meter shows we
+        // delivered `d`; return whatever we queued back to the peer.
+        async fn interval(driver: &Driver, hex: &str, r: u64, d: u64) -> Vec<Vec<u8>> {
+            driver
+                .message_received(hex, MeteringReport::new(0, 0, r).encode())
+                .await;
+            driver
+                .meter(
+                    hex,
+                    Counters {
+                        delivered: d,
+                        received: 0,
+                    },
+                )
+                .await;
+            driver.drain_outbox(hex).await
+        }
+        async fn phase(driver: &Driver, peer: PeerId) -> Option<PeerPhase> {
+            driver.0.session.lock().await.peer_phase(&peer)
+        }
+
+        // The peer under-reports by 20% every interval (well over the 5% tolerance).
+        let a1 = interval(&driver, &hex, 80, 100).await;
+        assert!(frames_have_transit_loss(&a1), "strike 1 sends a warning");
+        assert_eq!(phase(&driver, peer).await, Some(PeerPhase::Active));
+
+        let a2 = interval(&driver, &hex, 160, 200).await;
+        assert!(frames_have_transit_loss(&a2), "strike 2 sends a warning");
+        assert_eq!(phase(&driver, peer).await, Some(PeerPhase::Active));
+
+        let a3 = interval(&driver, &hex, 240, 300).await;
+        assert!(frames_have_transit_loss(&a3), "strike 3 sends a warning");
+        // …and cuts the peer off — no longer Active.
+        assert_eq!(phase(&driver, peer).await, Some(PeerPhase::Suspended));
+
+        // The drift is visible in the status snapshot the control socket serves.
+        let st = driver.status().await;
+        let p = st.peers.iter().find(|p| p.pubkey == hex).expect("peer");
+        assert_eq!(p.state, "Suspended");
+        assert!(
+            p.drift.expect("drift known") > 0.05,
+            "drift {:?} exceeds tolerance",
+            p.drift
+        );
+
+        // A suspended (non-Active) peer is reaped once idle — fully disconnected.
+        driver.reap_idle(now_millis().0 + 1_000_000, 1_000).await;
+        assert_eq!(phase(&driver, peer).await, None);
     }
 }

@@ -67,7 +67,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [detect, bootstrap, exhaust, metering]
+        suite: [detect, bootstrap, exhaust, metering, drift]
     steps:
       - uses: actions/checkout@v5
       - name: Download image artifact

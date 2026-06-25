@@ -79,6 +79,11 @@ enum Command {
         /// Stop after this many polls (0 = run until killed).
         #[arg(long, default_value_t = 0)]
         polls: u32,
+        /// Fault injection (testing): under-report acknowledged received units by
+        /// this percentage so the provider sees metering drift. Hidden; used by the
+        /// drift integration suite.
+        #[arg(long, default_value_t = 0, hide = true)]
+        understate_received_pct: u8,
     },
 }
 
@@ -106,12 +111,14 @@ async fn main() -> anyhow::Result<()> {
             topup,
             interval,
             polls,
+            understate_received_pct,
         } => {
             let opts = client::ConsumeOpts {
                 amount_sat: amount,
                 topup_sat: topup,
                 interval: std::time::Duration::from_secs(interval),
                 max_polls: (polls > 0).then_some(polls),
+                understate_received_pct,
             };
             consume(&cfg, &identity, &peer, &mint, opts).await
         }

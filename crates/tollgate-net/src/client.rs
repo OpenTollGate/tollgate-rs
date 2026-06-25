@@ -178,6 +178,10 @@ pub struct ConsumeOpts {
     pub interval: Duration,
     /// Stop after this many polls (`None` = until the process is killed).
     pub max_polls: Option<u32>,
+    /// Fault injection (testing): under-report the units we acknowledge receiving
+    /// by this percentage, so the provider sees metering drift. 0 = report
+    /// honestly. Used by the drift integration suite to exercise the cut-off path.
+    pub understate_received_pct: u8,
 }
 
 /// The peer's latest MeteringReport, summarised. `delivered`/`received` are from
@@ -240,17 +244,45 @@ pub async fn run_consume(
     });
 
     let mut poll = 0u32;
+    // Cumulative units we acknowledge having received from the peer — the
+    // consumer's half of the bidirectional metering exchange. We report it back so
+    // the provider can reconcile it against its own `delivered` and detect drift.
+    let mut acked_received: u64 = 0;
     while opts.max_polls.is_none_or(|max| poll < max) {
         poll += 1;
         tokio::time::sleep(opts.interval).await;
 
-        // Poll: re-announce to receive any queued frames (MeteringReport, Reject).
-        let body = frame(&our_announce(identity, unit))
+        // Poll: re-announce to receive any queued frames (MeteringReport, Reject),
+        // and send back our own MeteringReport acknowledging what we've received so
+        // far. v1 acknowledges the provider's delivered count (we have no
+        // independent receive-side meter yet — that, which would surface real
+        // transit loss, is future work); reporting it still closes the protocol
+        // loop so the provider's drift/settlement path is exercised end to end.
+        let mut body = Vec::new();
+        encode_frame(&our_announce(identity, unit), &mut body)
             .map_err(|e| anyhow::anyhow!("framing our Announce: {e:?}"))?;
+        if acked_received > 0 {
+            let ack = MeteringReport::new(0, 0, acked_received).encode();
+            encode_frame(&ack, &mut body)
+                .map_err(|e| anyhow::anyhow!("framing our MeteringReport: {e:?}"))?;
+        }
         let messages = exchange(base_url, body).await?;
         let cut_off = balance_exhausted(&messages);
+        if cut_off {
+            // Re-admit resets the provider's metering baseline, so drop our
+            // acknowledged total too — otherwise we'd report a stale (large) count
+            // against the provider's fresh (small) one and trip a false drift alarm.
+            acked_received = 0;
+        }
 
         let report = find_metering_report(&messages);
+        if let Some(r) = report.as_ref() {
+            // Acknowledge the provider's cumulative delivered as our received for
+            // the next poll (self-healing: the latest total always wins). Fault
+            // injection deflates it to simulate a peer that lies or under-counts.
+            let keep = 100u64.saturating_sub(opts.understate_received_pct.min(100) as u64);
+            acked_received = r.delivered.saturating_mul(keep) / 100;
+        }
         let cost = report
             .as_ref()
             .map_or(0, |r| price.cost_scaled(r.elapsed_ms, r.delivered));
