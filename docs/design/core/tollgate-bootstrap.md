@@ -147,6 +147,13 @@ There is no negotiation for top-ups — the pricing was already agreed in the Pr
 
 A smart peer monitors the MeteringReports from the provider and sends a new token *before* balance exhaustion to avoid service interruption. The provider never stops service if the balance is positive.
 
+**Implementation policy (non-normative).** *When* to renew is a consumer choice, not part of the protocol — the wire format only requires a positive balance for delivery to continue, never dictating top-up timing. The `tollgate-net` consumer uses a simple **watermark** policy: one configured `topup` amount serves as both the refill size and the low-balance threshold. Each metering interval it estimates `remaining = paid − cost(reports)` and, when `remaining` drops below `topup`, sends another token of `topup` sats. The balance therefore cycles between roughly `topup` and `topup + initial`, refilling just ahead of zero, so a steady-state session never actually drops. Two boundary cases:
+
+- **Reactive re-admit.** If the consumer falls behind and is cut (a balance-exhausted Reject), the next token re-admits it. The provider treats a token accepted while not `Active` as a *fresh* metering session — the idle gap isn't billed — and the consumer resets its own accounting to match.
+- **Negative pricing.** When the provider pays the consumer (a negative price; see [tollgate-pricing.md](tollgate-pricing.md)), the estimated `remaining` only grows, so no token is ever sent.
+
+The watermark cadence is just one reasonable policy — another consumer might renew on a timer, batch larger tokens, or hold a deeper buffer; all interoperate, since the provider only cares that the balance stays positive. Sizing the token trades renewal overhead against locked-up value (see [Bootstrap Token Amount](#bootstrap-token-amount)).
+
 ---
 
 ## Upgrade to Spilman

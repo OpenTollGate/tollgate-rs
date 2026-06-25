@@ -349,9 +349,11 @@ pub async fn run_consume(
             .as_ref()
             .map_or(0, |r| price.cost_scaled(r.elapsed_ms, r.delivered));
 
-        // Top up if cut off, or proactively before the balance dips below a top-up.
-        // Signed: under negative pricing `cost` is negative (the provider pays us),
-        // so remaining only grows and we never top up.
+        // Top up if cut off, or proactively before the balance dips below a top-up
+        // — the watermark policy described under "Proactive Top-Up" in
+        // docs/design/core/tollgate-bootstrap.md. Signed: under negative pricing
+        // `cost` is negative (the provider pays us), so remaining only grows and we
+        // never top up.
         let mut topped_up = false;
         if cut_off || (paid_scaled as i64).saturating_sub(cost) < topup_scaled as i64 {
             let top = pay(base_url, identity, unit, mint_url, opts.topup_sat).await?;
