@@ -67,7 +67,7 @@ fn our_announce(identity: &Identity, unit: &str) -> Vec<u8> {
     Announce::new(PROTOCOL_VERSION, pubkey, unit, 0).encode()
 }
 
-/// Resolve the host of a `base_url` like `http://gateway:4747` to an IP, for
+/// Resolve the host of a `base_url` like `http://peer:4747` to an IP, for
 /// per-peer MAC metering of the upstream. Returns the first resolved address.
 /// IPv4-oriented (the MAC counter reads `/proc/net/arp`); `None` on failure.
 fn resolve_host_ip(base_url: &str) -> Option<std::net::IpAddr> {

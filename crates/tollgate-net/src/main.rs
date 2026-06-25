@@ -42,13 +42,13 @@ enum Command {
     },
     /// Probe a peer: send our Announce and report the peer's identity.
     Connect {
-        /// Peer HTTP origin, e.g. http://gateway:4747
+        /// Peer HTTP origin, e.g. http://peer:4747
         #[arg(long)]
         peer: String,
     },
     /// Pay a peer a bootstrap token and report whether it was accepted.
     Pay {
-        /// Peer HTTP origin, e.g. http://gateway:4747
+        /// Peer HTTP origin, e.g. http://peer:4747
         #[arg(long)]
         peer: String,
         /// Mint URL to draw the token on, e.g. http://mint:3338
@@ -61,7 +61,7 @@ enum Command {
     /// Pay a peer and stay online: poll for MeteringReports and auto-top-up
     /// before the balance runs out.
     Consume {
-        /// Peer HTTP origin, e.g. http://gateway:4747
+        /// Peer HTTP origin, e.g. http://peer:4747
         #[arg(long)]
         peer: String,
         /// Mint URL to draw tokens on, e.g. http://mint:3338
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn format_price_sheet_handles_product_without_mints() {
-        // A product configured with no accepted mints (the detect-gateway case).
+        // A product configured with no accepted mints (the detect-only case).
         let sheet = PriceSheet::new(vec![ProductOffer::new(1000, &[], vec![])], 5000, 60000);
         assert_eq!(format_price_sheet(&sheet), "PRICESHEET products=1 mints=0");
     }

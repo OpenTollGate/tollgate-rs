@@ -539,7 +539,7 @@ mod tests {
         assert_eq!(PriceSheet::decode(&empty.encode()).expect("decode"), empty);
         assert!(empty.products.is_empty());
 
-        // A product with zero mint options (a gateway with no accepted mints).
+        // A product with zero mint options (a peer with no accepted mints).
         let mintless = PriceSheet::new(
             alloc::vec![ProductOffer::new(1000, &[], alloc::vec![])],
             5000,

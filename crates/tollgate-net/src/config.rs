@@ -67,7 +67,7 @@ impl Default for Config {
 #[serde(rename_all = "kebab-case")]
 pub enum FirewallMode {
     /// Install a `policy drop` forward chain that enforces payment on its own.
-    /// Correct for a dedicated TollGate gateway. (Default.)
+    /// Correct for a dedicated TollGate node. (Default.)
     #[default]
     Enforcing,
     /// Only manage the `paid_peers` sets; do not install a forward chain. Use on
@@ -97,7 +97,7 @@ pub struct ProductConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct UpstreamConfig {
-    /// Peer HTTP origin, e.g. `http://gateway:4747`.
+    /// Peer HTTP origin, e.g. `http://peer:4747`.
     pub peer: String,
     /// Mint to draw bootstrap tokens on.
     pub mint: String,
@@ -331,7 +331,7 @@ mod tests {
     #[test]
     fn price_sheet_handles_empty_mints_and_empty_products() {
         // A product but no accepted mints → an offer with zero mint options
-        // (this is the detect-gateway shape).
+        // (this is the detect-only shape — a node that advertises but sells nothing).
         let no_mints: Config = serde_yaml::from_str("products:\n  - price_per_unit: 1\n").unwrap();
         let sheet = no_mints.price_sheet();
         assert_eq!(sheet.products.len(), 1);
