@@ -19,11 +19,14 @@ pub struct Price {
 
 impl Price {
     /// Cost (in scaled units) of `elapsed_ms` of time plus `units` delivered.
-    /// Clamped to zero — a negative rate never *adds* to a bootstrap balance.
-    pub fn cost_scaled(&self, elapsed_ms: u64, units: u64) -> u64 {
+    /// **Signed**: a negative rate yields a negative cost — the node *pays* the
+    /// peer to attract resources (negative pricing in
+    /// `docs/design/core/tollgate-pricing.md`), so billing credits the balance
+    /// rather than debiting it.
+    pub fn cost_scaled(&self, elapsed_ms: u64, units: u64) -> i64 {
         let time = (elapsed_ms as i64).saturating_mul(self.per_second) / 1000;
         let unit = (units as i64).saturating_mul(self.per_unit);
-        time.saturating_add(unit).max(0) as u64
+        time.saturating_add(unit)
     }
 }
 
@@ -65,11 +68,19 @@ mod tests {
     }
 
     #[test]
-    fn negative_rate_never_adds_cost() {
+    fn negative_rate_yields_a_signed_credit() {
+        // Negative pricing: the node pays the peer, so the cost is negative and
+        // billing will *credit* the balance (no clamp to zero).
         let price = Price {
-            per_second: -5,
-            per_unit: 0,
+            per_second: 0,
+            per_unit: -2,
         };
-        assert_eq!(price.cost_scaled(1000, 0), 0);
+        assert_eq!(price.cost_scaled(0, 10), -20); // 10 units × −2 = −20
+        // Time and units combine with sign: −5/s for 2 s, +3/unit for 10 units.
+        let mixed = Price {
+            per_second: -5,
+            per_unit: 3,
+        };
+        assert_eq!(mixed.cost_scaled(2000, 10), 20); // −10 + 30
     }
 }

@@ -42,8 +42,9 @@ struct UpstreamState {
     url: String,
     /// What they charge us.
     price: Price,
-    /// Our remaining scaled balance with them.
-    remaining_scaled: u64,
+    /// Our remaining scaled balance with them, signed (`−` they owe us, e.g. when
+    /// they deliver at a negative price and pay us).
+    remaining_scaled: i64,
     /// Usage from *our* perspective: `sent` to them, `recv` from them.
     sent: u64,
     recv: u64,

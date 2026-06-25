@@ -71,12 +71,13 @@ pub struct PeerStatus {
     /// What they charge us for their delivery.
     #[serde(default)]
     pub their_price: Pricing,
-    /// Their prepaid balance with us (scaled), draining as we deliver. 0 when we
-    /// don't sell to them.
-    pub their_balance: u64,
-    /// Our prepaid balance with them (scaled), draining as they deliver. 0 when
-    /// we don't buy from them.
-    pub our_balance: u64,
+    /// Their balance with us (scaled), **signed**: `+` they have prepaid credit
+    /// draining as we deliver, `−` we owe them (we deliver at a negative price —
+    /// we pay them). 0 when we don't sell to them.
+    pub their_balance: i64,
+    /// Our balance with them (scaled), **signed**: `+` we have prepaid credit
+    /// draining as they deliver, `−` they owe us. 0 when we don't buy from them.
+    pub our_balance: i64,
     /// Seconds the metering session has run.
     pub metered_secs: u64,
     /// Milliseconds since the peer was last heard from.
@@ -92,7 +93,7 @@ impl PeerStatus {
     /// Net balance position with this peer (scaled): `+` we're a net earner
     /// (they've prepaid us more than we've prepaid them), `-` a net spender.
     pub fn net_balance(&self) -> i64 {
-        self.their_balance as i64 - self.our_balance as i64
+        self.their_balance - self.our_balance
     }
 }
 

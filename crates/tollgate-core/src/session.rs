@@ -33,8 +33,10 @@ pub enum PeerPhase {
 pub struct PeerSnapshot {
     pub peer: PeerId,
     pub phase: PeerPhase,
-    /// Scaled milli-unit balance.
-    pub balance: u64,
+    /// Scaled milli-unit balance, **signed**: `+` the peer has prepaid credit
+    /// with us (net earner), `−` we owe them — we deliver at a negative price and
+    /// pay them to attract their traffic (net spender). See [`Price::cost_scaled`].
+    pub balance: i64,
     /// Units delivered to the peer since the metering baseline — matches the
     /// MeteringReport sent to the peer. Zero before the first meter sample.
     pub delivered: u64,
@@ -76,8 +78,10 @@ impl Default for MeteringPolicy {
 #[derive(Clone, Debug)]
 struct PeerSession {
     phase: PeerPhase,
-    /// Scaled milli-unit balance (scale = 1000). Bootstrap top-ups are additive.
-    balance: u64,
+    /// Scaled milli-unit balance (scale = 1000), **signed**. Bootstrap top-ups
+    /// are additive; metering lowers it by the cost magnitude, so a negative
+    /// price (we pay the peer) drives it below zero — the subsidy we owe.
+    balance: i64,
     /// The last meter reading, or `None` until the first sample establishes the
     /// baseline (so a non-zero starting counter isn't charged retroactively).
     last_counters: Option<Counters>,
@@ -226,7 +230,7 @@ impl Session {
                         // the last sample isn't charged on resume. Balance is always
                         // additive — top-ups never reset it.
                         let was_active = peer_session.phase == PeerPhase::Active;
-                        peer_session.balance = peer_session.balance.saturating_add(amount);
+                        peer_session.balance = peer_session.balance.saturating_add(amount as i64);
                         peer_session.phase = PeerPhase::Active;
                         if !was_active {
                             peer_session.last_counters = None;
@@ -290,7 +294,14 @@ impl Session {
                                 peer_session.billed_units = billable;
                                 peer_session.last_counters = Some(counters);
                                 peer_session.last_meter_at = now;
-                                peer_session.balance = peer_session.balance.saturating_sub(cost);
+                                // Apply the signed cost by magnitude. Charging
+                                // (cost ≥ 0) draws down the peer's prepaid credit;
+                                // paying it (negative price, to attract its traffic)
+                                // drives the balance negative — the subsidy we owe it.
+                                // tolltop reads the sign: `+` earner, `−` spender.
+                                let charging = cost >= 0;
+                                peer_session.balance =
+                                    peer_session.balance.saturating_sub(cost.saturating_abs());
 
                                 // Drift = |our_delivered − peer_received| / our_delivered.
                                 // Compared as integers (diff·10000 vs delivered·bps) to
@@ -327,10 +338,14 @@ impl Session {
                                     .encode(),
                                 });
 
-                                // Cut the peer on exhaustion, or after persistent
-                                // over-tolerance drift (close & renegotiate). The
-                                // transit-loss warning was already sent above.
-                                let exhausted = peer_session.balance == 0;
+                                // Cut a *charged* peer whose prepaid credit is spent
+                                // (balance non-positive), or any peer after persistent
+                                // over-tolerance drift (close & renegotiate). A peer we
+                                // PAY (negative price) is never cut for exhaustion — its
+                                // negative balance is the subsidy we chose, not a debt
+                                // it must clear. The transit-loss warning was already
+                                // sent above.
+                                let exhausted = charging && peer_session.balance <= 0;
                                 let drift_persisted =
                                     peer_session.over_tolerance_streak >= policy.max_streak;
                                 if exhausted || drift_persisted {
@@ -1168,6 +1183,57 @@ mod tests {
         let a5 = session.handle(sample(500), Millis(6000));
         assert!(has_transit_loss(&a4) && has_transit_loss(&a5));
         assert!(!suspends_access(&a4) && !suspends_access(&a5));
+        assert_eq!(session.peer_phase(&p), Some(PeerPhase::Active));
+    }
+
+    #[test]
+    fn negative_pricing_pays_the_peer_and_never_suspends() {
+        let mut session = Session::new();
+        // We PAY the peer 2 milli-sat per unit we deliver to it (negative pricing —
+        // we subsidise delivery to attract its traffic).
+        session.set_price(Price {
+            per_second: 0,
+            per_unit: -2,
+        });
+        let p = peer(24);
+        session.handle(Event::PeerConnected { peer: p }, Millis(0));
+        // It still bootstraps a small amount to open the session.
+        session.handle(
+            Event::BootstrapVerified {
+                peer: p,
+                amount: 10,
+                ok: true,
+            },
+            Millis(0),
+        );
+        let sample = |d| Event::MeterSample {
+            peer: p,
+            counters: Counters {
+                delivered: d,
+                received: 0,
+            },
+        };
+
+        session.handle(sample(0), Millis(1000)); // baseline
+
+        // Deliver 100 units at −2 → we owe the peer 200; balance 10 → −190. We are a
+        // net spender, and the peer is NOT suspended — paying it is deliberate.
+        let actions = session.handle(sample(100), Millis(2000));
+        assert!(
+            !suspends_access(&actions),
+            "we are paying — never cut for that"
+        );
+        assert_eq!(session.peer_phase(&p), Some(PeerPhase::Active));
+        assert_eq!(
+            session.snapshot()[0].balance,
+            10 - 200,
+            "negative pricing drives the balance negative (we owe the peer)"
+        );
+
+        // Keep delivering: the balance only goes more negative, still never cut.
+        let actions = session.handle(sample(250), Millis(3000));
+        assert!(!suspends_access(&actions));
+        assert_eq!(session.snapshot()[0].balance, 10 - 500); // 250 units × −2
         assert_eq!(session.peer_phase(&p), Some(PeerPhase::Active));
     }
 }

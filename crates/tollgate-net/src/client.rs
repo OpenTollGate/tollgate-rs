@@ -199,7 +199,9 @@ pub struct ConsumeEvent {
     pub peer_pubkey: String,
     pub price: Price,
     pub paid_scaled: u64,
-    pub remaining_scaled: u64,
+    /// Signed remaining balance: `+` we have prepaid credit left, `−` the
+    /// provider owes us (it delivers at a negative price — it pays us).
+    pub remaining_scaled: i64,
     /// The peer's latest report, if one arrived this poll.
     pub report: Option<ReportSummary>,
     /// The peer reported us balance-exhausted (cut off).
@@ -237,7 +239,7 @@ pub async fn run_consume(
         peer_pubkey: peer_pubkey.clone(),
         price,
         paid_scaled,
-        remaining_scaled: paid_scaled,
+        remaining_scaled: paid_scaled as i64,
         report: None,
         cut_off: false,
         topped_up: false,
@@ -288,8 +290,10 @@ pub async fn run_consume(
             .map_or(0, |r| price.cost_scaled(r.elapsed_ms, r.delivered));
 
         // Top up if cut off, or proactively before the balance dips below a top-up.
+        // Signed: under negative pricing `cost` is negative (the provider pays us),
+        // so remaining only grows and we never top up.
         let mut topped_up = false;
-        if cut_off || paid_scaled.saturating_sub(cost) < topup_scaled {
+        if cut_off || (paid_scaled as i64).saturating_sub(cost) < topup_scaled as i64 {
             let top = pay(base_url, identity, unit, mint_url, opts.topup_sat).await?;
             if top.accepted {
                 // A cut-off means the peer suspended us and reset its metering
@@ -309,7 +313,7 @@ pub async fn run_consume(
             peer_pubkey: peer_pubkey.clone(),
             price,
             paid_scaled,
-            remaining_scaled: paid_scaled.saturating_sub(cost),
+            remaining_scaled: (paid_scaled as i64).saturating_sub(cost),
             report: report.map(|r| ReportSummary {
                 elapsed_ms: r.elapsed_ms,
                 delivered: r.delivered,
