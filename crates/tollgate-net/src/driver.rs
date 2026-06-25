@@ -844,7 +844,11 @@ mod tests {
         driver.record_upstream("http://up:4747", &ev);
 
         let st = driver.status().await;
-        let p = st.peers.iter().find(|p| p.pubkey == hex).expect("upstream peer");
+        let p = st
+            .peers
+            .iter()
+            .find(|p| p.pubkey == hex)
+            .expect("upstream peer");
         assert_eq!(p.drift, Some(0.12)); // buy-side drift reaches the status snapshot
         assert_eq!(p.our_balance, 7_000); // they hold our remaining prepayment
     }
