@@ -361,3 +361,37 @@ The implementation watches the config file for changes and applies runtime-chang
 | Peer overrides | By pubkey | Per-peer pricing, blocking, zero-price |
 | Runtime changes | Pricing and peer overrides are hot-reloadable | Operator can adjust without downtime |
 | OpenWrt | YAML directly, UCI integration future | Keep it simple initially |
+
+---
+
+## Captive Portal (`portal_dir`)
+
+**Problem:** nodogsplash only serves the captive-portal splash page to
+*unauthenticated* clients. Once a peer pays and is let through the firewall, it
+can no longer reach the portal UI — so it cannot check balance, top up, or see
+remaining quota.
+
+**Solution:** the `tollgate-net` HTTP server (the same one serving
+`/tollgate/v1/exchange`) also serves the built portal SPA at a persistent
+`GET /portal` endpoint. Because the endpoint lives on the tollgate server rather
+than behind nodogsplash, it is reachable by **all** clients regardless of
+auth/firewall state.
+
+```yaml
+# Point at the built SPA output of the tollgate-captive-portal-site package
+# (its vite `build/` directory). Omit to disable the /portal route.
+portal_dir: /opt/tollgate/captive-portal-site/build
+```
+
+Behaviour:
+
+| Request | Response |
+|---------|----------|
+| `GET /portal` (or `/portal/`) | `index.html` — the SPA entry |
+| `GET /portal/<asset>` | the matching static file (JS/CSS/images) with correct MIME types |
+| `GET /portal/<unknown>` (e.g. `/portal/balance`) | falls back to `index.html` (SPA fallback — lets client-side routing work) |
+| `portal_dir` unset | `/portal` is not mounted (404) |
+
+Default: unset (disabled). The portal frontend is built separately by the
+`tollgate-captive-portal-site` package (`npm run build` → `build/`); this option
+only wires where the built output is served from.

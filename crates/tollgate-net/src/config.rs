@@ -26,6 +26,12 @@ pub struct Config {
     pub secret_key_file: Option<PathBuf>,
     /// Listen address for the HTTP/WS transport (TollGate default port is 4747).
     pub listen: String,
+    /// Filesystem directory holding the built captive-portal SPA, served at
+    /// `GET /portal` for ALL clients regardless of auth state — so a user who
+    /// has already paid can still reach the portal (e.g. to check balance)
+    /// instead of being gated out by nodogsplash. `None` disables the route.
+    /// Point this at the `tollgate-captive-portal-site` `build/` output.
+    pub portal_dir: Option<PathBuf>,
     /// Mints whose tokens this node accepts.
     pub mints: Vec<String>,
     /// Products this node sells. Static pricing only in v1.
@@ -51,6 +57,7 @@ impl Default for Config {
         Self {
             secret_key_file: None,
             listen: "127.0.0.1:4747".to_string(),
+            portal_dir: None,
             mints: Vec::new(),
             products: Vec::new(),
             firewall: FirewallMode::default(),

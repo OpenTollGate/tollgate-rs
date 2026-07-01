@@ -18,6 +18,8 @@ tollgate-core = { workspace = true }
 tollgate-protocol = { workspace = true }
 tokio = { workspace = true }
 axum = { version = "0.8", features = ["ws"] }
+# Static-file serving for the persistent GET /portal SPA endpoint (index.html fallback).
+tower-http = { version = "0.6", default-features = false, features = ["fs"] }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 clap = { workspace = true }

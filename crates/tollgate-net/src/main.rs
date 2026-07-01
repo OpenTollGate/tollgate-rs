@@ -199,7 +199,7 @@ async fn serve(
         });
     }
 
-    server::serve(&cfg.listen, driver).await
+    server::serve(&cfg.listen, driver, cfg.portal_dir.clone()).await
 }
 
 async fn connect(
