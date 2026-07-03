@@ -114,8 +114,6 @@ This document consolidates all FIPS modifications required for tollgate-rs integ
 
 ---
 
----
-
 ## Internet Exit & Tunneling
 
 ### 8. TUN/TAP Virtual Interface for Internet Exit
@@ -139,7 +137,7 @@ This document consolidates all FIPS modifications required for tollgate-rs integ
 
 ### 9. GRE Tunnel Setup API (Control Socket)
 
-**What**: Control-socket command to configure a GRE (Generic Routing Enculation) tunnel between the local FIPS node and a remote FIPS node acting as an internet exit.
+**What**: Control-socket command to configure a GRE (Generic Routing Encapsulation) tunnel between the local FIPS node and a remote FIPS node acting as an internet exit.
 
 **Why GRE**: GRE has only 4 bytes of header overhead (24 bytes total with outer IP), is kernel-space on Linux/OpenWrt (`kmod-ip-gre`), carries all IP traffic types (TCP/UDP/ICMP), and adds zero redundant encryption since FIPS is already E2E encrypted.
 
