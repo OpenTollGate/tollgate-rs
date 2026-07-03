@@ -114,6 +114,112 @@ This document consolidates all FIPS modifications required for tollgate-rs integ
 
 ---
 
+---
+
+## Internet Exit & Tunneling
+
+### 8. TUN/TAP Virtual Interface for Internet Exit
+
+**What**: A FIPS node with legacy internet connectivity can act as an exit node for other FIPS-only nodes that have no IP stack. Traffic from FIPS-only nodes is bridged to the legacy internet through a virtual interface on the exit node.
+
+**Problem**: FIPS nodes that speak only the FIPS protocol (no IP address, no DHCP, no IP firewall) cannot reach services on the legacy internet (websites, DNS, etc.) without a bridge through a node that has both FIPS and a WAN link.
+
+**Approach**: Use a lightweight tunnel (GRE recommended — see feature 9) between the FIPS-only node and the exit node. The exit node performs NAT and forwards tunneled traffic to its WAN interface.
+
+**Why not WireGuard**: FIPS provides end-to-end encryption natively. WireGuard adds ~80 bytes/packet of redundant crypto overhead. On constrained links (LoRa, mesh hops) this is significant.
+
+**Phase plan**:
+- **Phase 1**: Binary allow/deny on the tunnel interface. Price = 0. No TollGate payments — just prove connectivity.
+- **Phase 2**: Attach TollGate pricing to the tunnel interface (nft counters, tc shaping, or BPF on the GRE device). Granular Cashu micropayments for metered access.
+- **Phase 3**: Full FIPS-only network — remove all IP internally. Only loopback + FIPS interface + GRE tunnel. Multiple exit nodes form a market (users choose cheapest/best-rated exit).
+
+**Referenced in**: [peering-fips.md](network-peering/peering-fips.md)
+
+---
+
+### 9. GRE Tunnel Setup API (Control Socket)
+
+**What**: Control-socket command to configure a GRE (Generic Routing Enculation) tunnel between the local FIPS node and a remote FIPS node acting as an internet exit.
+
+**Why GRE**: GRE has only 4 bytes of header overhead (24 bytes total with outer IP), is kernel-space on Linux/OpenWrt (`kmod-ip-gre`), carries all IP traffic types (TCP/UDP/ICMP), and adds zero redundant encryption since FIPS is already E2E encrypted.
+
+**Comparison of tunneling options**:
+
+| Option | Overhead | OpenWrt Package | Encryption | Verdict |
+|--------|----------|-----------------|------------|---------|
+| **GRE** | 24 bytes | `kmod-ip-gre` | None (FIPS already E2E) | **Best** — lightest viable |
+| IPIP | 20 bytes | `kmod-ipip` | None | Good, but no multicast |
+| WireGuard | ~80 bytes | `wireguard-tools` | Redundant over FIPS | Wasteful |
+| TUN/TAP | Varies | `kmod-tun` | None | Not standalone — needs carrier |
+| PPPoE | 8 bytes | `ppp-mod-pppoe` | None | Wrong use case (ISP last-mile) |
+
+**What's needed**: A control-socket command that:
+1. Creates a GRE interface (`gre0`) pointing at a remote FIPS node's address
+2. Sets MTU to 1476 (1500 - 24 GRE overhead)
+3. Optionally applies forwarding/NAT rules on the exit node
+4. Optionally applies firewall rules (allow/deny per peer) for Phase 1 binary gating
+
+**Proof of concept**: Install `kmod-ip-gre kmod-gre luci-proto-gre` on 3 OpenWrt routers. Router A (has WAN): GRE endpoints for B and C + NAT masquerade. Routers B and C: GRE endpoint to A + default route through tunnel. Disable IP stack on B and C (loopback only + FIPS + GRE).
+
+**Referenced in**: [peering-fips.md](network-peering/peering-fips.md)
+
+---
+
+### 10. Per-FIPS-Instance Pricing Profiles
+
+**What**: Support for running multiple complete FIPS instances on a single device, each with its own pricing profile, to handle heterogeneous peer media.
+
+**Problem**: A device peering over LoRa (slow, expensive per MB) and a device peering over fiber (fast, cheap per MB) cannot charge the same price per megabyte. A single FIPS instance has a single pricing model.
+
+**Solution**: Run multiple complete FIPS instances, each bound to a different physical interface, with its own pricing configuration. The FIPS protocol itself does **not** need to change — instance management is at the TollGate layer.
+
+**How**: `tollgate-net` manages multiple FIPS daemon processes (or multiple FIPS interfaces within a single daemon), each with:
+- Its own peer set (bound to a specific radio/interface)
+- Its own pricing model (per-MB, per-second, or flat-rate)
+- Its own access policy
+
+**Example**: A reseller router with two upstream peers:
+- Fiber peer: 0.001 sats/MB, high throughput
+- LoRa peer: 0.1 sats/MB, low throughput, backup only
+
+Each FIPS instance advertises independently. Customers connect to whichever instance offers the best price/throughput for their needs.
+
+**Referenced in**: [tollgate-pricing.md](core/tollgate-pricing.md), [peering-fips.md](network-peering/peering-fips.md)
+
+---
+
+### 11. TTL/Ping Proximity Signal
+
+**What**: Use TTL (Time-To-Live) and ping latency as a signal for physical proximity, exposed via the control socket.
+
+**Use cases**:
+- **Museum pairing**: A FIPS device on a museum exhibit only pairs with visitors who can prove physical proximity (sub-10ms ping, TTL ≤ N). Prevents thousands of remote visitors from overwhelming the device.
+- **Balloon DoS protection**: An ESP32 on a high-altitude balloon connecting two continents over the ocean can reject or rate-limit pings from the far side based on TTL + latency, protecting constrained hardware from DoS.
+- **Gamification**: "Been there" certificates — a FIPS node issues a signed certificate to a visitor who proves proximity. Collectible like ham radio call signs.
+
+**What's needed**:
+- Control-socket query: `ping_proximity <node_addr>` → returns `{srtt_ms, ttl, hop_count_estimate}`
+- Optional per-peer policy: `max_ping_ms` / `max_ttl` thresholds that automatically reject connections from peers too far away
+- Combine with rate limiting and price-based gating for layered DoS protection
+
+**Complexity**: Low — ping data already exists in MMP metrics (`srtt_ms`). TTL extraction requires reading the IP header of incoming packets, which is available at the FIPS transport layer.
+
+---
+
+## Wi-Fi Mesh Architecture
+
+The physical layer recommendation for TollGate deployments:
+
+- **802.11s mesh** for router-to-router backbone. Best-supported mode on MediaTek mt76 chipsets (GL-MT6000, GL-MT3000). Provides multi-hop forwarding (HWMP protocol) and self-healing.
+- **Standard Wi-Fi AP** for phone-to-router connections. Phones cannot join 802.11s directly (no Android/iOS API). Phones connect via normal Wi-Fi SSID to the nearest router.
+- **FIPS as application overlay** on top of whatever IP connectivity exists. FIPS runs as a daemon on each device, providing identity, encryption, and routing independent of the physical layer.
+
+**Not recommended**:
+- Wi-Fi Direct (star topology, deprecated on Android 13+, fragile on mt76)
+- Wi-Fi Aware/NAN (not supported on MediaTek chips, inconsistent Android vendor support)
+
+---
+
 ## Summary
 
 | # | Feature | Priority | Complexity |
@@ -125,3 +231,7 @@ This document consolidates all FIPS modifications required for tollgate-rs integ
 | 5 | MMP metrics streaming subscription | High | Low |
 | 6 | FSP port dispatch | Future | Medium |
 | 7 | Payment-aware routing | Future | High |
+| 8 | TUN/TAP virtual interface for internet exit | High | Medium |
+| 9 | GRE tunnel setup API (control socket) | High | Medium |
+| 10 | Per-FIPS-instance pricing profiles | Future | Medium |
+| 11 | TTL/Ping proximity signal | Future | Low |

@@ -272,3 +272,66 @@ The following FIPS modifications are required for TollGate integration. Full det
 | Message transport (future) | Native FSP port | Optimization, eliminates HTTP overhead |
 | Default pricing strategy | Cost-plus using ETX and SRTT | Mirrors FIPS's own link cost formula |
 | Peer identification | pubkey <-> node_addr mapping | Deterministic, same keypair serves both |
+
+---
+
+## Internet Exit (FIPS → Legacy Internet)
+
+A FIPS node with legacy internet connectivity can act as an **exit node** for
+FIPS-only nodes that have no IP stack. This bridges the FIPS network to the
+legacy internet.
+
+### GRE Tunnel Approach
+
+The recommended tunneling mechanism is **GRE** (Generic Routing
+Encapsulation):
+
+- **4 bytes** header overhead (24 bytes total with outer IP) — far lighter
+  than WireGuard's ~80 bytes
+- **No redundant encryption** — FIPS already provides end-to-end encryption
+- **Kernel-space** on OpenWrt (`kmod-ip-gre`)
+- Carries all IP traffic types (TCP, UDP, ICMP)
+
+### Exit Node Architecture
+
+```
+  FIPS-only node ──FIPS mesh──→ Exit node ──NAT──→ Legacy internet
+  (no IP stack)                 (FIPS + WAN)
+         │                           │
+         └───── GRE tunnel ─────────┘
+               (MTU 1476)
+```
+
+### Phased Implementation
+
+| Phase | Goal | Payments |
+|-------|------|----------|
+| 1 | Binary allow/deny on GRE tunnel | None (price = 0) |
+| 2 | TollGate RS pricing on tunnel interface | Cashu micropayments via nft/tc/BPF |
+| 3 | Full FIPS-only network (no IP internally) | Market for exit access |
+
+### Proof of Concept
+
+Three OpenWrt routers. Router A has WAN. Routers B and C have FIPS only.
+All three run FIPS and can ping each other via `npub.fips` addresses.
+GRE tunnels from B→A and C→A. NAT masquerade on A. B and C can reach
+the legacy internet through A's GRE tunnel.
+
+Test progression: Docker → QEMU → physical routers.
+
+---
+
+## Wi-Fi Mesh Architecture
+
+The physical layer recommendation for TollGate deployments using
+GL-MT6000 (MT7986) and GL-MT3000 (MT7981) routers:
+
+- **802.11s mesh** for router-to-router backbone (best-supported alternative
+  mode on MediaTek mt76 driver, provides multi-hop forwarding via HWMP and
+  self-healing)
+- **Standard Wi-Fi AP** for phone-to-router connections (phones cannot join
+  802.11s directly — no Android/iOS API)
+- **FIPS as application overlay** on top of whatever IP connectivity exists
+
+Not recommended: Wi-Fi Direct (fragile on mt76, star topology, deprecated on
+Android 13+), Wi-Fi Aware/NAN (not supported on MediaTek chips).
