@@ -2,7 +2,7 @@
 
 This document specifies how TollGate counts units delivered between peers, how the two sides reconcile their measurements, and the trait the implementation provides.
 
-Metering produces the inputs to billing. Pricing turns metered units into Cashu payments — see [tollgate-pricing.md](tollgate-pricing.md). Access control ([tollgate-access-control.md](tollgate-access-control.md)) decides whether delivery happens; metering counts what was delivered.
+Metering produces the inputs to billing. Under vouchers billing is trivial — one voucher per unit delivered, see [tollgate-pricing.md](tollgate-pricing.md). Access control ([tollgate-access-control.md](tollgate-access-control.md)) decides whether delivery happens; metering counts what was delivered.
 
 ---
 
@@ -19,30 +19,19 @@ Both sides meter independently. Each side's counters are local; they are reconci
 
 All units delivered to a peer are metered — including TollGate protocol messages and locally-addressed resources. Distinguishing control plane from data plane at the metering layer adds complexity for negligible savings (protocol messages are tiny relative to delivered resources).
 
-### Future: units handled on behalf of a peer
+### Direction Classes
 
-Metering the **outbound** direction and charging the deliverer's price is
-what makes negative prices necessary: a leaf delivers its own uplink to its
-relay, so the rule bills the relay for the leaf's traffic and a negative
-price has to cancel it out.
+Counters are kept **per direction class** — `up` and `down` for network
+forwarding, `import` and `export` for electricity. Uplink and downlink are
+different goods on asymmetric backhaul, and a node issues a separate keyset
+per class so the scarce direction can cost more in the market
+([tollgate-pricing.md](tollgate-pricing.md)).
 
-The decided direction is to meter **units handled on behalf of a peer** —
-both directions of that peer's traffic — and bill that peer. The sign never
-goes negative because the beneficiary always pays. See the Negative Pricing
-section of [tollgate-pricing.md](tollgate-pricing.md).
+The classes are defined by the ResourceAdapter. The core neither enumerates
+nor interprets them; it reports and reconciles whatever comes back.
 
-Two consequences for this document, both **future work**:
-
-- **Metered units carry a direction class.** Removing the sign asymmetry
-  must not remove the rate asymmetry: uplink and downlink are different
-  goods on asymmetric backhaul, and one rate across both underprices the
-  scarce direction. `MeterStream` would report counters per
-  adapter-defined class rather than a single `delivered` / `received` pair.
-  The core neither enumerates nor interprets the classes.
-- **Attribution decides who pays.** Today a byte's
-  direction determines who is billed; under the change it is the byte's
-  beneficiary. Misattribution becomes a way to shift cost, which the current
-  counter model has no need to defend against.
+A single-class resource reports one class and behaves exactly as an
+unclassified counter would.
 
 ---
 
@@ -74,15 +63,15 @@ Within tolerance: both sides note the discrepancy but bill on the value that fav
 
 When the two sides disagree on unit counts, billing uses **the value that favors the deliverer**. Even if the receiver dropped some units, the deliverer still expended resources sending them, so the residual bias is deliberately placed on the party that did the work.
 
-Which raw value that is depends on the **sign of the price**, because the sign determines who pays:
+For network forwarding that is always the **higher** of the two counts, because delivery is always paid for by the receiver — one voucher per unit, never negative ([tollgate-pricing.md](tollgate-pricing.md)).
 
-| Price sign | Who pays | Billable value | Effect |
-|---|---|---|---|
-| `price > 0` | receiver of the delivery | **higher** of the two counts | deliverer is paid more |
-| `price < 0` | deliverer (subsidy) | **lower** of the two counts | deliverer pays less |
-| `price == 0` | nobody | — | no billing |
+The rule is stated in terms of the deliverer rather than as "use the higher value" because a negative delivery price inverts it. Where negative delivery prices are permitted at all — surplus disposal of a conserved, physically metered resource — the deliverer is the *payer*, and taking the higher value would let a peer inflate its received-count and skim up to the full tolerance every interval, indefinitely, without ever crossing the threshold that triggers a warning.
 
-Stating the rule as "always use the higher value" is only correct for positive prices. Under a negative price the deliverer is the *payer*, so the higher value favors the counterparty instead — letting a peer inflate its received-count and skim up to the full tolerance every interval, indefinitely, without ever crossing the threshold that triggers a warning. The rule is expressed in terms of the deliverer so that the bias lands on the same party regardless of sign.
+| Price sign | Who pays | Billable value |
+|---|---|---|
+| `price > 0` (all network forwarding) | receiver of the delivery | **higher** of the two counts |
+| `price < 0` (surplus disposal only) | deliverer | **lower** of the two counts |
+| `price == 0` | nobody | no billing |
 
 | Situation | Billable amount | Action |
 |-----------|----------------|--------|
@@ -90,9 +79,9 @@ Stating the rule as "always use the higher value" is only correct for positive p
 | Exceeds tolerance | Deliverer-favoring value | Warning sent (Reject: transit loss tolerance exceeded) |
 | Persistent (3+ intervals) | Deliverer-favoring value | Close and renegotiate |
 
-**Note:** this rule is honest-deliverer-optimistic. Under a positive price a dishonest provider could inflate unit counts; under a negative price a dishonest subsidy payer could deflate them. In both cases the abuse is capped at the tolerance. Mitigation (proof-of-delivery, reputation systems) requires further design — out of scope for v1.
+**Note:** this rule is honest-deliverer-optimistic. A dishonest provider could inflate unit counts, and under a negative price a dishonest subsidy payer could deflate them. In both cases the abuse is capped at the tolerance. Mitigation (proof-of-delivery, reputation systems) requires further design — out of scope for v1.
 
-Tolerance and the consecutive-over-tolerance threshold are configurable — see [tollgate-configuration.md](tollgate-configuration.md).
+Tolerance and the consecutive-over-tolerance threshold are configurable — see [tollgate-configuration.md](tollgate-configuration.md). Counters are kept per direction class.
 
 **Within-tolerance divergence is not free.** A counterparty that sits persistently at the edge of the tolerance band is extracting the full tolerance every interval while never triggering the over-tolerance path. Implementations should track the *signed mean* of the divergence across intervals, not just its magnitude: honest transit loss is noisy around a small positive mean, whereas manipulation shows as a stable offset pinned near the tolerance limit.
 
@@ -109,25 +98,27 @@ pub trait ResourceAdapter: Send + Sync {
     /// at each metering interval to compute the delta.
     fn subscribe_meter(&self, peer: &Pubkey) -> Result<MeterStream, AdapterError>;
 
-    /// Get resource metrics for a peer (for dynamic pricing). None for
-    /// resources without metrics.
+    /// Get resource metrics for a peer. Not used for pricing — delivery has
+    /// no price — but available to the operator for capacity and health
+    /// decisions. None for resources without metrics.
     fn peer_metrics(&self, peer: &Pubkey) -> Option<PeerMetrics>;
 
     // ... access control members documented in tollgate-access-control.md
 }
 
 /// Continuous metering counter stream. Implementation pushes updates as delivery proceeds.
+/// Counters are keyed by adapter-defined direction class ("up", "down", ...).
 pub struct MeterStream {
-    /// Cumulative units delivered TO this peer (outbound)
-    pub delivered: watch::Receiver<u64>,
-    /// Cumulative units received FROM this peer (inbound)
-    pub received: watch::Receiver<u64>,
+    /// Cumulative units delivered TO this peer, per class
+    pub delivered: watch::Receiver<HashMap<String, u64>>,
+    /// Cumulative units received FROM this peer, per class
+    pub received: watch::Receiver<HashMap<String, u64>>,
 }
 ```
 
 ### PeerMetrics
 
-Available from FIPS MMP or equivalent. Used for dynamic pricing only — not access control. Opaque to core; each adapter provides what's relevant for its resource type.
+Available from FIPS MMP or equivalent. Not used for pricing or access control — delivery has no price and metrics are peer-reported, so letting them set a price would let the peer set its own. Exposed for operator visibility and capacity decisions. Opaque to core; each adapter provides what's relevant for its resource type.
 
 ```rust
 pub enum MetricValue {
@@ -154,4 +145,5 @@ pub type PeerMetrics = HashMap<String, MetricValue>;
 | Within-tolerance divergence | Track the signed mean across intervals | Persistent offset at the tolerance edge is manipulation; honest transit loss is noisy around a small mean |
 | Transit loss tolerance | 5% default, configurable | Accounts for loss between measurement points |
 | Persistent over-tolerance | Close after 3 consecutive intervals | Something is wrong with the link or metering |
-| Peer metrics | Opaque map (key → value) | Implementation provides whatever is relevant for its resource type |
+| Peer metrics | Opaque map (key → value), never an input to price | The peer controls its own metrics, so pricing from them lets it price itself |
+| Direction classes | Counters kept per adapter-defined class | Uplink and downlink are different goods; the core stays ignorant of what the classes mean |

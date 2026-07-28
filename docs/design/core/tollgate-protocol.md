@@ -16,7 +16,7 @@ All messages use **CBOR** ([RFC 8949](https://www.rfc-editor.org/rfc/rfc8949)) e
 
 **Why CBOR over binary (FIPS-style)?**
 - TollGate is transport-agnostic — messages may traverse different substrates. Self-describing format avoids custom parsers per transport.
-- Variable-length fields (mint URLs, product lists) are natural in CBOR, awkward in fixed binary.
+- Variable-length fields (mint URLs, class names) are natural in CBOR, awkward in fixed binary.
 - Well-supported in Rust (`ciborium`, `minicbor`), Go, Python, TypeScript — important for interop with Cashu Spilman ecosystem.
 - Compact enough for constrained devices (ESP32). CBOR is more compact than JSON, comparable to Protocol Buffers for small messages.
 
@@ -24,7 +24,7 @@ All messages use **CBOR** ([RFC 8949](https://www.rfc-editor.org/rfc/rfc8949)) e
 - Larger on the wire. Parsing overhead on constrained devices.
 
 **Why not FIPS-style binary?**
-- TollGate messages contain variable-length strings (mint URLs, units) and nested structures (product lists). Binary encoding for these is complex and fragile.
+- TollGate messages contain variable-length strings (mint URLs, units, class names). Binary encoding for these is complex and fragile.
 - FIPS binary encoding is optimized for fixed-structure, high-frequency, low-latency packets (TreeAnnounce, MMP reports). TollGate messages are infrequent (every 5s) and don't need that level of optimization.
 
 ### Message Structure
@@ -105,14 +105,14 @@ Suitable for higher-frequency exchanges, infrastructure peering, and lower-laten
 | Type | Name | Direction | Purpose |
 |------|------|-----------|---------|
 | 0x00 | Announce | Bidirectional | "I am a TollGate node" — protocol version, pubkey |
-| 0x01 | PriceSheet | Bidirectional | Offer products and per-peer pricing (each side sends) |
-| 0x02 | Accept | Bidirectional | Accept price sheet, provide Spilman funding |
+| 0x01 | Offer | Bidirectional | Mint URL, unit, direction classes, interval range, voucher price |
+| 0x02 | Accept | Bidirectional | Accept the offer, provide Spilman funding |
 | 0x03 | ChannelReady | Bidirectional | Confirm Spilman channel funded and active |
 | 0x04 | MeteringReport | Bidirectional | Unsigned resource stats for this interval |
 | 0x05 | BalanceUpdate | Net debtor → creditor | Signed Spilman update for the net amount owed |
 | 0x06 | BalanceAck | Net creditor → debtor | Confirm balance update accepted |
-| 0x07 | BootstrapToken | Peer → Provider | Regular Cashu token (pre-channel bootstrap) |
-| 0x08 | BootstrapAck | Provider → Peer | Acknowledge bootstrap token |
+| 0x07 | *reserved* | — | Was BootstrapToken; bootstrap is removed |
+| 0x08 | *reserved* | — | Was BootstrapAck; bootstrap is removed |
 | 0x09 | RolloverInit | Sender → Receiver | New channel alongside exhausting one |
 | 0x0A | RolloverReady | Receiver → Sender | New channel funded, ready |
 | 0x0B | ChannelClose | Either → Either | Request cooperative close |
@@ -144,55 +144,54 @@ Both peers send Announce. If versions don't match, the peer with the lower versi
 
 | Bit | Name | Meaning |
 |-----|------|---------|
-| `0x01` | SPILMAN | Peer can fund and sign Spilman channels. If unset, the peer is bootstrap-only — see [tollgate-bootstrap.md](tollgate-bootstrap.md). |
-| `0x02`–`0x80000000` | reserved | Must be zero in v1. Reserved for future capabilities (e.g., FSP transport, batch settlement). |
+| `0x01`–`0x80000000` | reserved | Must be zero in v1. Reserved for future capabilities (e.g., FSP transport, batch settlement). |
 
-Bootstrap-token support, zero-price peering, and channel rollover are universal in v1 and don't need capability bits — they fall out of the existing message set.
+Spilman support is universal in v1 — there is no per-token payment mode to signal. Zero-price peering and channel rollover fall out of the existing message set and need no capability bit either.
 
-A peer with SPILMAN unset will not send Accept with channel funding; the session runs entirely on BootstrapToken messages. A SPILMAN-capable peer connecting to a bootstrap-only peer skips the receiving-channel funding (no point — the peer never charges) and only opens its own outgoing channel if it intends to charge for delivery to the bootstrap-only peer.
+### 0x01 Offer
 
-### 0x01 PriceSheet
+Sent by each peer after Announce. Declares where the sender's own vouchers come from and how it will deal with the other side's.
 
-Sent by each peer after Announce. Contains one or more product offerings with per-peer pricing. The peer chooses one product and one mint option. This is the "take it or leave it" offer.
+There is no price for delivery: one voucher buys one unit
+([tollgate-pricing.md](tollgate-pricing.md)). The only price here is
+`voucher_price`, which is what this node will pay, or charge, to hold the
+*peer's* vouchers.
 
 ```cbor
 {
-  0: 0x01,                         // type: PriceSheet
-  1: [                             // array of products
-    {
-      1: <product_id>,             // bytes(32) — SHA256 of full product (including pricing)
-      2: <extensions>,              // bytes — CBOR-encoded implementation-specific fields
-      3: <pricing_scale>,          // u32 — default 1000
-      4: [                         // array of mint options
-        {
-          1: <option_id>,          // bytes(32) — domain-tagged hash of (mint_url, mint_unit); see below
-          2: <mint_url>,           // text — mint URL
-          3: <price_per_second>,   // i64 — scaled integer
-          4: <price_per_unit>,          // i64 — scaled integer
-          5: <mint_unit>,          // text — "sat", "msat", "usd"
-        },
-        ...
-      ],
-    },
-    ...
-  ],
-  2: [<min_interval_ms>, <max_interval_ms>],  // [u32, u32] — metering interval range
+  0: 0x01,                         // type: Offer
+  1: <mint_url>,                   // text — this node's own mint
+  2: <unit>,                       // text — "byte", "wh", "ml"
+  3: [<class>, ...],               // array of text — direction classes, e.g. ["up", "down"]
+  4: [<min_interval_ms>, <max_interval_ms>],  // [u32, u32] — metering interval range
+  5: <voucher_price>,              // i64 | null — scaled price of the PEER's vouchers;
+                                   //   > 0 we buy them, 0 even swap,
+                                   //   < 0 the peer pays us to hold them,
+                                   //   null we refuse them (default)
+  6: <price_scale>,                // u32 — divisor for voucher_price; default 1000
 }
 ```
 
+Keysets, and therefore per-class amounts, are fetched from `mint_url` by
+ordinary Cashu means (NUT-01/02). The protocol does not restate them.
+
+`voucher_price` is the only field that can change mid-session, and only via
+MeteringReport.
+
 ### 0x02 Accept
 
-Sent by the peer to accept the price sheet. References the chosen product and mint option by their hashed IDs — no ambiguity about which pricing was selected.
+Sent by the peer to accept the offer and fund its outgoing channel.
 
 ```cbor
 {
   0: 0x02,                         // type: Accept
-  1: <product_id>,                 // bytes(32) — echoes the accepted product
-  2: <option_id>,                  // bytes(32) — chosen mint option (by hash)
-  3: [<min_interval_ms>, <max_interval_ms>],  // [u32, u32] — peer's interval range
-  4: <channel_funding>,            // bytes — Spilman funding proofs (CBOR-encoded)
+  1: [<min_interval_ms>, <max_interval_ms>],  // [u32, u32] — peer's interval range
+  2: <channel_funding>,            // bytes — Spilman funding proofs (CBOR-encoded)
 }
 ```
+
+There is no product or option to echo back: the offer carries a single mint,
+a single unit, and one voucher price.
 
 The metering interval is resolved deterministically by both sides:
 ```
@@ -230,24 +229,23 @@ Sent by both peers at each metering interval. Contains **unsigned** resource sta
 {
   0: 0x04,                         // type: MeteringReport
   1: <elapsed_ms>,                 // u64 — milliseconds since session start (cumulative)
-  2: <delivered>,                   // u64 — cumulative units we delivered TO this peer since session start
-  3: <received>,                    // u64 — cumulative units we received FROM this peer since session start
-  4: <new_product_id>,             // bytes(32) | null — updated product ID for next interval
-  5: <new_pricing>,                // array | null — updated pricing if product_id changed
+  2: [{<class>: <delivered>}, ...], // cumulative units we delivered TO this peer, per class
+  3: [{<class>: <received>}, ...],  // cumulative units we received FROM this peer, per class
+  4: <new_voucher_price>,          // i64 | null — updated price for the peer's vouchers
 }
 ```
 
-Both peers send MeteringReport. Each side computes the interval delta (`current_cumulative - previous_cumulative`) for delivered and received units. Once both reports are received, each side independently computes:
-1. Cost A owes B = B's pricing × units B delivered to A this interval + B's time price × elapsed
-2. Cost B owes A = A's pricing × units A delivered to B this interval + A's time price × elapsed
-3. Net = cost A owes B - cost B owes A
-4. If net > 0: A is the debtor (sends BalanceUpdate on A→B channel)
-5. If net < 0: B is the debtor (sends BalanceUpdate on B→A channel)
-6. If net = 0: no BalanceUpdate needed
+Both peers send MeteringReport. Each side computes the interval delta (`current_cumulative - previous_cumulative`) per class. Once both reports are received, each side independently computes:
+1. Units A delivered to B this interval — B owes A that many A-vouchers
+2. Units B delivered to A this interval — A owes B that many B-vouchers
+3. Any voucher-price settlement agreed under paid acceptance
+4. Net per channel; the debtor sends BalanceUpdate, the creditor acks
 
-This is deterministic — both sides compute the same result from the same inputs.
+Delivery itself needs no arithmetic — one voucher per unit
+([tollgate-pricing.md](tollgate-pricing.md)) — so both sides trivially agree
+on the amounts. This is deterministic.
 
-**Fields 4-5** are the price renegotiation mechanism. If the provider wants to change prices, it includes the new product_id and pricing. The peer must accept (by continuing with next MeteringReport) or reject (by sending ChannelClose).
+**Field 4** is the only renegotiation mechanism left. A node that wants to change what it pays or charges to hold the peer's vouchers includes the new value; the peer accepts by continuing, or rejects with ChannelClose. Delivery cannot be repriced mid-session — the peer already holds the vouchers and their claim is fixed.
 
 ### 0x05 BalanceUpdate
 
@@ -275,28 +273,16 @@ Sent by the creditor to confirm the balance update.
 }
 ```
 
-### 0x07 BootstrapToken
+### 0x07, 0x08 — reserved
 
-Sent when a peer can't reach a mint and needs to pay with a regular Cashu token to get online.
+These carried BootstrapToken and BootstrapAck. Bootstrap is removed: the
+mint a peer needs is the peer it is already talking to, so mint reachability
+is never the obstacle the mechanism existed for. How a peer acquires
+vouchers is outside the protocol — see
+[voucher-acquisition.md](../market/voucher-acquisition.md).
 
-```cbor
-{
-  0: 0x07,                         // type: BootstrapToken
-  1: <token>,                      // bytes — raw Cashu token (NUT-00 format)
-}
-```
-
-### 0x08 BootstrapAck
-
-```cbor
-{
-  0: 0x08,                         // type: BootstrapAck
-  1: <status>,                     // u8 — 0 = accepted (verified), 1 = rejected
-  2: <reason>,                     // text | null — rejection reason
-}
-```
-
-The provider must verify the token with the mint before sending `accepted`. If the mint is unreachable, the response is `rejected` with reason "mint unreachable" — there is no pending / trust-on-faith mode. See [tollgate-bootstrap.md](tollgate-bootstrap.md) for the full bootstrap policy.
+The type codes stay reserved rather than reused, so an old implementation
+sending one gets a clean Reject instead of a misparse.
 
 ### 0x09 RolloverInit
 
@@ -363,15 +349,16 @@ General-purpose rejection for any proposal.
 
 | Code | Meaning |
 |------|---------|
-| 0x01 | Price too high |
+| 0x01 | Voucher price unacceptable |
 | 0x02 | Mint not accepted |
 | 0x03 | Unit not accepted |
 | 0x04 | Metering interval out of range |
 | 0x05 | Channel funding invalid |
 | 0x06 | Balance verification failed |
 | 0x07 | Transit loss tolerance exceeded |
-| 0x08 | Product changed, renegotiation required |
+| 0x08 | Direction class not supported |
 | 0x09 | Protocol version unsupported |
+| 0x0A | Message type retired (bootstrap) |
 | 0xFF | Other (see reason_text) |
 
 ### 0x0E Disconnect
@@ -389,9 +376,9 @@ Orderly teardown of the entire TollGate relationship.
 
 ## Message Sequences
 
-Both sides send PriceSheet and Accept because each charges independently. The interval flow is deterministic: both sides have the same metering data and pricing, so they compute the same net independently.
+Both sides send Offer and Accept because each delivers independently. The interval flow is deterministic: delivery is one voucher per unit, so both sides compute the same amounts from the same metering data.
 
-### Normal Connection (Peer Already Online)
+### Connection
 
 ![Normal Connection Sequence](diagrams/connection-sequence.svg)
 <details><summary>Text version</summary>
@@ -401,9 +388,9 @@ Both sides send PriceSheet and Accept because each charges independently. The in
      A → B: Announce (v1, pubkey_A, capabilities)
      B → A: Announce (v1, pubkey_B, capabilities)
 
-  2. Pricing
-     A → B: PriceSheet (products, prices)
-     B → A: PriceSheet (products, prices)
+  2. Offer
+     A → B: Offer (mint, unit, classes, interval range, voucher price)
+     B → A: Offer (mint, unit, classes, interval range, voucher price)
 
   3. Channels
      B → A: Accept + funding (B→A channel)
@@ -412,56 +399,37 @@ Both sides send PriceSheet and Accept because each charges independently. The in
      A → B: ChannelReady (A→B)
 
   4. Settle (repeat every metering interval)
-     A → B: MeteringReport (cumulative delivered, received)
-     B → A: MeteringReport (cumulative delivered, received)
+     A → B: MeteringReport (cumulative delivered, received, per class)
+     B → A: MeteringReport (cumulative delivered, received, per class)
      [both compute net]
      debtor → creditor: BalanceUpdate (signed)
      creditor → debtor: BalanceAck
 ```
 </details>
 
-### Bootstrap Connection (Peer Offline, No Mint)
+A peer arrives already holding the other side's vouchers, or it gets no
+service. There is no pre-channel phase.
 
-![Bootstrap Connection](diagrams/bootstrap-upgrade.svg)
-<details><summary>Text version</summary>
-
-```
-  1. Bootstrap (B has no mint path)
-     A → B: Announce
-     B → A: Announce
-     A → B: PriceSheet
-     B → A: BootstrapToken (regular Cashu token)
-     A → B: BootstrapAck (status=accepted)
-     [A grants B metered access — enough for B to reach a mint]
-
-  2. Upgrade to Spilman (B now has mint connectivity)
-     B → A: PriceSheet
-     A → B: Accept (with Spilman funding)
-     B → A: Accept (with Spilman funding)
-     B → A: ChannelReady
-     A → B: ChannelReady
-     [Spilman channels active — remaining bootstrap balance abandoned]
-```
-</details>
-
-### Price Change at Metering Interval
+### Voucher Price Change at Metering Interval
 
 ![Price Change](diagrams/price-change.svg)
 <details><summary>Text version</summary>
 
 ```
-  A wants to raise price for B:
+  A wants to change what it pays or charges to hold B's vouchers:
 
-  A → B: MeteringReport (fields 4-5: new_product_id + new_pricing)
+  A → B: MeteringReport (field 4: new_voucher_price)
 
   alt: ACCEPT (continue)
        B → A: MeteringReport (continues normally)
-       [next interval uses new price]
+       [next interval uses the new price]
 
   alt: REJECT (close)
        B → A: ChannelClose (reason=price_rejected)
        A → B: CloseAck
        [channel settles, B may renegotiate or disconnect]
+
+  Delivery is never repriced — B already holds A's vouchers.
 ```
 </details>
 
@@ -491,8 +459,8 @@ Both sides send PriceSheet and Accept because each charges independently. The in
   A → B: Announce
   B → A: Announce
 
-  A → B: PriceSheet (all prices = 0)
-  B → A: PriceSheet (all prices = 0)
+  A → B: Offer (zero-price peering)
+  B → A: Offer (zero-price peering)
   B → A: Accept (no Spilman funding — zero price)
   A → B: Accept (no Spilman funding — zero price)
 
@@ -517,14 +485,12 @@ Typical message sizes (CBOR encoded):
 | Message | Estimated size |
 |---------|---------------|
 | Announce | ~40 bytes |
-| PriceSheet (1 product, 1 mint) | ~120 bytes |
-| PriceSheet (2 products, 3 mints) | ~350 bytes |
-| Accept | ~200 bytes (dominated by Spilman funding) |
+| Offer | ~90 bytes |
+| Accept | ~180 bytes (dominated by Spilman funding) |
 | ChannelReady | ~40 bytes |
-| MeteringReport | ~50 bytes |
+| MeteringReport | ~70 bytes (two direction classes) |
 | BalanceUpdate | ~110 bytes |
 | BalanceAck | ~40 bytes |
-| BootstrapToken | Variable (Cashu token size) |
 | RolloverInit | ~200 bytes (Spilman funding) |
 | ChannelClose | ~110 bytes |
 | Disconnect | ~10 bytes |
@@ -542,12 +508,13 @@ These are infrequent messages (every 5s at the metering interval, one-time for s
 | Field keys | Small integers, not strings | Compact, avoids string overhead in CBOR |
 | Message discrimination | Integer `type` field (key 0) | Simple, extensible |
 | First message | Announce (protocol version + pubkey) | Identifies TollGate capability before negotiation |
-| Mint option ID | `SHA256("tollgate/option-id/v1" \| len(mint_url) \| mint_url \| len(mint_unit) \| mint_unit)` (lengths u32 big-endian) | Unambiguous reference to chosen pricing option; length-prefixed + domain-tagged like `product_id` so implementations can't disagree on field boundaries |
 | Metering counters | Cumulative since session start, not deltas | Self-healing: lost/duplicated reports don't corrupt accounting |
 | Interval flow | MeteringReport (both) → BalanceUpdate (net debtor only) → Ack | Deterministic netting, only net amount moves |
-| Price changes | Piggybacked on MeteringReport (fields 4-5) | No extra round-trips |
+| Delivery pricing | None in the protocol — one voucher per unit | A voucher is a claim on one unit, so redemption is delivery |
+| Voucher price changes | Piggybacked on MeteringReport (field 4) | No extra round-trips; the only price that can change mid-session |
+| Bootstrap messages | Removed, type codes 0x07/0x08 left reserved | The mint a peer needs is the peer it is talking to; a retired code should Reject cleanly rather than misparse |
 | Zero-price mode | Accept without funding, skip metering | Simplest path for free peering |
 | Channel ownership | Each peer manages its own outgoing channel | Channels carry shared state, but rollover is initiated by the funder alone — only the party putting up new funds decides when to do it |
-| Capability signaling | u32 bitfield in Announce (field 4) | Lets peers know up front whether the other side can run Spilman; extensible via reserved bits |
+| Capability signaling | u32 bitfield in Announce (field 4), all bits reserved in v1 | Spilman is universal now that per-token payment is gone; the field stays for future use |
 | Versioning | Single byte in Announce, must-match | Simple for v1, can add negotiation later |
 | Reject | General-purpose with reason codes | One message type handles all rejection scenarios |

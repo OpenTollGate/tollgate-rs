@@ -88,7 +88,7 @@
   <!-- Legend -->
   <text x="100" y="372" class="caption">1 Per-peer delivery policy</text>
   <text x="100" y="387" class="caption">2 Bloom filter exclusion</text>
-  <text x="350" y="372" class="caption">3 MMP metrics for dynamic pricing</text>
+  <text x="350" y="372" class="caption">3 MMP metrics for operator visibility</text>
   <text x="350" y="387" class="caption">4 Peer connect/disconnect callbacks</text>
   <text x="570" y="372" class="caption">5 TollGate message transport</text>
 </svg>

@@ -1,12 +1,9 @@
-# TollGate Vouchers (Proposal)
+# TollGate Vouchers
 
-> **Status: proposal — not adopted.** Nothing in this document is implemented
-> or normative. The adopted payment model is sat-denominated Cashu with
-> Spilman channels, specified in
-> [tollgate-payment-channels.md](tollgate-payment-channels.md) and
-> [tollgate-pricing.md](tollgate-pricing.md). This document records an
-> alternative worth evaluating, the arguments for and against it, and the
-> parts of it worth adopting on their own.
+This document specifies what TollGate peers pay each other with. It is the
+basis for [tollgate-pricing.md](tollgate-pricing.md), which covers what
+things cost, and [tollgate-payment-channels.md](tollgate-payment-channels.md),
+which covers how payments are batched.
 
 **Voucher** is the plain name for what a Cashu token *means* when its keyset
 is denominated in bytes and its mint is the node that will deliver them: a
@@ -24,22 +21,26 @@ Three things change, and nothing else:
 - the mint is run by the node that will deliver those bytes
 - redemption means that node delivers, rather than a mint paying out
 
-The proposal: each node runs its own mint and issues vouchers instead of
-quoting prices in sats. Two peers set the exchange rate between their
-vouchers themselves, with an optional market on top for price discovery.
+Each node runs its own mint and issues vouchers rather than quoting prices
+in sats. Two peers settle the exchange rate between their vouchers
+themselves, with an optional market on top for price discovery.
 
 ---
 
-## Motivation
+## Why
 
-Pricing today is bilateral and take-it-or-leave-it
-([tollgate-pricing.md](tollgate-pricing.md)). A peer cannot compare two
-providers without connecting to both, and nothing in the design prices an
-operator's reliability. A node that takes payment and delivers poorly is
-noticed only by the peer that already paid it.
+An earlier design priced delivery directly: products, price sheets, per-mint
+rates, per-peer multipliers, and a take-it-or-leave-it renegotiation at
+every metering interval. It worked, but pricing was private to each pair of
+peers. A peer could not compare two providers without connecting to both,
+and nothing anywhere priced an operator's *reliability* — a node that took
+payment and delivered poorly was noticed only by the peer that had already
+paid it.
 
-Vouchers move price discovery out of the private price sheet, where only the
-two peers can see it, into a form any node can read.
+Vouchers move price discovery out of the private price sheet into a form any
+node can read, and take pricing out of the protocol altogether. What an
+issuer's vouchers fetch is a public, continuously updated measure of what
+the network expects it to deliver.
 
 ---
 
@@ -60,9 +61,9 @@ for water. The existing keyset machinery covers all of them unchanged.
 
 The buyer thinks in rates. The metering interval is fixed for the peering
 before any payment happens (both peers send an acceptable range and the
-interval is the average of the overlap — see Price Negotiation in
-[tollgate-pricing.md](tollgate-pricing.md)), so the amount to hand over each
-interval is the product:
+interval is the average of the overlap — see the Accept message in
+[tollgate-protocol.md](tollgate-protocol.md)), so the amount to hand over
+each interval is the product:
 
 ```
 voucher_amount = desired_rate × interval
@@ -102,7 +103,9 @@ equivalent of the watt-hour.
 
 The unit is shared; the issuer is not. A 1 KiB voucher from a reliable
 gateway and a 1 KiB voucher from an unreliable one both claim 1024 bytes,
-and they are worth different amounts.
+and they are worth different amounts. What that difference means, and how it
+becomes a public signal about an operator, is covered in
+[voucher-price-signal.md](../market/voucher-price-signal.md).
 
 Byte denomination makes metering exact, so every payment lands on a whole
 number of units. The cost of that precision is proof count: amounts are
@@ -110,19 +113,6 @@ powers of two and a payment takes one proof per set bit, so the count scales
 with how many bits the number has. A 1 GiB payment is a 30-bit number and
 takes up to 30 proofs, about 15 on average. That is what the spent-proof set
 below has to absorb.
-
-What an issuer's voucher sells for, compared to the quantity printed on it,
-is therefore a direct measure of how much the network expects that issuer to
-deliver:
-
-| Selling price of a 1 KiB voucher | What it means |
-|---|---|
-| 1.00 KiB | Full value — the market expects redemption in full |
-| 0.70 KiB | Issued more than it can deliver, unreliable, or in low demand |
-| 1.05 KiB | In demand — access to this node is scarce |
-
-The adopted design has no comparable signal. Here it is public, updated
-continuously, and set by people who lose money if they get it wrong.
 
 ---
 
@@ -133,9 +123,8 @@ minted against says who owes the delivery; the amount says how much. There
 is no extra structure — a wallet that can hold sat-denominated proofs can
 hold these.
 
-Each direction of a peering is priced and paid on its own, exactly as today.
-What changes is what you pay with: **you pay in the vouchers of whoever is
-delivering.**
+Each direction of a peering is settled on its own. **You pay in the vouchers
+of whoever is delivering**, one voucher per unit.
 
 ![Voucher Lifecycle](diagrams/voucher-lifecycle.svg)
 <details><summary>Text version</summary>
@@ -172,11 +161,11 @@ B gains nothing from receiving A's upload. It is not a service A performs
 for B; it is traffic B has to carry onward on A's behalf, at a cost to B.
 So **A has to pay for its upload too**.
 
-The payment protocol says the deliverer charges, and on the upload leg the
+The payment protocol says the deliverer is paid, and on the upload leg the
 deliverer is A. Taken literally that has B owing A for A's own outgoing
-traffic. Correcting it inside the payment flow is what forces signed prices,
-sign-aware metering and a subsidy budget — the machinery described in
-[tollgate-pricing.md](tollgate-pricing.md).
+traffic. Correcting it inside the payment flow would mean signed delivery
+prices, sign-aware metering and a spending budget to stop the resulting
+subsidy running away.
 
 Paid acceptance corrects it outside the payment flow instead. A issues its
 own vouchers, which B has no use for. A **pays B — in B's vouchers — to hold
@@ -344,69 +333,60 @@ spendable anywhere else.
 
 ---
 
-## What It Costs
+## Accepted Limitations
 
-**Zero-trust payment does not survive.** This is the main objection. What
-protects a sender from a receiver who takes payment and disappears is
-Spilman's time-locked refund, and the mint is what honors it. When the
-provider is the mint, the only party who can cheat is also the party that
-would have to honor the refund. It will simply refuse.
+These are the costs of the design, accepted deliberately. They are not
+resolved.
+
+**Payment is not zero-trust.** What protects a sender from a receiver who
+takes payment and disappears is Spilman's time-locked refund, and the mint
+is what honors it. When the provider is the mint, the only party who can
+cheat is also the party that would have to honor the refund. It will simply
+refuse.
 
 No cryptography fixes this. Two things limit it instead:
 
 - **Policy** — the loss is however many vouchers are held or committed at
-  once. Hold one interval's worth, risk one interval's worth. The adopted
-  design already accepts this same bound for receiver-rugpull.
+  once. Hold one interval's worth, risk one interval's worth. This is the
+  same bound already accepted for a receiver who settles and vanishes.
 - **Reputation** — an issuer that stops redeeming sees its vouchers sell for
   less, which makes everything it issues later worth less too.
 
-That is a workable model, but it rests on reputation rather than
-cryptography, and [tollgate-intro.md](tollgate-intro.md) currently claims
-the stronger property. Adopting vouchers means withdrawing that claim, not
-rewording it.
-
-**Cross-mint atomic swap has no working implementation.** Buying vouchers on
-a market needs one of: a Lightning hop (fees, seconds, liquidity), a
-NUT-11/NUT-14 hash-locked swap (several round trips, both mints online, a
-counterparty), or a trusted exchange (which defeats the point). None of them
-survives running once per metering interval, so market purchases have to be
-made in bulk and used up slowly — which brings back the bulk prepayment
-model [tollgate-intro.md](tollgate-intro.md) deliberately moved away from,
-and puts all the issuer risk in whatever you are holding.
-
-Paid acceptance takes this off the critical path: the exchange happens inside
-the peering, priced by the counterparty, checked in one hop. The problem
-still applies to the reliability signal, which needs a market to exist.
+That is a workable security model, but it rests on reputation rather than
+cryptography. [tollgate-intro.md](tollgate-intro.md) states it in those
+terms; any claim of a cryptographic guarantee against a defaulting issuer
+would be false.
 
 **Getting hold of vouchers is continuous, not one-time.** Sats can be loaded
 in advance from anywhere. Vouchers cannot, because you do not know which
 node you will meet. Every new peering needs vouchers acquired before it can
-pay for anything. That is no longer a protocol concern (see Acquiring
-Vouchers below), which simplifies the protocol but leaves the peer to solve
-it — with another link, a Lightning payment, or a node willing to swap sats
-locally.
+pay for anything. That is not a protocol concern (see Acquiring Vouchers
+below), which keeps the protocol small but leaves the peer to solve it — via
+another link, a Lightning payment, or a node willing to swap sats locally.
 
 **Relays hold two kinds of vouchers.** A relay receives its own vouchers
 from downstream and needs upstream vouchers to pay onward. Its margin is the
 gap between the two, and it has to keep rebalancing. On an ESP32 that is a
-real new burden.
+real burden.
 
-Paid acceptance reduces this without removing it. A relay's capacity is
+Paid acceptance reduces it without removing it. A relay's capacity is
 genuinely useful to its upstream, because return traffic flows through it,
 so the relay's own vouchers price positive and it holds fewer foreign ones.
 The burden lands hardest on leaf nodes, which are net consumers bringing in
 outside money anyway.
 
-**Market liquidity is unproven.** Each issuer is its own small, thin market.
-Anyone making that market has to hold vouchers, and holding them means
-taking the risk that an anonymous router stops redeeming. The case for doing
-that business is the weakest part of the proposal — though once vouchers can
-be acquired directly from the issuer, the market only buys the reliability
-signal and is not needed to move value.
+**A market needs liquidity that may not appear.** Each issuer is its own
+small, thin market, and cross-mint atomic swap has no working
+implementation. None of that blocks operation — vouchers can be bought
+directly from the issuer, and paid acceptance exchanges them inside the
+peering. It blocks the **reliability signal**, which is the original reason
+for the design and the part least likely to arrive on its own. See
+[voucher-price-signal.md](../market/voucher-price-signal.md) and
+[voucher-acquisition.md](../market/voucher-acquisition.md).
 
 ---
 
-## Spilman Channels Under Vouchers
+## Spilman Channels
 
 Channels are still needed, but **for a different reason: keeping the
 issuer's database small, not preventing theft.**
@@ -460,174 +440,76 @@ Two consequences:
 
 ## Acquiring Vouchers
 
-Bootstrap tokens solve a problem vouchers do not have. A new peer cannot
-fund a Spilman channel without reaching a mint, and cannot reach a mint
-without first getting online
-([tollgate-bootstrap.md](tollgate-bootstrap.md)). When the mint *is* the
-peer you are already talking to, reachability is never the obstacle — a peer
-can mint, swap and fund against its counterparty over the peering link
-alone, with no upstream connectivity at all.
+**How a peer came to hold vouchers is not the protocol's business**, any
+more than how it came to hold sats. It arrives holding vouchers for the node
+it wants service from, or it does not get service.
 
-**So the bootstrap mechanism comes out of the protocol entirely.** How a
-peer came to hold vouchers is no more the protocol's business than how it
-came to hold sats today. It arrives holding them, or it does not get
-service.
+The routes — Lightning mint quotes, direct purchase from the issuer, local
+swaps of sat tokens, cross-mint swaps — are covered in
+[voucher-acquisition.md](../market/voucher-acquisition.md), along with why
+there is no bootstrap mechanism and what removing it cost.
 
-Two routes exist, both outside the protocol:
-
-- **Mint over Lightning.** The peer requests a quote from the node's mint,
-  pays the invoice, and receives byte-vouchers (NUT-04). This needs the peer
-  to have some connectivity already — another peering, a cellular link, or
-  the minimum flow allowance.
-- **Swap locally.** The peer offers sat-denominated tokens and the node
-  issues byte-vouchers in return, if it wants those sats. The node has
-  upstream connectivity and can verify them.
-
-Neither needs protocol support. In the second case the node is acting as a
-market participant, not executing a protocol phase.
-
-**This is a market problem, not a payment protocol problem.** Moving it
-there removes a whole subsystem: the bootstrap state machine, its message
-types, its mint-verification path, and the `bootstrap` config block. The
-peer state machine loses `bootstrap_received` and starts at channel
-establishment.
-
-What it costs: the design stops guaranteeing that a peer holding only sats
-can walk up to any node and get connected. The local swap recovers that for
-nodes choosing to offer it, but it is no longer something every node must
-implement — which also means it is no longer something every constrained
-device must implement.
+The one thing worth noting here: a peer can mint, swap and fund against its
+counterparty **over the peering link alone**, because the mint it needs is
+the peer it is already talking to. Mint reachability is never the obstacle
+it used to be.
 
 Paying per token for a whole session instead of opening channels still
-works, but the cost moves to the provider. Every interval's payment lands in
-the issuer's spent-proof set, which is the growth channels exist to avoid.
+works, but the cost falls on the provider. Every interval's payment lands in
+its spent-proof set, which is the growth channels exist to avoid.
 
 ---
 
-## Effect on Negative Pricing
+## Why the Negative Price Is Safe Here
 
-The adopted design treats negative pricing as a core mechanism
-([tollgate-pricing.md](tollgate-pricing.md)). Under vouchers it does not
-disappear. It **moves off the traffic leg and onto the voucher leg**, where
-it cannot be abused.
+A peer accepting another node's vouchers *is* being paid to take something
+it did not ask for — a negative price, in the ordinary sense. What makes it
+safe is that it sits on the **voucher** leg rather than the traffic leg.
 
-B accepting A's vouchers *is* a negative price: B is paid, in B-vouchers, to
-take something it did not ask for. That is the same shape as the adopted
-design's "pay a peer to accept" — but applied to vouchers instead of
-traffic.
+Whether B took the vouchers is a fact. B gains nothing by taking them and
+lying about it. Whether B did anything useful with traffic is not a fact
+anyone can establish, which is why the same arrangement is dangerous there
+(see Never Price Traffic Acceptance in
+[tollgate-pricing.md](tollgate-pricing.md)).
 
-The difference is what can be checked. Whether B took the vouchers is a
-fact, and B gains nothing by taking them and lying about it. Whether B did
-anything useful with traffic is not a fact anyone can establish, which is
-why the same arrangement is dangerous there.
-
-**The hazard was never the negative sign. It was pricing acceptance of
+**The hazard was never the negative sign. It is pricing acceptance of
 something whose acceptance can be faked.**
 
-Everything below follows from moving it to the leg where acceptance is
-verifiable.
+Two further properties follow from paying in vouchers rather than money.
 
-A pays B in **B's vouchers**, acquired either from B directly or on a
-market. Either way they exist only because B issued them, and B issues
-against capacity someone believed it would deliver.
-
-A node whose service nobody wants therefore has no vouchers in circulation
-and **cannot be paid at all**. What you pay with is itself a filter against
-peers that discard traffic and against fake identities. And a node receiving
-its own vouchers back is only canceling a claim it previously sold — worth
-what someone paid for it, which required believing it would deliver. The
-subsidy can never exceed what the issuer already earned by selling the
-vouchers in the first place.
-
-Re-reading the adopted design's negative-price cases:
-
-| Adopted case | Under vouchers |
-|---|---|
-| Leaf pays peer to carry its outgoing traffic | The leaf is *buying uplink*. Ordinary positive payment. The sign flip existed only because the design prices the **direction bytes travel** rather than **who the service is for**. |
-| Node pays peers to attract resources | The node quotes a positive price for its peer's vouchers and buys them, because it wants what that peer delivers. The cost is bounded and deliberate rather than set by a formula the peer can manipulate. |
-| Same-operator pair, zero price both ways | Issue each other vouchers freely, or keep the zero-price shortcut. Unchanged. |
-
-### Subsidy Is Paid For, Not Given Away
-
-Issuing your own vouchers is not free. Under paid acceptance you **pay to
-have your vouchers taken** — the `m` component is the real transfer, and how
-far below zero B prices them is what B charges for taking on that risk. A
-node with unwanted capacity does not subsidize by printing. It subsidizes by
-buying its peer's vouchers.
-
-Two things follow that a sat-denominated subsidy does not give you:
+**The instrument filters out sinks.** A pays B in B's vouchers, which exist
+only because B issued them, against capacity somebody believed it would
+deliver. A node whose service nobody wants has no vouchers in circulation
+and therefore **cannot be paid at all**. Fake identities and traffic
+discarders are excluded by what you pay with, before any policy has to
+notice them.
 
 **Subsidy and revenue use the same vouchers.** A node cannot increase its
 subsidy without making the vouchers its paying customers hold worth less.
 Issuing beyond capacity dilutes every outstanding claim, including the ones
 it sold for real money, so overissuing punishes the issuer directly rather
-than merely being detectable.
+than merely being detectable. A node receiving its own vouchers back is
+canceling a claim it previously sold, so a subsidy can never exceed what the
+issuer already earned by selling those vouchers.
 
-**There is no wallet to drain.** A sat-denominated subsidy drains because
-the paying node funds an outgoing channel that rolls over automatically —
-an unattended loop limited only by wallet balance (see
-[tollgate-configuration.md](tollgate-configuration.md)). Under paid
-acceptance there is no standing outgoing channel to refill. Every subsidy
-payment is a deliberate purchase of the peer's vouchers, in a fixed amount,
-at a quoted voucher price. The worst case is a subsidy that does not work, not an
-empty wallet, and that holds without the operator configuring anything
-correctly.
+**There is no wallet to drain.** A money-denominated subsidy drains because
+the paying node funds an outgoing channel that rolls over automatically — an
+unattended loop limited only by wallet balance. Under paid acceptance there
+is no standing outgoing channel to refill. Every subsidy payment is a
+deliberate purchase of the peer's vouchers, in a fixed amount, at a quoted
+price. The worst case is a subsidy that does not work, not an empty wallet,
+and it holds without the operator configuring anything correctly.
 
 Two problems remain — selling vouchers without redeeming them, and too many
 redemptions arriving at once. Both are in Open Problems below.
-
-### Status of the Resolution
-
-The general point holds whether or not the full voucher model is adopted:
-**negative pricing is a symptom of pricing the wrong thing.**
-
-The decided direction is both parts together — price the service so whoever
-the service is for pays for both directions, and settle the one genuinely
-negative case with vouchers, at a voucher price the peer quotes. This is recorded
-as future work in the Negative Pricing section of
-[tollgate-pricing.md](tollgate-pricing.md), because the first part changes
-what the meter counts and reaches into the ResourceAdapter and the
-reconciliation path.
-
-The first part can be adopted **without** vouchers. It is a metering and
-pricing change against the existing sat model, and only the subsidy half
-depends on this proposal.
-
-The specific defects the analysis turned up have been fixed in place in the
-meantime: the negative-pricing constraints in
-[tollgate-pricing.md](tollgate-pricing.md), the deliverer-favoring metering
-rule in [tollgate-metering.md](tollgate-metering.md), and the subsidy
-budgets in [tollgate-configuration.md](tollgate-configuration.md).
-
-### The Case That Cannot Be Removed
-
-Negative pricing survives for **getting rid of surplus** — a node with more
-of something than it can use, paying others to take it. It cannot pay in its
-own vouchers, because those vouchers are a claim on the very thing it is
-trying to shed.
-
-For network forwarding this does not really come up; every apparent example
-turns out to be ordinary buying seen backwards. For **electricity it is
-real** — grids do go to negative prices — and `tollgate-core` is
-resource-agnostic, so it is in scope.
-
-Electricity is also the safe case. The meter is physical and the resource is
-conserved, so whether it was actually consumed can be measured, which is
-never true of forwarded bytes. Negative pricing is dangerous exactly where
-the resource can be quietly thrown away.
 
 ---
 
 ## Rate Auction and Token Bucket
 
-**This section does not depend on vouchers and can be adopted against the
-existing sat-denominated design today.** It is the most useful part of the
-proposal and the cheapest to build.
-
-Instead of a fixed `bandwidth_limit` in product extensions, let the payment
-set the allowance: what a peer pays during one interval determines the
-capacity it gets in the next. Each interval becomes a small auction for the
-link.
+Rather than a fixed bandwidth cap, the payment sets the allowance: what a
+peer pays during one interval determines the capacity it gets in the next.
+Each interval becomes a small auction for the link.
 
 Under vouchers this is the arithmetic from Buying a Rate, read backwards.
 The peer hands over `rate × interval` worth, and
@@ -658,8 +540,8 @@ comes from payment history instead of from static configuration.
 A small amount of traffic every peer gets without paying. It serves two
 purposes:
 
-- **Bootstrap.** A new peer cannot pay until it holds vouchers, and it
-  cannot acquire vouchers without connectivity. The allowance breaks that
+- **Getting started.** A new peer cannot pay until it holds vouchers, and
+  it cannot acquire vouchers without connectivity. The allowance breaks that
   circle.
 - **Basic access.** An operator may want any peer to be able to do the small
   things — resolve a name, fetch a message — whether or not it is paying.
@@ -707,49 +589,20 @@ gathers a large grant before spending it.
 
 ## Open Problems
 
+Problems belonging to the market layer — cross-mint swap, liquidity,
+selling without redeeming, redemption congestion, operator shutdown — are
+tracked in [issuer-risk.md](../market/issuer-risk.md) and
+[voucher-acquisition.md](../market/voucher-acquisition.md). What remains
+here is protocol-side.
+
 | Problem | Notes |
 |---|---|
-| Cross-mint atomic swap | No working Cashu implementation. Blocks the market, not basic operation — paid acceptance exchanges vouchers inside the peering. |
-| Market liquidity | Each issuer's market is small and thin, and anyone making it takes the risk that an anonymous operator stops redeeming. Needed for the reliability signal, not for moving value. |
-| Quoting the voucher price | Every node has to price every peer's vouchers, continuously. That is new work for the operator, and a node that accepts vouchers at close to full value quietly builds up vouchers it can never redeem. Refusing foreign vouchers by default helps, but does not say how any other price should be chosen. |
+| Quoting a price for a peer's vouchers | Every node has to price every peer's vouchers, continuously. That is new work for the operator, and a node accepting vouchers at close to full value quietly builds up paper it can never redeem. Refusing foreign vouchers by default avoids the question rather than answering it. |
 | Relays holding two kinds of vouchers | Multi-hop relays sit between two issuers and must keep rebalancing. Burdensome on constrained devices. |
 | Minimum-flow abuse | N free identities draw N allowances of real bandwidth, and one machine can run all N over the same link. Needs an aggregate cap across unpaid peers plus a cost to holding an identity. |
 | Locking the allowance | Issuing it P2PK-locked would close the resale route, but a lock only holds if it survives every swap including change, which standard Cashu mints do not do. Needs modified mint software or a scheme not yet designed. |
 | Allowance accumulation | Whether an unspent allowance carries into the next interval. Accumulating helps a peer that needs a burst, and equally helps an attacker gather a large grant before spending it. |
-| First connection with no connectivity | With bootstrap removed, a peer holding only sats and having no other link depends on a node choosing to swap sats for vouchers locally. Nothing in the protocol guarantees one will. |
-| Withdrawing the trust claim | [tollgate-intro.md](tollgate-intro.md) claims a cryptographic guarantee that vouchers cannot provide. |
-| Voucher expiry, operator shutdown | What happens to outstanding vouchers when an operator turns the node off. Unspecified. |
-| **Too many redemptions at once** | A voucher says how much but not when. Capacity is a rate and it is finite, so everyone redeeming at the same time can exceed it without the issuer doing anything wrong. Vouchers need a time element — an expiry, a validity window, or a queue. |
-| **Selling vouchers without redeeming them** | An issuer can hand vouchers to an accomplice, sell them for sats, and never redeem any. Reputation only corrects this if failures to redeem are visible to others, and nothing in the design makes them visible. Some way to report this is a prerequisite for reputation to work at all. |
-| Direction classes and vouchers | If pricing carries a rate per direction class, a voucher has to say which class it claims — a KiB of scarce uplink is not a KiB of downlink. Affects how interchangeable vouchers are, and how thin each market gets. |
-
----
-
-## Staged Adoption Path
-
-The four pieces are separable and should not be adopted together.
-
-1. **Rate auction and token bucket**, and **service pricing with direction
-   classes** — no protocol upheaval, both work against the adopted sat
-   model, most value for least risk. Service pricing is the larger change,
-   since it alters what the meter counts, but it does not depend on this
-   proposal at all. Adopt first.
-2. **Vouchers as an optional product type** — a node sells "1 GiB of my
-   capacity" for sats alongside its ordinary priced products, and accepts
-   either. The provider gets free redemption and can sell capacity ahead of
-   time; the consumer gets a fixed amount. No market required.
-3. **Paid acceptance** — peers quote a voucher price and exchange vouchers
-   inside the peering. This is what turns vouchers from a product into the
-   way payment works, and it does not need a market. Gated on stage 2
-   showing that anyone wants to hold voucher paper at all, and on an answer
-   to how the voucher price gets chosen.
-4. **Market and reliability signal** — optional, and last. It buys the
-   operator-reliability signal, which is the original motivation for the
-   whole proposal but the part with the weakest story for how it gets built.
-
-Making vouchers the main way payment works is a stage-3 decision. It is
-*not* gated on the market, since paid acceptance moves value without one, but
-it is gated on the trust-model objection above, which no stage resolves.
+| Atomic spent-proof check | The local double-spend check needs check-and-set if the provider runs as more than one process. Straightforward on a router, but unspecified. |
 
 ---
 
@@ -757,29 +610,22 @@ it is gated on the trust-model objection above, which no stage resolves.
 
 | Decision | Resolution | Rationale |
 |----------|-----------|-----------|
-| Status | Proposal only; the adopted model stays sat-denominated | The main objection, loss of zero-trust payment, is unresolved |
 | Terminology | "Voucher" is an explanatory name, not a protocol term | The protocol object is a Cashu token holding byte-denominated proofs. Nothing new is defined; the word only names what such a token means |
 | Denomination | The byte for network forwarding; each resource's own quantity unit otherwise | A proof carries an integer amount in its keyset's unit, so this is what the existing wallet already handles |
-| Buying a rate | `voucher_amount = desired_rate × interval` | The interval is fixed for the peering before payment starts, so a desired rate converts to an amount by multiplication. Nothing needs a rate-denominated instrument, and paying more in one interval buys a higher rate for the next |
-| Token vs proof | One token settles one interval; the proofs inside it are the power-of-two pieces its amount decomposes into | Only the proof count changes with amount, and the spent-proof set records proofs — which is what makes channels necessary |
 | Proof amounts | Powers of two, as in any Cashu keyset | Nothing about the existing wallet or keyset machinery changes; a payment is a set of proofs that split and combine normally |
-| Unit | Fixed by the resource, one per resource, and always a quantity — watt-hours, not watts | Every node selling the same resource denominates the same way, so the selling price of a voucher is a reliability signal rather than an exchange rate |
-| Network unit | The byte | Metering is exact and no payment rounds. The cost is proof count: a 23-bit interval amount takes ~11–12 proofs, which is what the spent-proof set has to absorb |
+| Token vs proof | One token settles one interval; the proofs inside it are the power-of-two pieces its amount decomposes into | Only the proof count changes with amount, and the spent-proof set records proofs — which is what makes channels necessary |
+| Unit | Fixed by the resource, one per resource, and always a quantity — watt-hours, not watts | Every node selling the same resource denominates the same way, which is what makes one issuer's vouchers comparable to another's |
+| Network unit | The byte | Metering is exact and no payment rounds. The cost is proof count: a 23-bit interval amount takes ~11–12 proofs, which the spent-proof set has to absorb |
+| Buying a rate | `voucher_amount = desired_rate × interval` | The interval is fixed for the peering before payment starts, so a desired rate converts to an amount by multiplication. Paying more in one interval buys a higher rate for the next |
 | Normal operation | Pay in the vouchers of whoever is delivering; each direction priced and paid on its own | Covers the large majority of peerings with one payment and no exchange. A leaf simply has no second payment, rather than a zero or negative one |
-| Acquiring vouchers | On a market, or directly from the issuer | The direct route is enough to operate, so no market is needed to move value, and checking a voucher takes one hop to its issuer |
-| Paid acceptance | The exception: pay a peer to hold your vouchers when it has no use for them | Covers a leaf paying for its own upload, and the "attract resources" case at the opposite sign. The negative price sits entirely in the voucher price, so the payment protocol runs both directions at positive prices and needs no change |
-| Subsidy funding | The payer buys the peer's vouchers deliberately, in a fixed amount | No standing outgoing channel to refill, so an unattended drain cannot start |
-| Acceptance price | One price per peering, crossing zero — negative (peer buys), zero (even swap), positive (paid acceptance), refused | Normal operation and paid acceptance are the same price at different points, so leaf nodes need no separate rule |
+| Acquiring vouchers | Not a protocol concern — see the market documents | The direct route from the issuer is enough to operate, and checking a voucher takes one hop |
+| Bootstrap tokens | Removed | Provider-as-mint dissolves the mint-reachability problem the mechanism existed for. The state machine, messages, verification path and config block all come out |
+| Paid acceptance | Pay a peer to hold your vouchers when it has no use for them | Covers a leaf paying for its own upload. The negative price sits entirely in the voucher price, so the payment protocol runs both directions at positive prices |
+| Voucher price | One price per peering, crossing zero — positive (peer buys), zero (even swap), negative (paid acceptance), refused | Normal operation and paid acceptance are the same price at different points, so leaf nodes need no separate rule |
 | Foreign vouchers | Refused by default | The default is then plain normal operation; otherwise a node builds up vouchers it cannot redeem |
-| Minimum flow allowance | Granted as ordinary unlocked vouchers; keep it small | Locking it would need a mint that preserves locks through swaps and change, which standard Cashu does not do. Small size bounds the resale value economically instead |
-| Bootstrap tokens | Removed from the protocol | Provider-as-mint dissolves the reachability problem the mechanism existed for. Acquiring vouchers becomes a wallet and market concern, exactly like acquiring sats today |
-| Acquiring vouchers | Lightning mint quote, or a local swap of sat tokens with a node willing to take them | Neither needs protocol support, so the bootstrap state machine, its messages, its verification path and its config block all come out |
+| Subsidy funding | Buying the peer's vouchers deliberately, in a fixed amount | No standing outgoing channel to refill, so an unattended drain cannot start |
 | Voucher acceptance vs traffic acceptance | Priced separately, never merged | Whether vouchers were accepted can be checked; whether traffic was accepted cannot, and merging them brings back the discard abuse |
-| Subsidy cost | Buying the peer's vouchers, not giving your own away | Bounded and deliberate, and there is no standing outgoing channel to refill |
-| Spilman under vouchers | Kept, to bound the issuer's database rather than to prevent theft | The spent-proof set is ~700× larger without channels |
+| Minimum flow allowance | Ordinary unlocked vouchers; keep it small | Locking it would need a mint that preserves locks through swaps and change, which standard Cashu does not do. Small size bounds the resale value economically instead |
+| Spilman channels | Kept, to bound the issuer's database rather than to prevent theft | The spent-proof set is ~700× larger without channels |
 | Cryptographic effort | Concentrate on the exchange step | The only step with a real adversary once the issuer redeems its own vouchers |
-| Negative pricing | Moved from the traffic leg to the voucher leg, not removed | The hazard was pricing acceptance of something whose acceptance can be faked, not the negative sign itself. Whether a peer took vouchers can be checked; whether it forwarded traffic cannot |
-| Service pricing | Adoptable without vouchers | It is a metering and pricing change against the existing sat model |
-| Negative pricing, remaining case | Getting rid of surplus, for a conserved and physically metered resource | Bytes can be quietly discarded; watt-hours cannot |
-| Rate auction / token bucket | Adopt on its own, against the existing sat model | No dependency on vouchers, and it avoids fighting TCP congestion control |
-| Adoption order | Rate auction and service pricing → optional voucher product → paid acceptance → market | Each stage produces evidence for the next; the market is last and optional |
+| Trust model | Reputation and exposure limits, not cryptography | When the provider is the mint, the only party who can cheat is the one who would honor the refund. Accepted deliberately |

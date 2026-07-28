@@ -6,7 +6,7 @@ This document specifies how TollGate gates delivery per-peer based on payment st
 
 TollGate controls delivery at the peer level. Each peer has an **access level** determined by their payment status. The implementation (FIPS, IP stack, etc.) enforces access control on the delivery path — `tollgate-core` decides *what* to enforce, the resource adapter enforces *how*.
 
-The core principle: **no pay, no delivery**. A peer that hasn't paid cannot have resources delivered through this node. It can only exchange TollGate protocol messages with this node (Announce, PriceSheet, BootstrapToken, etc.) to negotiate payment.
+The core principle: **no pay, no delivery**. A peer that hasn't paid cannot have resources delivered through this node. It can only exchange TollGate protocol messages with this node (Announce, Offer, Accept) to establish payment.
 
 ---
 
@@ -17,19 +17,19 @@ Each peer is in exactly one access level at any time:
 | Level | Delivery | TollGate messages | Bloom filter visibility (FIPS) | When |
 |-------|---------|-------------------|-------------------------------|------|
 | `None` | Blocked | Allowed | Hidden | Peer connected, no payment yet |
-| `Active` | Allowed (metered) | Allowed | Visible | Payment in place — bootstrap-token-funded or Spilman-channel-funded |
+| `Active` | Allowed (metered) | Allowed | Visible | Spilman channels funded |
 | `ZeroPrice` | Allowed (unmetered) | Allowed | Visible | Both sides agreed on zero pricing |
 | `Suspended` | Blocked | Allowed | Hidden | Balance exhausted, awaiting top-up or renegotiation |
 
-The access level says only whether delivery is allowed and how (metered or not). The *payment mode* — whether the peer is paying via bootstrap tokens or Spilman channels — is tracked separately by the payment subsystem and does not surface as an access level. A peer "upgrading" from bootstrap tokens to Spilman channels stays in `Active` throughout; only its payment mode changes.
+The access level says only whether delivery is allowed and how (metered or not). How much the peer has left to spend is tracked by the payment subsystem and does not surface as an access level.
 
 ### Transitions
 
 ```
-None --> Active (any payment in place: bootstrap token verified OR Spilman channels funded)
-None --> ZeroPrice (zero-price PriceSheet accepted)
-Active --> Suspended (bootstrap balance exhausted OR channel exhausted with rollover timeout)
-Suspended --> Active (new token received OR new channel funded)
+None --> Active (Spilman channels funded)
+None --> ZeroPrice (zero-price peering agreed)
+Active --> Suspended (channel exhausted with rollover timeout)
+Suspended --> Active (new channel funded)
 Any --> None (disconnect)
 ```
 
@@ -60,7 +60,7 @@ Any --> None (disconnect)
 
 ### None (Default)
 
-Every newly connected peer starts at `None`. The peer can exchange TollGate protocol messages — Announce, PriceSheet, Accept, BootstrapToken — but **no resources are delivered** for or through this peer.
+Every newly connected peer starts at `None`. The peer can exchange TollGate protocol messages — Announce, Offer, Accept — but **no resources are delivered** for or through this peer.
 
 This means:
 - Packets originating from this peer and addressed to other nodes are **dropped**
@@ -69,15 +69,15 @@ This means:
 
 ### Active
 
-Payment is in place — either a verified bootstrap token with positive balance, or funded Spilman channels. Delivery is allowed and metered. The access layer does not distinguish the two; the payment subsystem decides how cost is deducted (against the bootstrap balance or via signed BalanceUpdates).
+Spilman channels are funded. Delivery is allowed and metered, with cost deducted via signed BalanceUpdates.
 
 ### ZeroPrice
 
-Both sides agreed on zero pricing for all products. No payment infrastructure is needed. Delivery is allowed and unmetered. No metering or balance update messages are exchanged.
+Both sides agreed on zero-price peering. No payment infrastructure is needed. Delivery is allowed and unmetered, and no metering or balance update messages are exchanged. Zero-price is **not transitive** — it covers that peer's own traffic only.
 
 ### Suspended
 
-The peer's payment has been exhausted (bootstrap balance = 0, or Spilman channel exhausted with rollover timeout expired). Delivery is blocked. The peer can still exchange TollGate messages to send a new token or fund a new channel.
+The peer's channel is exhausted and the rollover timeout has expired. Delivery is blocked. The peer can still exchange TollGate messages to fund a new channel.
 
 ---
 
@@ -131,8 +131,7 @@ pub trait ResourceAdapter: Send + Sync {
 pub enum AccessLevel {
     /// No delivery. Only TollGate protocol messages allowed.
     None,
-    /// Delivery allowed, metered. Payment may be via bootstrap token or Spilman channels;
-    /// the access layer does not distinguish.
+    /// Delivery allowed, metered against funded Spilman channels.
     Active,
     /// Delivery allowed, unmetered. Zero-price peering.
     ZeroPrice,
@@ -153,19 +152,9 @@ Counting units delivered, transit-loss reconciliation, and peer metrics are docu
 1. Network layer authenticates peer (FIPS Noise IK, WireGuard, etc.)
 2. Core sets access level to None
 3. Peer and node exchange Announce
-4. Peer and node exchange PriceSheet
-5. Peer sends Accept (or BootstrapToken)
+4. Peer and node exchange Offer
+5. Peer sends Accept with channel funding
 6. Access level transitions based on payment
-```
-
-### Bootstrap Payment
-
-```
-1. Peer sends BootstrapToken
-2. Provider verifies with mint
-3. If valid: set access to Active (bloom visible in FIPS)
-4. Metering begins; cost deducted from bootstrap balance
-5. When balance exhausted: set access to Suspended (bloom hidden in FIPS)
 ```
 
 ### Spilman Channels Funded
@@ -181,10 +170,10 @@ Counting units delivered, transit-loss reconciliation, and peer metrics are docu
 ### Balance Exhausted (Suspended)
 
 ```
-1. Bootstrap balance = 0 OR channel exhausted + rollover timeout
+1. Channel exhausted + rollover timeout
 2. Set access to Suspended (bloom hidden in FIPS)
 3. Delivery stops
-4. Peer can send BootstrapToken or fund new channel
+4. Peer funds a new channel
 5. On payment: transition back to Active
 ```
 
@@ -217,6 +206,6 @@ This makes the asymmetric case (`InboundOnly` / `OutboundOnly`) a first-class st
 | Default access | None (blocked) | No pay, no service |
 | Unpaid resources | Only local-addressed + TollGate protocol | Peer must be able to negotiate payment |
 | Bloom filter visibility | Inferred from access level (FIPS) | No separate API — access level implies visibility |
-| Zero-price peers | Skip all payment, go to Active | Simplest path for free peering |
+| Zero-price peers | Skip all payment, go to Active; not transitive | Simplest path for free peering; transitivity would launder free transit |
 | Suspended state | Blocked but can still negotiate | Peer can recover without reconnecting |
 | Protocol messages | Always allowed regardless of access level | Payment negotiation must work even when blocked |

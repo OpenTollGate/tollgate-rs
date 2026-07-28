@@ -44,7 +44,7 @@ TollGate hooks into FIPS at five points:
 
   ① Per-peer forwarding policy (local_only / full)
   ② Bloom filter exclusion (inferred from policy)
-  ③ MMP metrics for dynamic pricing
+  ③ MMP metrics for operator visibility
   ④ Peer connect/disconnect callbacks
   ⑤ TollGate message transport (HTTP over IPv6)
 ```
@@ -77,12 +77,12 @@ When a peer's access level changes:
 
 ### 3. MMP Metrics Feed
 
-TollGate consumes FIPS MMP metrics for dynamic pricing. Per-peer metrics are available after the Noise IK handshake completes and MMP starts reporting:
+TollGate exposes FIPS MMP metrics through `peer_metrics()`. They are **not** inputs to any price — delivery costs one voucher per unit ([tollgate-pricing.md](../core/tollgate-pricing.md)), and metrics are peer-influenced, so pricing from them would let a peer price itself. They exist for operator visibility and capacity decisions. Per-peer metrics are available after the Noise IK handshake completes and MMP starts reporting:
 
 | MMP Metric | TollGate use |
 |-----------|-------------|
-| `srtt_ms` | Latency-based pricing adjustment |
-| `loss_rate` | Loss-based pricing (wasted forwarding effort) |
+| `srtt_ms` | Link latency; operator visibility |
+| `loss_rate` | Wasted forwarding effort; operator visibility |
 | `etx` | Direct forwarding cost metric |
 | `smoothed_etx` | Stable cost baseline |
 | `goodput_bps` | Capacity utilization / congestion signal |
@@ -191,37 +191,25 @@ The adapter maps between the two as needed. TollGate protocol uses pubkey; FIPS 
 
 ---
 
-## Dynamic Pricing with MMP
+## What MMP Metrics Are Good For
 
-FIPS MMP provides the richest metric set of any TollGate deployment target. The pricing engine can use:
+FIPS MMP provides the richest metric set of any TollGate deployment target.
+An earlier design fed it straight into a pricing formula — `price = base x
+etx x (1 + srtt_ms / 100)`, mirroring FIPS's own link cost. That is gone,
+and deliberately so: **the peer being priced is the peer that influences the
+metrics**, so a peer could degrade its own link to move its own price. Under
+vouchers there is no formula to attack, because delivery has no price.
 
-### Cost-Plus Pricing (Recommended Default)
+What the metrics remain good for:
 
-```
-price = base_price x etx x (1 + srtt_ms / 100)
-```
-
-This mirrors FIPS's own link cost formula (`link_cost = etx x (1 + srtt_ms / 100)`). Higher ETX or latency = higher forwarding cost = higher price. The operator sets `base_price`; the formula scales it by actual link quality.
-
-### Congestion-Aware Pricing
-
-```
-if goodput_trend == "falling" and loss_trend == "rising":
-    price *= congestion_multiplier  // e.g., 1.5x
-```
-
-When MMP detects degrading link quality (falling goodput, rising loss), the node raises prices to reduce demand. As conditions improve, prices drop back.
-
-### Quality-Tiered Pricing
-
-Use MMP metrics to classify link quality and apply different product prices:
-
-| Quality tier | Conditions | Price |
-|-------------|------------|-------|
-| Premium | loss < 1%, SRTT < 10ms | Highest |
-| Standard | loss < 5%, SRTT < 50ms | Medium |
-| Economy | loss < 10%, SRTT < 200ms | Lowest |
-| Degraded | loss >= 10% or SRTT >= 200ms | Minimum / negative |
+- **Operator visibility.** Which links are healthy, which are degrading.
+- **Capacity decisions.** How much to issue vouchers against, and how fast
+  to let a peer draw them via the rate auction
+  ([tollgate-vouchers.md](../core/tollgate-vouchers.md)).
+- **Deciding what to sell vouchers for.** An operator watching its own links
+  degrade may choose to issue less or price higher on the market. That is a
+  human or policy decision outside the protocol, not a formula the
+  counterparty can manipulate.
 
 ---
 
@@ -270,5 +258,5 @@ The following FIPS modifications are required for TollGate integration. Full det
 | Metrics | Streaming subscription on the control socket | Pricing engine reads cached values; no per-call IPC |
 | Message transport (initial) | HTTP over FIPS IPv6 adapter | Works today, no FIPS session layer changes needed |
 | Message transport (future) | Native FSP port | Optimization, eliminates HTTP overhead |
-| Default pricing strategy | Cost-plus using ETX and SRTT | Mirrors FIPS's own link cost formula |
+| MMP metrics | Exposed for visibility, never an input to price | The peer influences its own metrics, so pricing from them lets it price itself |
 | Peer identification | pubkey <-> node_addr mapping | Deterministic, same keypair serves both |

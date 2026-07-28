@@ -138,18 +138,18 @@ Confidentiality and integrity of TollGate messages on the wire is a **separate c
 
 | Choice | What it provides | Risk profile |
 |---|---|---|
-| **Plain HTTP / WS** (default) | None | A network attacker can read messages and **intercept bootstrap tokens** in flight — Cashu ecash is a bearer instrument, so whoever has the token bytes can redeem them at the mint. Returns to the attacker are low (bootstrap amounts are small by design), but the legitimate peer's payment can be stolen, forcing it to retry with a fresh token — **locally disruptive** even though aggregate economic damage is bounded. Spilman BalanceUpdates cannot be hijacked (the receiver's multisig key is required to redeem). Metadata (who paid what, when) is also public. |
+| **Plain HTTP / WS** (default) | None | Spilman funding proofs travel in Accept and RolloverInit, and a voucher is a bearer instrument — whoever has the bytes can redeem them at the issuer. An attacker on the segment can race to redeem intercepted funding, forcing the legitimate peer to re-fund. Amounts are bounded by channel capacity (small for new peers by design), so this is **locally disruptive** rather than economically severe. BalanceUpdates cannot be hijacked — the receiver's multisig key is required to redeem. Metadata (who paid what, when) is also public. |
 | **TLS (HTTPS / WSS)** | Confidentiality + integrity | Standard server-cert TLS; no peer authentication unless mTLS is enabled. |
 | **WireGuard tunnel** | Confidentiality + integrity + peer authentication | The WireGuard pubkey can be the same key as the TollGate pubkey, collapsing transport security and peer authentication into one layer. Natural fit for infrastructure peering. |
 | **Mutual TLS** | Confidentiality + integrity + peer authentication | Cert-chain authentication; suitable for managed infrastructure. |
 
-For open hotspots — where bootstrap tokens are the common payment path — plain HTTP is functional but leaves those tokens visible to anyone on the segment. The economic exposure per peer is small, but a determined attacker on the local segment can disrupt service by racing to redeem intercepted tokens. Operators who want to mitigate this should run TLS/HTTPS at minimum (encrypts the wire so tokens are not visible), or a WireGuard/mTLS tunnel where peer authentication also matters. For infrastructure peering, WireGuard is the natural fit — both transport security and peer authentication in one layer.
+For open hotspots, plain HTTP is functional but leaves funding proofs visible to anyone on the segment. The economic exposure per peer is bounded by channel capacity, but a determined attacker on the local segment can disrupt service by racing to redeem what it intercepts. Operators who want to mitigate this should run TLS/HTTPS at minimum (encrypts the wire so proofs are not visible), or a WireGuard/mTLS tunnel where peer authentication also matters. For infrastructure peering, WireGuard is the natural fit — both transport security and peer authentication in one layer.
 
 ---
 
 ## ResourceAdapter Implementation
 
-`tollgate-net` provides a `ResourceAdapter` implementation that hooks `tollgate-core` into the kernel networking stack. The implementation has three responsibilities: gate forwarding via firewall rules, expose per-peer traffic counters, and (optionally) supply peer metrics for dynamic pricing.
+`tollgate-net` provides a `ResourceAdapter` implementation that hooks `tollgate-core` into the kernel networking stack. The implementation has three responsibilities: gate forwarding via firewall rules, expose per-peer traffic counters per direction class, and (optionally) supply peer metrics for operator visibility.
 
 ### Access Control via Firewall Rules
 
@@ -201,12 +201,12 @@ All three sources are interchangeable from `tollgate-core`'s perspective; the ch
 
 IP networks provide no rich link-quality metrics out of the box. `peer_metrics()` returns `None` by default.
 
-If the operator wants dynamic pricing, `tollgate-net` can optionally provide:
+If the operator wants visibility, `tollgate-net` can optionally provide:
 - **Ping-based RTT**: periodic ICMP pings to measure latency
 - **Loss estimation**: derived from ping success rate
 - **Static estimates**: operator-configured values per peer
 
-These are coarse approximations. Dynamic pricing on plain IP is less granular than on networks that publish detailed link-quality metrics.
+These are coarse approximations, and they are not inputs to any price — delivery costs one voucher per unit regardless ([tollgate-pricing.md](../core/tollgate-pricing.md)). They exist for operator visibility and capacity decisions.
 
 ---
 
@@ -236,7 +236,7 @@ For authenticated deployments, the same HTTP / WebSocket transports can run insi
 ## Limitations
 
 - **No automatic failover**: if an upstream peer goes down, the operator must reconfigure routing. There is no protocol-level rerouting.
-- **No rich dynamic pricing**: without per-link metrics, pricing inputs are limited to coarse estimates (ping RTT, loss) or static configuration.
+- **No rich link metrics**: without per-link measurement, operator visibility is limited to coarse estimates (ping RTT, loss) or static configuration. This does not affect pricing, which the protocol does not do.
 - **Simpler peer discovery**: dynamic probing works on a local network but does not scale to multi-hop topologies. Operators bridging multiple subnets configure peers statically.
 
 ---

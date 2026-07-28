@@ -2,7 +2,7 @@
 
 This document specifies how TollGate manages Cashu Spilman payment channels between peers — the channel lifecycle, rollover mechanics, offline resilience, netting, and the Wallet trait.
 
-Bootstrap tokens and bootstrap-only mode are documented separately in [tollgate-bootstrap.md](tollgate-bootstrap.md).
+What peers pay each other with is documented in [tollgate-vouchers.md](tollgate-vouchers.md). Under vouchers, channels exist to keep the issuer's spent-proof set bounded rather than to prevent theft.
 
 ## Overview
 
@@ -58,7 +58,7 @@ At each metering interval, both sides exchange metering reports. The net debtor 
 
 ## Channel Pair Lifecycle
 
-The Spilman channel lifecycle begins after peers have exchanged Announce and PriceSheet messages. Bootstrap (if needed) has already completed — see [tollgate-bootstrap.md](tollgate-bootstrap.md). Both peers can reach a mint.
+The Spilman channel lifecycle begins after peers have exchanged Announce and Offer messages. Each channel is funded against the counterparty's own mint, which is reachable over the peering link by definition.
 
 ![Channel Pair Lifecycle](diagrams/channel-pair-lifecycle.svg)
 <details><summary>Text version</summary>
@@ -208,7 +208,6 @@ If mint connectivity is lost during rollover:
 | Channel funding (open) | **Yes** | Must create 2-of-2 multisig token |
 | Channel settlement (close) | **Yes** | Receiver must submit swap to mint |
 | Channel rollover (new) | **Yes** | New channel needs funding |
-| Bootstrap token verification | **Yes** | Must check with mint |
 | Keyset refresh | **Yes** | Fetch active keysets |
 
 ### Offline Scenarios
@@ -386,10 +385,10 @@ The core library delegates all Cashu operations to a Wallet trait. The implement
 ```rust
 #[async_trait]
 pub trait Wallet: Send + Sync {
-    /// Receive a regular Cashu token (bootstrap), return value in base units
+    /// Receive a voucher token, return value in the keyset's unit
     async fn receive_token(&self, token: &[u8]) -> Result<Amount, WalletError>;
 
-    /// Create a regular Cashu token of given amount (for bootstrap payment)
+    /// Create a voucher token of given amount
     async fn create_token(&self, amount: Amount, mint: &str) -> Result<Vec<u8>, WalletError>;
 
     /// Fund a Spilman channel: create 2-of-2 multisig token with NUT-11 conditions

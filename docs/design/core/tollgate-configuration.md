@@ -4,7 +4,9 @@ This document specifies the configuration schema for TollGate — the YAML forma
 
 ## Overview
 
-TollGate uses YAML-based configuration following the same pattern as FIPS. Every parameter has a sensible default — a minimal config only specifies what differs. Configuration is organized into logical sections covering products, pricing, channels, peers, and operator identity.
+TollGate uses YAML-based configuration following the same pattern as FIPS. Every parameter has a sensible default — a minimal config only specifies what differs.
+
+The config is considerably smaller than it used to be. Delivery has no price to configure: one voucher buys one unit, so products, pricing scales, floors, ceilings, per-peer multipliers and dynamic pricing formulas are all gone ([tollgate-pricing.md](tollgate-pricing.md)). What a unit costs in money is decided where vouchers are sold, which is not the node's protocol configuration.
 
 ---
 
@@ -40,13 +42,12 @@ On OpenWrt, the primary config path is `/etc/tollgate/tollgate.yaml`. UCI integr
 
 ```yaml
 identity:    # Node identity (keypair)
-products:    # What this node sells
-pricing:     # Dynamic pricing rules
-subsidy:     # Limits on negative prices (money going out)
+mint:        # This node's own mint — what it issues vouchers against
+vouchers:    # How this node treats other nodes' vouchers
+access:      # Minimum flow allowance
 channels:    # Spilman channel parameters
 metering:    # Metering interval and drift tolerance
-bootstrap:   # Bootstrap token parameters
-mints:       # Accepted mints
+subsidy:     # Negative delivery prices (conserved resources only)
 peers:       # Static peer overrides
 ```
 
@@ -68,155 +69,76 @@ The node's public key is derived from the secret key. This pubkey is used in:
 
 ---
 
-## Products
+## Mint
 
-Each product defines what the node sells and at what price. Multiple products can be offered — the peer chooses one.
+Every node runs its own mint and issues vouchers against its own capacity ([tollgate-vouchers.md](tollgate-vouchers.md)).
 
 ```yaml
-products:
-  - name: "standard"                       # human-readable name (not sent over protocol)
-    pricing_scale: 1000                    # sub-unit precision divisor
-    pricing:
-      - mint_url: "https://mint.example.com"
-        price_per_second: 0                # scaled integer
-        price_per_unit: 10                 # scaled integer (0.01 sat/unit with scale=1000)
-        mint_unit: "sat"
-
-      - mint_url: "https://mint.eu"
-        price_per_second: 0
-        price_per_unit: 8                  # discount for preferred mint
-        mint_unit: "sat"
-
-    # Implementation-specific fields (opaque to core, included in product_id hash)
-    extensions:
-      bandwidth_limit: 0                   # network: bytes/sec, 0 = unlimited
-
-  - name: "always-on"
-    pricing_scale: 1000
-    pricing:
-      - mint_url: "https://mint.example.com"
-        price_per_second: 100              # 0.1 sat/sec
-        price_per_unit: 0
-        mint_unit: "sat"
-    extensions:
-      bandwidth_limit: 10000              # network: 10 KB/s cap
+mint:
+  url: "https://gateway.example.com/mint"   # advertised in Offer
+  unit: "byte"                              # quantity unit for this resource
+  classes: ["up", "down"]                   # one keyset per direction class
 ```
 
 ### Defaults
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `pricing_scale` | `1000` | Sub-unit precision divisor |
-| `extensions` | `{}` | Implementation-specific product fields (opaque to core) |
+| `url` | *(required)* | Mint URL advertised to peers |
+| `unit` | `"byte"` | Quantity unit — `byte`, `wh`, `ml` |
+| `classes` | `["up", "down"]` | Direction classes; a single-class resource lists one |
 
-If no products are defined, the node operates as a **consumer only** — it pays peers but does not sell. A node with no products and no funds is effectively passive (zero-price peering with any peer that allows it).
+The unit is fixed by the resource and must match across every node selling it. Classes are defined by the ResourceAdapter; the core neither enumerates nor interprets them.
 
 ---
 
-## Dynamic Pricing
+## Vouchers
+
+How this node treats vouchers issued by *other* nodes. This is the only price in the protocol — see Paid Acceptance in [tollgate-vouchers.md](tollgate-vouchers.md).
 
 ```yaml
-pricing:
-  enabled: false                           # enable dynamic price adjustments
-
-  # Formula expression — core evaluates against opaque metrics from the implementation.
-  # Core doesn't know what the metric keys mean; it just plugs values into the formula.
-  # Available: base (base price), metric('key') (lookup from implementation metrics)
-  formula: "fixed"                         # "fixed" = use base prices as-is
-
-  # Examples (set by implementation):
-  # Network:     "base * metric('etx') * (1 + metric('srtt_ms') / 100)"
-  # Electricity: "base * (1 + metric('demand_ratio'))"
-  # Water:       "base * metric('scarcity_index')"
-
-  # Price bounds (applied after formula computation)
-  # POSITIVE BASE PRICES ONLY — see the warning below.
-  price_floor_multiplier: 0.1            # never below 10% of base
-  price_ceiling_multiplier: 10.0         # never above 10x base
+vouchers:
+  accept_foreign: false        # refuse other nodes' vouchers by default
+  price_scale: 1000            # divisor for the prices below
+  default_price: 0             # scaled; applies to peers with no override
 ```
+
+`default_price` is signed and crosses zero:
+
+| Value | Meaning |
+|---|---|
+| `> 0` | We buy the peer's vouchers — we want what they deliver |
+| `0` | Even swap |
+| `< 0` | The peer pays us to hold them — paid acceptance |
+| `accept_foreign: false` | Refused; the peering runs one-way |
 
 ### Defaults
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `pricing.enabled` | `false` | Dynamic pricing disabled by default |
-| `pricing.formula` | `"fixed"` | Use base prices as-is |
-| `price_floor_multiplier` | `0.1` | Min price = 10% of base — **positive base only** |
-| `price_ceiling_multiplier` | `10.0` | Max price = 10x base — **positive base only** |
-
-### Multipliers and Negative Base Prices
-
-Both multipliers are defined relative to a **positive** base price. Applied
-to a negative base they invert, and the resulting behavior is the opposite
-of what the parameter names describe:
-
-```
-base = -10
-price_floor_multiplier: 0.1   →   -1     (least subsidy)
-price_ceiling_multiplier: 10.0 →  -100   (TEN TIMES DEEPER subsidy)
-```
-
-The "ceiling" becomes the most expensive outcome for the node, not the
-least. An operator reading these names as protection gets the reverse.
-
-Therefore:
-
-- Multiplier bounds apply only where the base price is positive.
-- Negative prices are bounded by the absolute limits in `subsidy` below,
-  never by multipliers.
-- Metric-scaled formulas are **rejected** for negative base prices. The
-  metrics are measured against the peer being priced, so a peer that
-  degrades its own link would scale up its own subsidy. See the Negative
-  Pricing section of [tollgate-pricing.md](tollgate-pricing.md).
+| `accept_foreign` | `false` | Refusing is the safe default; otherwise a node accumulates vouchers it cannot redeem |
+| `price_scale` | `1000` | Sub-unit precision divisor |
+| `default_price` | `0` | Even swap when acceptance is enabled at all |
 
 ---
 
-## Subsidy Limits
-
-Negative prices mean money leaves the node. Unlike revenue, there is no
-counterparty whose willingness to pay bounds the total — the bound has to be
-configured. This section is that bound.
+## Access
 
 ```yaml
-subsidy:
-  enabled: false                     # negative prices are refused unless true
-  max_per_peer_per_hour: 0           # absolute cap per peer, sats
-  max_total_per_hour: 0              # aggregate cap across all peers, sats
-  require_conserved_resource: true   # only allow where delivery is physically metered
-  on_budget_exhausted: "close"       # close | zero_price
+access:
+  minimum_flow:
+    enabled: false
+    bytes_per_interval: 0
 ```
 
-Both caps are enforced. A per-peer cap alone is defeated by creating more
-peer identities, which are free; an aggregate cap alone lets one peer
-consume the whole budget.
-
-`require_conserved_resource` restricts negative pricing to resources the
-ResourceAdapter declares physically metered and conserved (electricity,
-fluids). For resources that can be silently discarded — network bytes — a
-peer can accept, bill, and drop, and no meter can tell the difference.
-Operators who need negative prices for a non-conserved resource must set
-this to `false` deliberately and accept that exposure is bounded only by the
-caps above.
-
-When a budget is exhausted, `close` ends the session for that direction and
-`zero_price` continues at zero. `close` is the default because a subsidy
-channel that has silently stopped paying is indistinguishable from a stalled
-one.
-
-Related channel-layer behavior: `capacity_growth_factor` is not applied to
-negatively-priced channels, and rollover is refused once the budget is
-exhausted. See
-[tollgate-payment-channels.md](tollgate-payment-channels.md).
+A small allowance every peer gets without paying, so a new peer can acquire vouchers before it can pay for anything. It is a subsidy and can be farmed — see Minimum Flow Allowance in [tollgate-vouchers.md](tollgate-vouchers.md) for what bounds it and what does not.
 
 ### Defaults
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `subsidy.enabled` | `false` | Negative prices refused unless explicitly enabled |
-| `max_per_peer_per_hour` | `0` | Absolute per-peer cap in sats |
-| `max_total_per_hour` | `0` | Absolute aggregate cap in sats |
-| `require_conserved_resource` | `true` | Restrict to physically metered resources |
-| `on_budget_exhausted` | `"close"` | Close the session rather than silently continue |
+| `minimum_flow.enabled` | `false` | Off by default; it is a subsidy |
+| `minimum_flow.bytes_per_interval` | `0` | Keep small — resale value is bounded economically, not cryptographically |
 
 ---
 
@@ -224,7 +146,7 @@ exhausted. See
 
 ```yaml
 channels:
-  min_capacity: 10                         # minimum Spilman channel capacity (sats)
+  min_capacity: 10                         # minimum Spilman channel capacity (vouchers)
   max_capacity: 10000                      # maximum channel capacity
   initial_capacity: 10                     # starting capacity for new peers
   capacity_growth_factor: 2.0             # multiply capacity after each successful rollover
@@ -238,8 +160,8 @@ channels:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `min_capacity` | `10` | Minimum channel funding (sats) |
-| `max_capacity` | `10000` | Maximum channel funding (sats) |
+| `min_capacity` | `10` | Minimum channel funding |
+| `max_capacity` | `10000` | Maximum channel funding |
 | `initial_capacity` | `10` | First channel capacity for new peers |
 | `capacity_growth_factor` | `2.0` | Capacity multiplier per successful rollover — **incoming (revenue) channels only** |
 | `ttl_seconds` | `3600` | Channel lifetime (1 hour) |
@@ -247,18 +169,13 @@ channels:
 | `safety_margin_seconds` | `60` | Emergency rollover window before expiry |
 | `stale_timeout_seconds` | `60` | Session closed if rollover blocked this long |
 
-`capacity_growth_factor` rewards a peer relationship that has proven stable
-across rollovers. That is the right incentive on a channel the *peer* funds.
-On a channel this node funds because the price is negative, the same rule
-rewards whichever peer drains it fastest, and combined with automatic
-rollover it drains the wallet unattended, limited only by the balance:
+`capacity_growth_factor` rewards a peer relationship that has proven stable across rollovers. That is the right incentive on a channel the *peer* funds. On a channel this node funds because it owes the peer, the same rule rewards whichever peer drains it fastest, and combined with automatic rollover it drains the wallet unattended, limited only by the balance:
 
 ```
 10 → 20 → 40 → 80 → … → max_capacity, then refilled indefinitely
 ```
 
-Growth is therefore not applied to negatively-priced channels, and their
-rollover is bounded by `subsidy` above.
+Growth is therefore not applied to channels funded under a negative price, and their rollover is bounded by `subsidy` below.
 
 ---
 
@@ -285,46 +202,34 @@ metering:
 
 ---
 
-## Bootstrap
+## Subsidy Limits
+
+Negative *delivery* prices — paying a peer to take a resource off your hands — survive only for surplus disposal on a conserved, physically metered resource ([tollgate-pricing.md](tollgate-pricing.md)). They do not apply to network forwarding.
+
+Where they are used, money leaves the node and no counterparty's willingness to pay bounds the total, so the bound has to be configured.
 
 ```yaml
-bootstrap:
-  enabled: true                            # accept bootstrap tokens
-  min_token_value: 10                      # minimum token value to accept (sats)
+subsidy:
+  enabled: false                     # negative delivery prices refused unless true
+  max_per_peer_per_hour: 0           # absolute cap per peer
+  max_total_per_hour: 0              # aggregate cap across all peers
+  require_conserved_resource: true   # only where delivery is physically metered
+  on_budget_exhausted: "close"       # close | zero_price
 ```
+
+Both caps are enforced. A per-peer cap alone is defeated by creating more peer identities, which are free; an aggregate cap alone lets one peer consume the whole budget.
+
+`require_conserved_resource` restricts negative delivery prices to resources the ResourceAdapter declares physically metered and conserved. For resources that can be silently discarded — network bytes — a peer can accept, bill, and drop, and no meter can tell the difference.
 
 ### Defaults
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `bootstrap.enabled` | `true` | Accept bootstrap tokens |
-| `min_token_value` | `10` | Reject tokens below this value |
-
-Bootstrap tokens are always verified with the mint before service is granted. If the mint is unreachable the token is rejected outright — there is no pending / unverified buffer. See [tollgate-bootstrap.md](tollgate-bootstrap.md).
-
----
-
-## Accepted Mints
-
-```yaml
-mints:
-  - url: "https://mint.example.com"
-    mint_units: ["sat", "msat"]
-  - url: "https://mint.eu"
-    mint_units: ["sat", "eur"]
-```
-
-Only mints listed here are accepted for both bootstrap tokens and Spilman channel funding. If a peer offers a product priced in a mint not on this list, the node rejects it.
-
-### Multi-Mint Resilience (Future)
-
-Operators are encouraged to maintain overlapping channels across at least two mints (three preferred) so that a single mint outage doesn't block all channel funding, rollover, and settlement. The current design lists multiple mints in this section but does not specify:
-
-- How channels are distributed across mints (round-robin? capacity-weighted? per-peer?)
-- How a node responds when a mint becomes unreachable mid-session (drain to other mints? wait?)
-- How funds are rebalanced between mints (manual today; automated inter-mint transfer is future work)
-
-For v1, operators configure multiple mints and manually ensure channels are spread across them. Automated mint distribution and rebalancing policy is **future work**.
+| `subsidy.enabled` | `false` | Refused unless explicitly enabled |
+| `max_per_peer_per_hour` | `0` | Absolute per-peer cap |
+| `max_total_per_hour` | `0` | Absolute aggregate cap |
+| `require_conserved_resource` | `true` | Restrict to physically metered resources |
+| `on_budget_exhausted` | `"close"` | Close the session rather than silently continue |
 
 ---
 
@@ -334,11 +239,11 @@ For v1, operators configure multiple mints and manually ensure channels are spre
 peers:
   # Zero-price peering (operator's own nodes, friends)
   "02abc...":
-    price_multiplier: 0.0
+    zero_price: true
 
-  # Discount for a specific peer
+  # Accept this peer's vouchers at a specific price
   "03def...":
-    price_multiplier: 0.5
+    voucher_price: -50           # scaled; peer pays us to hold its vouchers
 
   # Block a peer entirely
   "04ghi...":
@@ -353,9 +258,12 @@ peers:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `price_multiplier` | `1.0` | Multiply base price for this peer |
+| `zero_price` | `false` | Skip payment entirely with this peer |
+| `voucher_price` | *(from `vouchers.default_price`)* | Signed price for this peer's vouchers |
 | `blocked` | `false` | Refuse all service to this peer |
 | `endpoint` | *(none)* | Static endpoint for IP peering |
+
+There is no `price_multiplier`. Favoring a peer means selling it vouchers more cheaply, which happens outside the protocol. `zero_price` is **not transitive** — it means free for that peer's own traffic, never free for anything that peer is nominally the beneficiary of.
 
 ---
 
@@ -365,32 +273,20 @@ peers:
 identity:
   secret_key_file: "/etc/tollgate/identity.key"
 
-products:
-  - name: "standard"
-    pricing_scale: 1000
-    pricing:
-      - mint_url: "https://mint.example.com"
-        price_per_second: 0
-        price_per_unit: 10
-        mint_unit: "sat"
-    extensions:
-      bandwidth_limit: 0
+mint:
+  url: "https://gateway.example.com/mint"
+  unit: "byte"
+  classes: ["up", "down"]
 
-  - name: "budget"
-    pricing_scale: 1000
-    pricing:
-      - mint_url: "https://mint.example.com"
-        price_per_second: 50
-        price_per_unit: 0
-        mint_unit: "sat"
-    extensions:
-      bandwidth_limit: 50000
+vouchers:
+  accept_foreign: true
+  price_scale: 1000
+  default_price: -20            # we charge peers to hold their vouchers
 
-pricing:
-  enabled: true
-  formula: "base * metric('etx') * (1 + metric('srtt_ms') / 100)"
-  price_floor_multiplier: 0.1
-  price_ceiling_multiplier: 10.0
+access:
+  minimum_flow:
+    enabled: true
+    bytes_per_interval: 4096
 
 channels:
   initial_capacity: 10
@@ -403,17 +299,9 @@ metering:
   default_interval_ms: 5000
   transit_loss_tolerance: 0.05
 
-bootstrap:
-  enabled: true
-  min_token_value: 10
-
-mints:
-  - url: "https://mint.example.com"
-    mint_units: ["sat"]
-
 peers:
   "02abc...":
-    price_multiplier: 0.0
+    zero_price: true
 ```
 
 ---
@@ -424,14 +312,14 @@ Some parameters can be changed at runtime without restarting the node:
 
 | Parameter | Runtime changeable? | Notes |
 |-----------|-------------------|-------|
-| Product pricing | Yes | New prices take effect at next metering interval |
-| Dynamic pricing rules | Yes | Strategy and factors can be updated |
+| Voucher prices | Yes | New price takes effect at next metering interval |
+| Minimum flow allowance | Yes | Applies to the next interval |
 | Subsidy limits | Yes | Lowering a cap applies immediately; already-spent budget is not refunded |
 | Peer overrides | Yes | Add/remove/modify peer policies |
 | Channel parameters | No | Applies to new channels only |
 | Metering interval | No | Applies to new sessions only |
+| Mint URL, unit, classes | No | Requires restart; changing them invalidates outstanding vouchers |
 | Identity | No | Requires restart |
-| Accepted mints | No | Requires restart (affects channel validity) |
 
 The implementation watches the config file for changes and applies runtime-changeable parameters without interrupting active sessions.
 
@@ -444,14 +332,11 @@ The implementation watches the config file for changes and applies runtime-chang
 | Format | YAML | Follows FIPS pattern, human-readable, supports comments |
 | Loading | Cascading multi-file with priority | System defaults + user overrides + deployment specifics |
 | Defaults | Every parameter has a sensible default | Minimal config for simple deployments |
-| Products | Array of named products | Multiple offerings per node |
-| No products | Node is consumer-only | Pay peers but don't sell |
-| Pricing | Formula expression evaluated against opaque metrics | Core doesn't interpret metrics — implementation sets policy, core executes |
-| Price bound multipliers | Positive base prices only | Multipliers invert under a negative base — the "ceiling" permits the deepest subsidy |
-| Negative price bounds | Absolute caps in `subsidy`, per peer and aggregate | No counterparty bounds outbound spend; per-peer caps alone are defeated by free identities |
-| Negative prices default | Disabled (`subsidy.enabled: false`) | Opt-in, because the failure mode is an unattended wallet drain |
+| Products, pricing scales, floors, ceilings, multipliers, dynamic formulas | Removed | Delivery is one voucher per unit; money prices are set where vouchers are sold |
+| Bootstrap block | Removed | The mechanism is gone — see [voucher-acquisition.md](../market/voucher-acquisition.md) |
+| Mint block | Added — every node issues its own vouchers | The node is the mint for its own capacity |
+| Foreign vouchers | Refused by default | Otherwise a node accumulates vouchers it cannot redeem |
+| Per-peer favoritism | Sell that peer vouchers cheaper, outside the protocol | Same capability, no multiplier machinery |
+| Zero-price peering | Per-peer flag, not transitive | Transitivity would launder free transit for others |
+| Negative delivery prices | Absolute caps, per peer and aggregate, conserved resources only | No counterparty bounds outbound spend; per-peer caps alone are defeated by free identities |
 | Capacity growth | Revenue channels only | On a subsidy channel it rewards the fastest drain |
-| Product extensions | Opaque CBOR blob for implementation-specific fields | Core hashes but doesn't interpret |
-| Peer overrides | By pubkey | Per-peer pricing, blocking, zero-price |
-| Runtime changes | Pricing and peer overrides are hot-reloadable | Operator can adjust without downtime |
-| OpenWrt | YAML directly, UCI integration future | Keep it simple initially |
