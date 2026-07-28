@@ -31,7 +31,15 @@ specific to `tollgate-net` and can be read independently.
 
 | Document | Description |
 | -------- | ----------- |
-| [tollgate-configuration.md](core/tollgate-configuration.md) | YAML configuration reference: products, pricing, channels, peers |
+| [tollgate-configuration.md](core/tollgate-configuration.md) | YAML configuration reference: products, pricing, subsidy limits, channels, peers |
+
+### Proposals
+
+Not adopted. Recorded for evaluation; nothing here is normative.
+
+| Document | Description |
+| -------- | ----------- |
+| [tollgate-vouchers.md](core/tollgate-vouchers.md) | Node-issued vouchers denominated in the resource, market price discovery, and what that costs the trust model |
 
 ### Network Integration (tollgate-net)
 

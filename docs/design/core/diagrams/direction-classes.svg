@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 380" font-family="monospace" font-size="12">
+  <style>
+    text          { fill: #e0e0e0; }
+    text.title    { font-size: 16px; font-weight: bold; }
+    text.subtitle { font-size: 12px; fill: #909090; }
+    text.nlabel   { font-size: 13px; font-weight: bold; }
+    text.nrole    { font-size: 10px; fill: #909090; }
+    text.annot    { font-size: 10px; fill: #909090; font-style: italic; }
+    text.caption  { font-size: 11px; fill: #707080; font-style: italic; }
+    text.bill     { font-size: 11px; font-weight: bold; }
+
+    .bg      { fill: #0d1117; }
+    .callout { fill: #151520; }
+
+    @media (prefers-color-scheme: light) {
+      text          { fill: #1f2328; }
+      text.subtitle, text.nrole, text.annot { fill: #656d76; }
+      text.caption  { fill: #7c8186; }
+      .bg           { fill: #ffffff; }
+      .callout      { fill: #f6f8fa; }
+    }
+  </style>
+
+  <rect width="800" height="380" rx="8" class="bg"/>
+
+  <text x="400" y="28" text-anchor="middle" class="title">Direction Classes</text>
+  <text x="400" y="46" text-anchor="middle" class="subtitle">Dropping the sign asymmetry must not drop the rate asymmetry</text>
+
+  <rect x="180" y="62" width="12" height="12" rx="2" fill="#2e3a5e" stroke="#5080c0" stroke-width="1.5"/>
+  <text x="200" y="72" class="annot">downlink &#8212; abundant</text>
+  <rect x="400" y="62" width="12" height="12" rx="2" fill="none" stroke="#d0a040" stroke-width="1.5"/>
+  <text x="420" y="72" class="annot">uplink &#8212; scarce on a 10:1 backhaul</text>
+
+  <text x="70" y="118" class="nlabel">Leaf X</text>
+  <text x="176" y="110" text-anchor="end" class="nrole">down</text>
+  <rect x="184" y="98" width="440" height="16" fill="#2e3a5e" stroke="#5080c0" stroke-width="1.5"/>
+  <text x="632" y="110" class="annot">1 GB</text>
+  <text x="176" y="134" text-anchor="end" class="nrole">up</text>
+  <rect x="184" y="122" width="9" height="16" fill="none" stroke="#d0a040" stroke-width="1.5"/>
+  <text x="201" y="134" class="annot">20 MB</text>
+  <text x="70" y="138" class="bill" fill="#909090">bill: 1.02 GB</text>
+
+  <text x="70" y="188" class="nlabel">Leaf Y</text>
+  <text x="176" y="180" text-anchor="end" class="nrole">down</text>
+  <rect x="184" y="168" width="9" height="16" fill="#2e3a5e" stroke="#5080c0" stroke-width="1.5"/>
+  <text x="201" y="180" class="annot">20 MB</text>
+  <text x="176" y="204" text-anchor="end" class="nrole">up</text>
+  <rect x="184" y="192" width="440" height="16" fill="none" stroke="#d0a040" stroke-width="1.5"/>
+  <text x="632" y="204" class="annot">1 GB</text>
+  <text x="70" y="208" class="bill" fill="#909090">bill: 1.02 GB</text>
+
+  <rect x="60" y="232" width="680" height="58" rx="4" class="callout" stroke="#c05050" stroke-width="1.5"/>
+  <text x="400" y="253" text-anchor="middle" class="annot" fill="#c05050">Same bill. Y consumed roughly 10&#215; the scarce capacity.</text>
+  <text x="400" y="271" text-anchor="middle" class="annot">One rate across both directions underprices the scarce one &#8212; sustained</text>
+  <text x="400" y="284" text-anchor="middle" class="annot">uploaders are subsidized by downloaders.</text>
+
+  <rect x="60" y="304" width="680" height="42" rx="4" class="callout" stroke="#40a060" stroke-width="1.5"/>
+  <text x="400" y="322" text-anchor="middle" fill="#40a060">cost = &#931; (units_in_class &#215; price_per_unit[class])</text>
+  <text x="400" y="338" text-anchor="middle" class="annot">all rates positive, all billed to the beneficiary &#8212; no sign flip anywhere</text>
+
+  <text x="400" y="368" text-anchor="middle" class="caption">The ResourceAdapter defines its own classes; the core neither enumerates nor interprets them.</text>
+</svg>

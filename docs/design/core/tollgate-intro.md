@@ -22,6 +22,8 @@ A constrained-device variant (`tollgate-net-esp32`) lives in a separate project 
 
 **Zero-trust commerce**: TollGate uses Cashu ecash — bearer tokens that require no identity, no credit check, no account. Payment is atomic: you pay, resources flow. You stop paying, resources stop. No invoices, no billing cycles, no disputes. The cryptographic properties of Cashu Spilman channels ensure neither party can cheat without detection.
 
+That guarantee rests on the **mint being a party independent of both peers**. The sender's protection against a receiver who takes payment and vanishes is Spilman's time-locked refund path, and that path is honored by the mint. Any design in which a peer is also the mint redeeming its own payments loses this property — the only party able to cheat becomes the party enforcing the remedy — and falls back to a reputational bound. That trade-off is examined in [tollgate-vouchers.md](tollgate-vouchers.md).
+
 **Autonomous operation**: Devices negotiate, pay, and settle without human intervention. A TollGate node can operate unattended indefinitely — adjusting prices based on demand, opening and rolling over payment channels, surviving network partitions and mint outages. The operator sets pricing policy; the device executes it.
 
 **Operator sovereignty**: The operator controls their node's economic behavior. Pricing is per-peer, per-product, and dynamically adjustable based on any metrics the system exposes — congestion, demand, link quality, time of day. **The operator's margin is the spread between what they charge for delivery and what they pay their peers.** TollGate provides the tools; the operator makes the business decisions.
@@ -49,6 +51,8 @@ TollGate operates on a single principle: **the provider charges for delivery**. 
 </details>
 
 Prices can be positive, zero, or negative. A well-connected node (e.g., one with direct internet access) charges a positive price because its delivery is valuable. A leaf node is more likely to set a negative price for forwarding traffic — paying its peer to take its outgoing traffic, effectively subsidizing the relationship to ensure peers stay willing to forward on its behalf. A pair of peers owned by the same operator can set zero prices in both directions, skipping payment entirely. Pricing naturally reflects topology, resource scarcity, and the economic relationship between each pair of peers.
+
+Negative prices invert who pays, which also inverts the incentives that make positive pricing self-correcting: payment becomes tied to *acceptance* rather than *delivery*, and acceptance is trivial to fake. They are therefore disabled by default and constrained when enabled — see the Negative Pricing section of [tollgate-pricing.md](tollgate-pricing.md).
 
 Payment flows through **Cashu Spilman channels** — unidirectional payment channels where the sender locks ecash in a 2-of-2 multisig and signs incremental balance updates as resources are metered. The receiver can settle at any time by submitting the latest update to a Cashu mint. Two channels per peer pair (one per direction) enable bidirectional payment.
 
@@ -220,7 +224,7 @@ Each peer pair maintains two independent Spilman channels. At each metering inte
 2. The sender signs a balance update reflecting cumulative units delivered
 3. If both sides owe each other, only the net delta needs to move — avoiding unnecessary channel drain
 
-Metering drift is expected — transit loss means the two sides may disagree on exact counts. At each metering interval, both parties communicate their measured units sent and received, allowing both sides to calibrate their counters. Peers agree on a transit loss tolerance (default: 5%); as long as measurements stay within tolerance, the higher value is used.
+Metering drift is expected — transit loss means the two sides may disagree on exact counts. At each metering interval, both parties communicate their measured units sent and received, allowing both sides to calibrate their counters. Peers agree on a transit loss tolerance (default: 5%); as long as measurements stay within tolerance, the value favoring the deliverer is used — the higher count under a positive price, the lower count under a negative one, so the bias always lands on the party that did the work.
 
 Netting details are explored in a dedicated design document.
 
@@ -293,6 +297,12 @@ TollGate uses the [Cashu Spilman channel](../../../reference/cashu_spilman_chann
 | [tollgate-access-control.md](tollgate-access-control.md) | Delivery gates, access levels, unpaid peer restrictions |
 | [tollgate-metering.md](tollgate-metering.md) | Metering counters, calibration, transit loss resolution |
 | [tollgate-configuration.md](tollgate-configuration.md) | Configuration schema and runtime parameters |
+
+### Proposals
+
+| Document | Description |
+| -------- | ----------- |
+| [tollgate-vouchers.md](tollgate-vouchers.md) | **Proposal, not adopted.** Node-issued vouchers denominated in the resource; market-based price discovery; effect on Spilman, the trust model, and negative pricing |
 
 ### Network Integration
 

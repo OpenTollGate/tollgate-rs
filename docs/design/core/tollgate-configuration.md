@@ -42,6 +42,7 @@ On OpenWrt, the primary config path is `/etc/tollgate/tollgate.yaml`. UCI integr
 identity:    # Node identity (keypair)
 products:    # What this node sells
 pricing:     # Dynamic pricing rules
+subsidy:     # Limits on negative prices (money going out)
 channels:    # Spilman channel parameters
 metering:    # Metering interval and drift tolerance
 bootstrap:   # Bootstrap token parameters
@@ -129,6 +130,7 @@ pricing:
   # Water:       "base * metric('scarcity_index')"
 
   # Price bounds (applied after formula computation)
+  # POSITIVE BASE PRICES ONLY — see the warning below.
   price_floor_multiplier: 0.1            # never below 10% of base
   price_ceiling_multiplier: 10.0         # never above 10x base
 ```
@@ -139,8 +141,82 @@ pricing:
 |-----------|---------|-------------|
 | `pricing.enabled` | `false` | Dynamic pricing disabled by default |
 | `pricing.formula` | `"fixed"` | Use base prices as-is |
-| `price_floor_multiplier` | `0.1` | Min price = 10% of base |
-| `price_ceiling_multiplier` | `10.0` | Max price = 10x base |
+| `price_floor_multiplier` | `0.1` | Min price = 10% of base — **positive base only** |
+| `price_ceiling_multiplier` | `10.0` | Max price = 10x base — **positive base only** |
+
+### Multipliers and Negative Base Prices
+
+Both multipliers are defined relative to a **positive** base price. Applied
+to a negative base they invert, and the resulting behavior is the opposite
+of what the parameter names describe:
+
+```
+base = -10
+price_floor_multiplier: 0.1   →   -1     (least subsidy)
+price_ceiling_multiplier: 10.0 →  -100   (TEN TIMES DEEPER subsidy)
+```
+
+The "ceiling" becomes the most expensive outcome for the node, not the
+least. An operator reading these names as protection gets the reverse.
+
+Therefore:
+
+- Multiplier bounds apply only where the base price is positive.
+- Negative prices are bounded by the absolute limits in `subsidy` below,
+  never by multipliers.
+- Metric-scaled formulas are **rejected** for negative base prices. The
+  metrics are measured against the peer being priced, so a peer that
+  degrades its own link would scale up its own subsidy. See the Negative
+  Pricing section of [tollgate-pricing.md](tollgate-pricing.md).
+
+---
+
+## Subsidy Limits
+
+Negative prices mean money leaves the node. Unlike revenue, there is no
+counterparty whose willingness to pay bounds the total — the bound has to be
+configured. This section is that bound.
+
+```yaml
+subsidy:
+  enabled: false                     # negative prices are refused unless true
+  max_per_peer_per_hour: 0           # absolute cap per peer, sats
+  max_total_per_hour: 0              # aggregate cap across all peers, sats
+  require_conserved_resource: true   # only allow where delivery is physically metered
+  on_budget_exhausted: "close"       # close | zero_price
+```
+
+Both caps are enforced. A per-peer cap alone is defeated by creating more
+peer identities, which are free; an aggregate cap alone lets one peer
+consume the whole budget.
+
+`require_conserved_resource` restricts negative pricing to resources the
+ResourceAdapter declares physically metered and conserved (electricity,
+fluids). For resources that can be silently discarded — network bytes — a
+peer can accept, bill, and drop, and no meter can tell the difference.
+Operators who need negative prices for a non-conserved resource must set
+this to `false` deliberately and accept that exposure is bounded only by the
+caps above.
+
+When a budget is exhausted, `close` ends the session for that direction and
+`zero_price` continues at zero. `close` is the default because a subsidy
+channel that has silently stopped paying is indistinguishable from a stalled
+one.
+
+Related channel-layer behavior: `capacity_growth_factor` is not applied to
+negatively-priced channels, and rollover is refused once the budget is
+exhausted. See
+[tollgate-payment-channels.md](tollgate-payment-channels.md).
+
+### Defaults
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `subsidy.enabled` | `false` | Negative prices refused unless explicitly enabled |
+| `max_per_peer_per_hour` | `0` | Absolute per-peer cap in sats |
+| `max_total_per_hour` | `0` | Absolute aggregate cap in sats |
+| `require_conserved_resource` | `true` | Restrict to physically metered resources |
+| `on_budget_exhausted` | `"close"` | Close the session rather than silently continue |
 
 ---
 
@@ -165,11 +241,24 @@ channels:
 | `min_capacity` | `10` | Minimum channel funding (sats) |
 | `max_capacity` | `10000` | Maximum channel funding (sats) |
 | `initial_capacity` | `10` | First channel capacity for new peers |
-| `capacity_growth_factor` | `2.0` | Capacity multiplier per successful rollover |
+| `capacity_growth_factor` | `2.0` | Capacity multiplier per successful rollover — **incoming (revenue) channels only** |
 | `ttl_seconds` | `3600` | Channel lifetime (1 hour) |
 | `rollover_threshold` | `0.80` | Trigger rollover at 80% exhaustion |
 | `safety_margin_seconds` | `60` | Emergency rollover window before expiry |
 | `stale_timeout_seconds` | `60` | Session closed if rollover blocked this long |
+
+`capacity_growth_factor` rewards a peer relationship that has proven stable
+across rollovers. That is the right incentive on a channel the *peer* funds.
+On a channel this node funds because the price is negative, the same rule
+rewards whichever peer drains it fastest, and combined with automatic
+rollover it drains the wallet unattended, limited only by the balance:
+
+```
+10 → 20 → 40 → 80 → … → max_capacity, then refilled indefinitely
+```
+
+Growth is therefore not applied to negatively-priced channels, and their
+rollover is bounded by `subsidy` above.
 
 ---
 
@@ -337,6 +426,7 @@ Some parameters can be changed at runtime without restarting the node:
 |-----------|-------------------|-------|
 | Product pricing | Yes | New prices take effect at next metering interval |
 | Dynamic pricing rules | Yes | Strategy and factors can be updated |
+| Subsidy limits | Yes | Lowering a cap applies immediately; already-spent budget is not refunded |
 | Peer overrides | Yes | Add/remove/modify peer policies |
 | Channel parameters | No | Applies to new channels only |
 | Metering interval | No | Applies to new sessions only |
@@ -357,6 +447,10 @@ The implementation watches the config file for changes and applies runtime-chang
 | Products | Array of named products | Multiple offerings per node |
 | No products | Node is consumer-only | Pay peers but don't sell |
 | Pricing | Formula expression evaluated against opaque metrics | Core doesn't interpret metrics — implementation sets policy, core executes |
+| Price bound multipliers | Positive base prices only | Multipliers invert under a negative base — the "ceiling" permits the deepest subsidy |
+| Negative price bounds | Absolute caps in `subsidy`, per peer and aggregate | No counterparty bounds outbound spend; per-peer caps alone are defeated by free identities |
+| Negative prices default | Disabled (`subsidy.enabled: false`) | Opt-in, because the failure mode is an unattended wallet drain |
+| Capacity growth | Revenue channels only | On a subsidy channel it rewards the fastest drain |
 | Product extensions | Opaque CBOR blob for implementation-specific fields | Core hashes but doesn't interpret |
 | Peer overrides | By pubkey | Per-peer pricing, blocking, zero-price |
 | Runtime changes | Pricing and peer overrides are hot-reloadable | Operator can adjust without downtime |

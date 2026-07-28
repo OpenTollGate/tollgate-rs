@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 380" font-family="monospace" font-size="12">
+  <style>
+    text          { fill: #e0e0e0; }
+    text.title    { font-size: 16px; font-weight: bold; }
+    text.subtitle { font-size: 12px; fill: #909090; }
+    text.zone     { font-size: 12px; font-weight: bold; }
+    text.nrole    { font-size: 10px; fill: #909090; }
+    text.annot    { font-size: 10px; fill: #909090; font-style: italic; }
+    text.caption  { font-size: 11px; fill: #707080; font-style: italic; }
+
+    .bg      { fill: #0d1117; }
+    .callout { fill: #151520; }
+    .node    { fill: #2e3a5e; }
+
+    @media (prefers-color-scheme: light) {
+      text          { fill: #1f2328; }
+      text.subtitle, text.nrole, text.annot { fill: #656d76; }
+      text.caption  { fill: #7c8186; }
+      .bg           { fill: #ffffff; }
+      .callout      { fill: #f6f8fa; }
+      .node         { fill: #ddf4ff; }
+    }
+  </style>
+
+  <defs>
+    <marker id="apAx" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0,0 8,3 0,6" fill="#909090"/>
+    </marker>
+  </defs>
+
+  <rect width="800" height="380" rx="8" class="bg"/>
+
+  <text x="400" y="28" text-anchor="middle" class="title">The Voucher Price Crosses Zero</text>
+  <text x="400" y="46" text-anchor="middle" class="subtitle">The price of A's vouchers, quoted by B &#8212; so leaf nodes need no separate rule</text>
+
+  <rect x="70" y="106" width="225" height="58" rx="6" class="node" stroke="#5080c0" stroke-width="2"/>
+  <text x="182" y="130" text-anchor="middle" class="zone" fill="#5080c0">B buys A's vouchers</text>
+  <text x="182" y="150" text-anchor="middle" class="nrole">B wants A's capacity</text>
+
+  <rect x="305" y="106" width="290" height="58" rx="6" fill="none" stroke="#d0a040" stroke-width="2"/>
+  <text x="450" y="130" text-anchor="middle" class="zone" fill="#d0a040">A pays B to take them</text>
+  <text x="450" y="150" text-anchor="middle" class="nrole">B has no use for A's capacity</text>
+
+  <rect x="605" y="106" width="115" height="58" rx="6" fill="none" stroke="#c05050" stroke-width="2" stroke-dasharray="5,3"/>
+  <text x="662" y="130" text-anchor="middle" class="zone" fill="#c05050">B refuses</text>
+  <text x="662" y="150" text-anchor="middle" class="nrole">at any price</text>
+
+  <line x1="70" y1="192" x2="740" y2="192" stroke="#909090" stroke-width="1.5" marker-end="url(#apAx)"/>
+  <line x1="300" y1="182" x2="300" y2="202" stroke="#909090" stroke-width="1.5"/>
+  <text x="300" y="216" text-anchor="middle" class="nrole">0</text>
+
+  <text x="70" y="216" class="nrole">voucher price</text>
+  <text x="740" y="216" text-anchor="end" class="nrole">A's vouchers wanted less &#8594;</text>
+
+  <text x="285" y="232" text-anchor="end" class="nrole" fill="#5080c0">positive</text>
+  <text x="315" y="232" class="nrole" fill="#d0a040">negative</text>
+
+  <text x="182" y="248" text-anchor="middle" class="annot" fill="#5080c0">normal operation,</text>
+  <text x="182" y="262" text-anchor="middle" class="annot" fill="#5080c0">running the other direction</text>
+  <text x="182" y="280" text-anchor="middle" class="nrole">relay &#8596; relay</text>
+
+  <text x="450" y="248" text-anchor="middle" class="annot" fill="#d0a040">paid acceptance</text>
+  <text x="450" y="262" text-anchor="middle" class="annot" fill="#d0a040">(the subsidy case)</text>
+  <text x="450" y="280" text-anchor="middle" class="nrole">gateway attracting traffic</text>
+
+  <text x="662" y="248" text-anchor="middle" class="annot" fill="#c05050">normal operation,</text>
+  <text x="662" y="262" text-anchor="middle" class="annot" fill="#c05050">one payment only</text>
+  <text x="662" y="280" text-anchor="middle" class="nrole">relay &#8596; leaf</text>
+
+  <rect x="70" y="298" width="660" height="46" rx="4" class="callout" stroke="#40a060" stroke-width="1"/>
+  <text x="400" y="318" text-anchor="middle" class="annot" fill="#40a060">The refused end is the safe default.</text>
+  <text x="400" y="334" text-anchor="middle" class="annot">A node not configured to accept other nodes' vouchers refuses, and everything still works.</text>
+
+  <text x="400" y="368" text-anchor="middle" class="caption">An even swap sits at zero: the two sides trade vouchers and nothing else moves.</text>
+</svg>

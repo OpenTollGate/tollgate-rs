@@ -351,6 +351,32 @@ After 10 rollovers: 1000 sats (configurable cap)
 
 The exact growth curve is operator-configurable.
 
+### Capacity Growth Does Not Apply to Subsidy Channels
+
+Capacity growth is a reward for a stable *revenue* relationship: a peer that
+keeps paying and rolling over is worth committing more capacity to. On a
+channel funded because the price is **negative** — the node is paying the
+peer — the same rule rewards whichever peer drains the node fastest.
+
+A negatively-priced channel with automatic growth and automatic rollover is
+an unattended drain on the wallet. The peer sends traffic, the channel drains, rollover
+refunds it, and capacity grows on each cycle until it reaches
+`max_capacity` — after which the node keeps refilling at that size for as
+long as the peer keeps sending. Nothing in the channel layer bounds the
+total.
+
+Therefore, when a channel is funded because the node owes the peer:
+
+- `capacity_growth_factor` is **not** applied; capacity stays flat
+- rollover is refused once the peer's subsidy budget for the current window
+  is exhausted (see `subsidy` in
+  [tollgate-configuration.md](tollgate-configuration.md))
+- refusal closes the session for that direction rather than pausing it — a
+  paused subsidy channel is indistinguishable from a stalled one
+
+Budgets are enforced per peer and in aggregate. A per-peer budget alone is
+defeated by creating more peers.
+
 ---
 
 ## Wallet Trait
@@ -455,7 +481,7 @@ If a received BalanceUpdate fails signature verification:
 
 ### Transit Loss Tolerance Exceeded
 
-When metering reports diverge beyond the agreed tolerance, the channel layer's role is to act on the warning: if persistent (3+ consecutive intervals over tolerance) the channel is closed and renegotiated. The resolution rule itself (higher value, tolerances, billing per interval) is documented in [tollgate-metering.md](tollgate-metering.md).
+When metering reports diverge beyond the agreed tolerance, the channel layer's role is to act on the warning: if persistent (3+ consecutive intervals over tolerance) the channel is closed and renegotiated. The resolution rule itself (deliverer-favoring value, tolerances, billing per interval) is documented in [tollgate-metering.md](tollgate-metering.md).
 
 ---
 
@@ -469,8 +495,9 @@ When metering reports diverge beyond the agreed tolerance, the channel layer's r
 | Rollover drain | Old channel drains to 100%, then new channel continues | No wasted capacity |
 | Stale session timeout | 60 seconds (configurable) | Close if rollover can't complete |
 | Netting | Only net debtor signs per interval | Fewer signatures, slower channel drain |
-| Transit loss resolution | Use the higher value | Favors provider (did the work), deterministic |
+| Transit loss resolution | Use the deliverer-favoring value | Favors the party that did the work; a flat "higher value" rule inverts under negative prices |
 | Channel capacity | Start small, grow with relationship | Don't over-commit to new peers |
+| Capacity growth on subsidy channels | Disabled — capacity stays flat, rollover bounded by subsidy budget | Growth rewards a stable revenue relationship; on an outbound subsidy it rewards the fastest drain |
 | Channel TTL | 1 hour default, configurable | Balance between overhead and capital lockup |
 | Safety margin | max(60s, 2×interval) before expiry — triggers rollover | Create new channel, settle old before expiry |
 | Settlement | Only receiver submits to mint | Receiver holds the signed proof |

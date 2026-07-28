@@ -191,7 +191,7 @@ table inet tollgate {
 }
 ```
 
-The egress (`delivered`-to-upstream) direction can't be matched this way — the next-hop MAC isn't resolved until after the output path — but the upstream meters that same flow as *its* `received`, so the two sides still reconcile (and bill on the higher value; see [tollgate-metering.md](../core/tollgate-metering.md)). This receive-side count is what surfaces real transit drift between two honest nodes, rather than the consumer blindly echoing the provider's figure.
+The egress (`delivered`-to-upstream) direction can't be matched this way — the next-hop MAC isn't resolved until after the output path — but the upstream meters that same flow as *its* `received`, so the two sides still reconcile (and bill on the deliverer-favoring value; see [tollgate-metering.md](../core/tollgate-metering.md)). This receive-side count is what surfaces real transit drift between two honest nodes, rather than the consumer blindly echoing the provider's figure.
 
 **Interface counters — dedicated link.** If the deployment puts each peer on its own interface (VLAN, GRE tunnel, separate WireGuard peer), the kernel's interface rx/tx byte counters serve as the source directly, with no per-peer rules — simplest when a peer owns its link, but it cannot disambiguate peers that share an interface.
 

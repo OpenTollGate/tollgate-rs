@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 360" font-family="monospace" font-size="12">
+  <style>
+    text          { fill: #e0e0e0; }
+    text.title    { font-size: 16px; font-weight: bold; }
+    text.subtitle { font-size: 12px; fill: #909090; }
+    text.nlabel   { font-size: 14px; font-weight: bold; }
+    text.nrole    { font-size: 10px; fill: #909090; }
+    text.annot    { font-size: 10px; fill: #909090; font-style: italic; }
+    text.caption  { font-size: 11px; fill: #707080; font-style: italic; }
+    text.leg      { font-size: 12px; font-weight: bold; }
+
+    .bg      { fill: #0d1117; }
+    .callout { fill: #151520; }
+    .node    { fill: #2e3a5e; }
+
+    @media (prefers-color-scheme: light) {
+      text          { fill: #1f2328; }
+      text.subtitle, text.nrole, text.annot { fill: #656d76; }
+      text.caption  { fill: #7c8186; }
+      .bg           { fill: #ffffff; }
+      .callout      { fill: #f6f8fa; }
+      .node         { fill: #ddf4ff; }
+    }
+  </style>
+
+  <defs>
+    <marker id="tlPay" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0,0 7,2.5 0,5" fill="#40a060"/>
+    </marker>
+    <marker id="tlSvc" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0,0 7,2.5 0,5" fill="#5080c0"/>
+    </marker>
+  </defs>
+
+  <rect width="800" height="360" rx="8" class="bg"/>
+
+  <text x="400" y="28" text-anchor="middle" class="title">Two Legs, Priced Separately</text>
+  <text x="400" y="46" text-anchor="middle" class="subtitle">Merging them reopens sink fraud through the back door</text>
+
+  <rect x="45" y="95" width="150" height="125" rx="8" class="node" stroke="#5080c0" stroke-width="2"/>
+  <text x="120" y="150" text-anchor="middle" class="nlabel">Node A</text>
+  <text x="120" y="170" text-anchor="middle" class="nrole">payer</text>
+
+  <rect x="605" y="95" width="150" height="125" rx="8" class="node" stroke="#40a060" stroke-width="2"/>
+  <text x="680" y="150" text-anchor="middle" class="nlabel">Node B</text>
+  <text x="680" y="170" text-anchor="middle" class="nrole">payee</text>
+
+  <text x="400" y="118" text-anchor="middle" class="leg" fill="#40a060">part 1 &#8212; voucher acceptance (the negative price lives here)</text>
+  <line x1="200" y1="130" x2="598" y2="130" stroke="#40a060" stroke-width="2" marker-end="url(#tlPay)"/>
+  <text x="400" y="146" text-anchor="middle" class="annot" fill="#40a060">&#10003; whether B took the vouchers can be checked</text>
+
+  <text x="400" y="182" text-anchor="middle" class="leg" fill="#5080c0">part 2 &#8212; transit</text>
+  <line x1="598" y1="194" x2="202" y2="194" stroke="#5080c0" stroke-width="2" marker-end="url(#tlSvc)"/>
+  <text x="400" y="210" text-anchor="middle" class="annot" fill="#5080c0">&#10003; A verifies end-to-end and stops paying if blackholed</text>
+
+  <rect x="90" y="244" width="620" height="62" rx="4" class="callout" stroke="#c05050" stroke-width="1.5"/>
+  <text x="400" y="266" text-anchor="middle" class="leg" fill="#c05050">&#10007; never merge into one "pay you to take my traffic" price</text>
+  <text x="400" y="284" text-anchor="middle" class="annot">Accepting traffic can be faked. Under a merged price,</text>
+  <text x="400" y="298" text-anchor="middle" class="annot" fill="#c05050">discarding it becomes the most profitable thing the peer can do.</text>
+
+  <text x="400" y="334" text-anchor="middle" class="caption">Paying a peer to accept vouchers is safe. Paying it to accept traffic is not.</text>
+</svg>
