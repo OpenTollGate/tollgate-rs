@@ -78,7 +78,6 @@ Every node runs its own mint and issues vouchers against its own capacity ([toll
 mint:
   url: "https://gateway.example.com/mint"   # advertised in Offer
   unit: "byte"                              # quantity unit for this resource
-  classes: ["up", "down"]                   # one keyset per direction class
 ```
 
 ### Defaults
@@ -87,9 +86,8 @@ mint:
 |-----------|---------|-------------|
 | `url` | *(required)* | Mint URL advertised to peers |
 | `unit` | `"byte"` | Quantity unit — `byte`, `wh`, `ml` |
-| `classes` | `["up", "down"]` | Direction classes; a single-class resource lists one |
 
-The unit is fixed by the resource and must match across every node selling it. Classes are defined by the ResourceAdapter; the core neither enumerates nor interprets them.
+The unit is fixed by the resource and must match across every node selling it. There is no per-direction unit: what a peer pays to have its own outgoing traffic carried is the acceptance price on its vouchers, not a second keyset ([tollgate-vouchers.md](tollgate-vouchers.md)).
 
 ---
 
@@ -274,7 +272,7 @@ subsidy:
   max_per_peer_per_hour: 0           # absolute cap per peer
   max_total_per_hour: 0              # aggregate cap across all peers
   require_conserved_resource: true   # only where delivery is physically metered
-  on_budget_exhausted: "close"       # close | zero_price
+  on_budget_exhausted: "close"       # close | stop_paying
 ```
 
 Both caps are enforced. A per-peer cap alone is defeated by creating more peer identities, which are free; an aggregate cap alone lets one peer consume the whole budget.
@@ -297,9 +295,9 @@ Both caps are enforced. A per-peer cap alone is defeated by creating more peer i
 
 ```yaml
 peers:
-  # Zero-price peering (operator's own nodes, friends)
+  # Do not charge this peer (operator's own nodes, friends)
   "02abc...":
-    zero_price: true
+    no_charge: true
 
   # Override the price for this peer's own mint
   "03def...":
@@ -318,12 +316,12 @@ peers:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `zero_price` | `false` | Skip payment entirely with this peer |
+| `no_charge` | `false` | Do not charge this peer. One-sided — whether the peer charges back is its own decision |
 | `voucher_price` | *(from `vouchers.accept`, else refused)* | Signed price for this peer's own mint, overriding the global entry |
 | `blocked` | `false` | Refuse all service to this peer |
 | `endpoint` | *(none)* | Static endpoint for IP peering |
 
-There is no `price_multiplier`. Favoring a peer means selling it vouchers more cheaply, which happens outside the protocol. `zero_price` is **not transitive** — it means free for that peer's own traffic, never free for anything that peer is nominally the beneficiary of.
+There is no `price_multiplier`. Favoring a peer means selling it vouchers more cheaply, which happens outside the protocol. `no_charge` is **not transitive** — it means free for that peer's own traffic, never free for anything that peer is nominally the beneficiary of.
 
 ---
 
@@ -336,7 +334,6 @@ identity:
 mint:
   url: "https://gateway.example.com/mint"
   unit: "byte"
-  classes: ["up", "down"]
 
 vouchers:
   price_scale: 1000
@@ -362,7 +359,7 @@ metering:
 
 peers:
   "02abc...":
-    zero_price: true
+    no_charge: true
 ```
 
 ---
@@ -379,7 +376,7 @@ Some parameters can be changed at runtime without restarting the node:
 | Peer overrides | Yes | Add/remove/modify peer policies |
 | Channel parameters | No | Applies to new channels only |
 | Metering interval | No | Applies to new sessions only |
-| Own mint URL, unit, classes | No | Requires restart; changing them invalidates outstanding vouchers |
+| Own mint URL and unit | No | Requires restart; changing them invalidates outstanding vouchers |
 | Identity | No | Requires restart |
 
 The implementation watches the config file for changes and applies runtime-changeable parameters without interrupting active sessions.
@@ -397,6 +394,6 @@ The implementation watches the config file for changes and applies runtime-chang
 | Accepted mints | A set per node, own mint implicitly at par, empty by default | One unit of account network-wide makes any mint's vouchers usable; accepting an upstream's mint lets a relay spend what it receives without converting |
 | Market services | Own config section, own endpoints, own protocol, disabled by default | Buying and swapping is not part of paying for delivery. `market.path` may point at a third party, so a node can offer swaps without running a market |
 | Per-peer favoritism | Sell that peer vouchers cheaper, outside the protocol | Same capability, no multiplier machinery |
-| Zero-price peering | Per-peer flag, not transitive | Transitivity would launder free transit for others |
+| Free peering | Per-peer `no_charge` flag, one-sided, not transitive | It is a decision about a relationship rather than a price; transitivity would launder free transit for others |
 | Negative delivery prices | Absolute caps, per peer and aggregate, conserved resources only | No counterparty bounds outbound spend; per-peer caps alone are defeated by free identities |
 | Capacity growth | Revenue channels only | On a subsidy channel it rewards the fastest drain |

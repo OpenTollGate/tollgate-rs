@@ -79,7 +79,7 @@ The Spilman channel lifecycle begins after peers have exchanged Announce and Off
                 │              (old channel settles
                 │               while new one is active)
                 │
-          (zero-price: skip funding, go directly to Active)
+          (no charge: skip funding, go directly to Active)
 ```
 </details>
 
@@ -147,9 +147,11 @@ Settlement produces two sets of proofs (Stage 1 → Stage 2 in Spilman terminolo
 
 Settlement complete. Proofs distributed. Channel is done.
 
-### Zero-Price Shortcut
+### Free Peering Shortcut
 
-When both sides set all prices to zero, the pair goes directly to Active with no funding, no channels, no metering, and no balance updates. Delivery is free.
+When a node decides not to charge a peer, it funds no channel toward that peer and meters nothing for it. If **both** sides decide that, the pair goes directly to Active with no funding, no channels, no metering, and no balance updates.
+
+This is a decision about a relationship, not a price — there is no delivery price to set to zero. It is also one-sided: a node chooses only whether it charges, so a peering can legitimately run with one channel.
 
 ---
 
@@ -391,10 +393,11 @@ compression channels exist to provide.
 both accept a shared hub mint get cheaper settlement than two that only accept
 their own. Nothing enforces convergence; it is simply cheaper.
 
-Note the cost lands only on **bidirectional** peers. A pay-only leaf has one
-channel and nothing to net, so it is unaffected — and bidirectional peers are
-the ones most likely to share a mint anyway, since a relay accepting its
-upstream's mint is the common case.
+A peering has both channels wherever both sides charge, so most peerings have
+something to net or not net. Relays are the ones most likely to
+share a mint, since a relay accepting its upstream's mint is the common case —
+which is also where netting is worth the most, because flow in both directions
+is comparable.
 
 ---
 

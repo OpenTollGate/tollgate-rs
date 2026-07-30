@@ -81,17 +81,6 @@ That last point cuts the other way too. A voucher accepted everywhere is
 systemically important, and its issuer's failure stops being one router's
 problem.
 
-### Direction Classes Thin It Further
-
-A node issues a separate keyset per direction class — `up` and `down` for
-network forwarding ([tollgate-vouchers.md](../core/tollgate-vouchers.md)) —
-because a byte of scarce uplink is not a byte of abundant downlink.
-
-That is correct pricing and bad for liquidity: it splits each issuer's
-already-thin book in two, and the two halves are not interchangeable. Any
-market design has to carry the class through, and a voucher has to state
-which class it claims.
-
 ---
 
 ## Open Problems
@@ -99,6 +88,5 @@ which class it claims.
 | Problem | Notes |
 |---|---|
 | Liquidity | Per-issuer books are small and thin; the case for making them is unproven. |
-| Class fragmentation | Separate keysets per direction class split each book further, and the halves cannot substitute for each other. |
 | Observability of failure | The signal only prices reliability if failures to redeem are visible to people who are not the victim. Nothing currently makes them visible — see [issuer-risk.md](issuer-risk.md). |
 | Quoting a price for a peer's vouchers | Every node has to price every peer's vouchers, continuously. Refusing foreign vouchers by default avoids the question but does not answer it. |

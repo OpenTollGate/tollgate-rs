@@ -58,7 +58,7 @@ TollGate sets a per-peer forwarding policy in FIPS. For blocked peers (`None`, `
 - Traffic **from** this peer addressed **to other nodes** (transit): Dropped
 - Traffic **from other nodes** destined **to or through** this peer: Not forwarded to this peer
 
-For allowed peers (`Active`, `ZeroPrice`), FIPS forwards normally — no restrictions.
+For allowed peers (`Active`, `Free`), FIPS forwards normally — no restrictions.
 
 This is a data-plane policy, not a control-plane hook. FIPS simply needs to know: "for peer X, restrict to local-only" or "for peer X, forward normally."
 
@@ -69,7 +69,7 @@ This is a data-plane policy, not a control-plane hook. FIPS simply needs to know
 TollGate controls which peers appear in bloom filter computation. Unpaid peers (`None`, `Suspended`) are excluded — their node_addr is not added to the bloom filter advertised to other peers. This prevents traffic from being routed toward a peer that will have it dropped at the gate.
 
 When a peer's access level changes:
-- `None` -> `Active`/`ZeroPrice`: Add to bloom filters immediately, trigger FilterAnnounce
+- `None` -> `Active`/`Free`: Add to bloom filters immediately, trigger FilterAnnounce
 - `Active` -> `Suspended`: Remove from bloom filters **after a delay** (default: 30 seconds) to avoid flapping. If the peer recovers (tops up, funds new channel) within the delay, the removal is cancelled and the peer stays visible. This prevents rapid bloom filter churn when a peer temporarily exhausts balance.
 - `Suspended` -> `Active`: Re-add to bloom filters immediately (cancel any pending removal)
 
@@ -128,7 +128,7 @@ fn set_peer_access(&self, peer: &Pubkey, access: AccessLevel) -> Result<(), Adap
             // Bloom filter exclusion is inferred — restricted peers are excluded
             self.node.set_peer_forwarding_policy(node_addr, ForwardingPolicy::LocalOnly);
         }
-        AccessLevel::Active | AccessLevel::ZeroPrice => {
+        AccessLevel::Active | AccessLevel::Free => {
             // Allow full forwarding for this peer
             // Bloom filter inclusion is inferred — allowed peers are included
             self.node.set_peer_forwarding_policy(node_addr, ForwardingPolicy::Full);

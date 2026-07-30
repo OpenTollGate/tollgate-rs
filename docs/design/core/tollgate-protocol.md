@@ -16,7 +16,7 @@ All messages use **CBOR** ([RFC 8949](https://www.rfc-editor.org/rfc/rfc8949)) e
 
 **Why CBOR over binary (FIPS-style)?**
 - TollGate is transport-agnostic — messages may traverse different substrates. Self-describing format avoids custom parsers per transport.
-- Variable-length fields (mint URLs, class names) are natural in CBOR, awkward in fixed binary.
+- Variable-length fields (mint URLs, units) are natural in CBOR, awkward in fixed binary.
 - Well-supported in Rust (`ciborium`, `minicbor`), Go, Python, TypeScript — important for interop with Cashu Spilman ecosystem.
 - Compact enough for constrained devices (ESP32). CBOR is more compact than JSON, comparable to Protocol Buffers for small messages.
 
@@ -24,7 +24,7 @@ All messages use **CBOR** ([RFC 8949](https://www.rfc-editor.org/rfc/rfc8949)) e
 - Larger on the wire. Parsing overhead on constrained devices.
 
 **Why not FIPS-style binary?**
-- TollGate messages contain variable-length strings (mint URLs, units, class names). Binary encoding for these is complex and fragile.
+- TollGate messages contain variable-length strings (mint URLs, units). Binary encoding for these is complex and fragile.
 - FIPS binary encoding is optimized for fixed-structure, high-frequency, low-latency packets (TreeAnnounce, MMP reports). TollGate messages are infrequent (every 5s) and don't need that level of optimization.
 
 ### Message Structure
@@ -172,7 +172,7 @@ TollGate peer; human-facing UI is currently a non-goal
 | Type | Name | Direction | Purpose |
 |------|------|-----------|---------|
 | 0x00 | Announce | Bidirectional | "I am a TollGate node" — protocol version, pubkey |
-| 0x01 | Offer | Bidirectional | Own mint, unit, direction classes, interval range, accepted mints |
+| 0x01 | Offer | Bidirectional | Own mint, unit, interval range, accepted mints |
 | 0x02 | Accept | Bidirectional | Accept the offer, provide Spilman funding |
 | 0x03 | ChannelReady | Bidirectional | Confirm Spilman channel funded and active |
 | 0x04 | MeteringReport | Bidirectional | Unsigned resource stats for this interval |
@@ -213,7 +213,7 @@ Both peers send Announce. If versions don't match, the peer with the lower versi
 |-----|------|---------|
 | `0x01`–`0x80000000` | reserved | Must be zero in v1. Reserved for future capabilities (e.g., FSP transport, batch settlement). |
 
-Spilman support is universal in v1 — there is no per-token payment mode to signal. Zero-price peering and channel rollover fall out of the existing message set and need no capability bit either.
+Spilman support is universal in v1 — there is no per-token payment mode to signal. Free peering and channel rollover fall out of the existing message set and need no capability bit either.
 
 ### 0x01 Offer
 
@@ -229,9 +229,8 @@ mint, or charge to take it.
   0: 0x01,                         // type: Offer
   1: <mint_url>,                   // text — this node's own mint
   2: <unit>,                       // text — "byte", "wh", "ml"
-  3: [<class>, ...],               // array of text — direction classes, e.g. ["up", "down"]
-  4: [<min_interval_ms>, <max_interval_ms>],  // [u32, u32] — metering interval range
-  5: [                             // mints whose vouchers this node accepts
+  3: [<min_interval_ms>, <max_interval_ms>],  // [u32, u32] — metering interval range
+  4: [                             // mints whose vouchers this node accepts
     {
       1: <mint_url>,               // text
       2: <price>,                  // i64 — scaled; > 0 we buy them,
@@ -239,21 +238,27 @@ mint, or charge to take it.
     },
     ...
   ],
-  6: <price_scale>,                // u32 — divisor for prices; default 1000
+  5: <price_scale>,                // u32 — divisor for prices; default 1000
 }
 ```
 
-Field 1 is implicitly accepted at par and need not appear in field 5. An
-empty field 5 means the node takes only its own vouchers, which is the
+Field 1 is implicitly accepted at par and need not appear in field 4. An
+empty field 4 means the node takes only its own vouchers, which is the
 default.
+
+**The Offer prices delivery only.** What a peer pays to have its *own*
+outgoing traffic carried is settled by paid acceptance — the price this node
+quotes for that peer's vouchers, which is field 4
+([tollgate-vouchers.md](tollgate-vouchers.md)). There is no separate uplink
+rate, because that price already is one.
 
 Because the unit is the same network-wide, any mint's vouchers are
 denominated identically — only the issuer differs, which is what the
 per-mint price expresses. See Accepted Mints in
 [tollgate-vouchers.md](tollgate-vouchers.md).
 
-Keysets, and therefore per-class amounts, are fetched from each `mint_url` by
-ordinary Cashu means (NUT-01/02). The protocol does not restate them.
+Keysets are fetched from each `mint_url` by ordinary Cashu means
+(NUT-01/02). The protocol does not restate them.
 
 The per-mint price is a **settlement ratio**, not a money price: it says how
 many units of delivery a voucher from that mint is credited as. Both sides
@@ -314,13 +319,13 @@ Sent by both peers at each metering interval. Contains **unsigned** resource sta
 {
   0: 0x04,                         // type: MeteringReport
   1: <elapsed_ms>,                 // u64 — milliseconds since session start (cumulative)
-  2: [{<class>: <delivered>}, ...], // cumulative units we delivered TO this peer, per class
-  3: [{<class>: <received>}, ...],  // cumulative units we received FROM this peer, per class
+  2: <delivered>,                  // u64 — cumulative units we delivered TO this peer
+  3: <received>,                   // u64 — cumulative units we received FROM this peer
   4: [{1: <mint_url>, 2: <price>}, ...],  // updated accepted-mint prices, or null
 }
 ```
 
-Both peers send MeteringReport. Each side computes the interval delta (`current_cumulative - previous_cumulative`) per class. Once both reports are received, each side independently computes:
+Both peers send MeteringReport. Each side computes the interval delta (`current_cumulative - previous_cumulative`). Once both reports are received, each side independently computes:
 1. Units A delivered to B this interval — B owes A that many A-vouchers
 2. Units B delivered to A this interval — A owes B that many B-vouchers
 3. Any voucher-price settlement agreed under paid acceptance
@@ -449,7 +454,6 @@ General-purpose rejection for any proposal.
 | 0x05 | Channel funding invalid |
 | 0x06 | Balance verification failed |
 | 0x07 | Transit loss tolerance exceeded |
-| 0x08 | Direction class not supported |
 | 0x09 | Protocol version unsupported |
 | 0x0A | Message type retired (bootstrap) |
 | 0xFF | Other (see reason_text) |
@@ -482,8 +486,8 @@ Both sides send Offer and Accept because each delivers independently. The interv
      B → A: Announce (v1, pubkey_B, capabilities)
 
   2. Offer
-     A → B: Offer (own mint, unit, classes, interval range, accepted mints)
-     B → A: Offer (own mint, unit, classes, interval range, accepted mints)
+     A → B: Offer (own mint, unit, interval range, accepted mints)
+     B → A: Offer (own mint, unit, interval range, accepted mints)
 
   3. Channels
      B → A: Accept + funding (B→A channel)
@@ -492,8 +496,8 @@ Both sides send Offer and Accept because each delivers independently. The interv
      A → B: ChannelReady (A→B)
 
   4. Settle (repeat every metering interval)
-     A → B: MeteringReport (cumulative delivered, received, per class)
-     B → A: MeteringReport (cumulative delivered, received, per class)
+     A → B: MeteringReport (cumulative delivered, received)
+     B → A: MeteringReport (cumulative delivered, received)
      [both compute net]
      debtor → creditor: BalanceUpdate (signed)
      creditor → debtor: BalanceAck
@@ -543,19 +547,19 @@ service. There is no pre-channel phase.
 ```
 </details>
 
-### Zero-Price Peering
+### Free Peering
 
-![Zero-Price Peering](diagrams/zero-price-peering.svg)
+![Free Peering](diagrams/free-peering.svg)
 <details><summary>Text version</summary>
 
 ```
   A → B: Announce
   B → A: Announce
 
-  A → B: Offer (zero-price peering)
-  B → A: Offer (zero-price peering)
-  B → A: Accept (no Spilman funding — zero price)
-  A → B: Accept (no Spilman funding — zero price)
+  A → B: Offer (no charge)
+  B → A: Offer (no charge)
+  B → A: Accept (no Spilman funding — neither charges)
+  A → B: Accept (no Spilman funding — neither charges)
 
   [delivery active, no metering, no balance update messages]
 ```
@@ -582,7 +586,7 @@ Typical message sizes (CBOR encoded):
 | Offer (3 accepted mints) | ~200 bytes |
 | Accept | ~180 bytes (dominated by Spilman funding) |
 | ChannelReady | ~40 bytes |
-| MeteringReport | ~70 bytes (two direction classes) |
+| MeteringReport | ~50 bytes |
 | BalanceUpdate | ~110 bytes |
 | BalanceAck | ~40 bytes |
 | RolloverInit | ~200 bytes (Spilman funding) |
@@ -613,7 +617,7 @@ Plus 2 bytes of length prefix per message. These are infrequent (every 5 s at th
 | Market operations | Separate endpoints and a separate protocol; never TollGate messages | Buying and swapping vouchers is not part of paying for delivery, and a node that offers neither is fully functional |
 | Money in the protocol | Never appears | Sats are a market concern; the payment protocol only ever counts units and vouchers |
 | Bootstrap messages | Removed, type codes 0x07/0x08 left reserved | The mint a peer needs is the peer it is talking to; a retired code should Reject cleanly rather than misparse |
-| Zero-price mode | Accept without funding, skip metering | Simplest path for free peering |
+| Free mode | Accept without funding, skip metering | Simplest path for free peering |
 | Channel ownership | Each peer manages its own outgoing channel | Channels carry shared state, but rollover is initiated by the funder alone — only the party putting up new funds decides when to do it |
 | Capability signaling | u32 bitfield in Announce (field 4), all bits reserved in v1 | Spilman is universal now that per-token payment is gone; the field stays for future use |
 | Versioning | Single byte in Announce, must-match | Simple for v1, can add negotiation later |

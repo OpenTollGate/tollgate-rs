@@ -138,47 +138,47 @@ with how many bits the number has. A 1 GiB payment is a 30-bit number and
 takes up to 30 proofs, about 15 on average. That is what the spent-proof set
 below has to absorb.
 
-### Direction Classes
+### Uplink Is Priced By Paid Acceptance, Not By A Second Unit
 
 Uplink and downlink are not the same good. Asymmetric backhaul (DSL, cable,
 cellular) runs 5:1 to 20:1, so a unit carried in the scarce direction costs
-the operator far more than one in the abundant direction. One-voucher-per-unit
-across both would underprice the scarce one:
+the operator far more. One-voucher-per-unit across both would underprice it:
 
-![Direction Classes](diagrams/direction-classes.svg)
+![Uplink Asymmetry](diagrams/uplink-asymmetry.svg)
 <details><summary>Text version</summary>
 
 ```
-Leaf X: 1 GB down, 20 MB up   → 1.02 GB of vouchers
-Leaf Y: 1 GB up,   20 MB down → 1.02 GB of vouchers
+Leaf X: 1 GB down, 50 MB up
+Leaf Y: 1 GB up,   50 MB down
 
-On a 10:1 uplink-constrained backhaul, Y consumed ~10× the scarce capacity
-for the same number of vouchers. Sustained uploaders would be subsidized
-by downloaders.
+On a 10:1 uplink-constrained backhaul Y consumes ~10× the scarce capacity.
+Charging both the same per byte would have downloaders subsidize uploaders.
 ```
 </details>
 
-A node therefore issues a **separate keyset per direction class**, and the
-one-voucher-per-unit rule applies within a class. An uplink voucher and a
-downlink voucher both claim one byte, of different things.
+**No second unit is needed to fix this**, because the two directions are
+already paid for by two different mechanisms:
 
-| Resource | Classes |
-|---|---|
-| Network forwarding | `up`, `down` |
-| Electricity | `import`, `export` |
-| Single-class resource | one class |
+| | Who delivers | How it is paid |
+|---|---|---|
+| Download | the relay | 1 voucher per unit, from the Offer |
+| Upload | the leaf | the acceptance price on the leaf's vouchers |
 
-The scarcity difference shows up where it belongs — in what each class sells
-for. Uplink vouchers cost more because uplink is scarcer, and the protocol
-still does no arithmetic.
+Paid acceptance below is the uplink charge. The relay must hold leaf-vouchers
+in proportion to what the leaf uploads, so the price it quotes for them *is* a
+per-uplink-unit rate:
 
-The ResourceAdapter defines its own class names and tags metered units with
-them ([tollgate-metering.md](tollgate-metering.md)). The core neither
-enumerates nor interprets them.
+```
+1 GB down                       → 1 GB of relay-vouchers
+50 MB up, acceptance price 10   → 500 MB of relay-vouchers
+                          total → 1.5 GB
+```
 
-Classes thin each issuer's market further, since the two halves cannot
-substitute for each other — see
-[voucher-price-signal.md](../market/voucher-price-signal.md).
+An operator on symmetric fibre quotes near zero. One on a 10:1 cellular
+uplink quotes deeply negative. Same economics a per-direction unit would give,
+using a price that already exists, already crosses zero, and is already
+negotiated per peering — and without splitting the issuer's vouchers into two
+non-interchangeable kinds.
 
 ---
 
@@ -274,7 +274,7 @@ of whoever is delivering**, one voucher per unit.
 If A also delivers something B wants, the same thing happens in the other
 direction with A-vouchers, priced and paid separately. Where A delivers
 nothing B wants — a leaf node — that second payment is simply absent.
-Nothing has to be zero-priced or cancelled out; there is one payment instead
+Nothing has to be uncharged or cancelled out; there is one payment instead
 of two.
 
 That is the whole mechanism for the large majority of peerings. Vouchers can

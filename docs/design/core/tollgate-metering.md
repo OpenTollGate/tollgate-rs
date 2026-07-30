@@ -19,22 +19,6 @@ Both sides meter independently. Each side's counters are local; they are reconci
 
 All units delivered to a peer are metered — including TollGate protocol messages and locally-addressed resources. Distinguishing control plane from data plane at the metering layer adds complexity for negligible savings (protocol messages are tiny relative to delivered resources).
 
-### Direction Classes
-
-Counters are kept **per direction class** — `up` and `down` for network
-forwarding, `import` and `export` for electricity. Uplink and downlink are
-different goods on asymmetric backhaul, and a node issues a separate keyset
-per class so the scarce direction can cost more in the market
-([tollgate-vouchers.md](tollgate-vouchers.md)).
-
-The classes are defined by the ResourceAdapter. The core neither enumerates
-nor interprets them; it reports and reconciles whatever comes back.
-
-A single-class resource reports one class and behaves exactly as an
-unclassified counter would.
-
----
-
 ## Cumulative Counter Model
 
 Counters are **cumulative since session start** (the ChannelReady baseline). Each peer reports its cumulative totals; both sides compute the per-interval delta locally as `current_cumulative - previous_cumulative`.
@@ -81,7 +65,7 @@ The rule is stated in terms of the deliverer rather than as "use the higher valu
 
 **Note:** this rule is honest-deliverer-optimistic. A dishonest provider could inflate unit counts, and under a negative price a dishonest subsidy payer could deflate them. In both cases the abuse is capped at the tolerance. Mitigation (proof-of-delivery, reputation systems) requires further design — out of scope for v1.
 
-Tolerance and the consecutive-over-tolerance threshold are configurable — see [tollgate-configuration.md](tollgate-configuration.md). Counters are kept per direction class.
+Tolerance and the consecutive-over-tolerance threshold are configurable — see [tollgate-configuration.md](tollgate-configuration.md).
 
 **Within-tolerance divergence is not free.** A counterparty that sits persistently at the edge of the tolerance band is extracting the full tolerance every interval while never triggering the over-tolerance path. Implementations should track the *signed mean* of the divergence across intervals, not just its magnitude: honest transit loss is noisy around a small positive mean, whereas manipulation shows as a stable offset pinned near the tolerance limit.
 
@@ -107,12 +91,11 @@ pub trait ResourceAdapter: Send + Sync {
 }
 
 /// Continuous metering counter stream. Implementation pushes updates as delivery proceeds.
-/// Counters are keyed by adapter-defined direction class ("up", "down", ...).
 pub struct MeterStream {
-    /// Cumulative units delivered TO this peer, per class
-    pub delivered: watch::Receiver<HashMap<String, u64>>,
-    /// Cumulative units received FROM this peer, per class
-    pub received: watch::Receiver<HashMap<String, u64>>,
+    /// Cumulative units delivered TO this peer (outbound)
+    pub delivered: watch::Receiver<u64>,
+    /// Cumulative units received FROM this peer (inbound)
+    pub received: watch::Receiver<u64>,
 }
 ```
 
@@ -146,4 +129,3 @@ pub type PeerMetrics = HashMap<String, MetricValue>;
 | Transit loss tolerance | 5% default, configurable | Accounts for loss between measurement points |
 | Persistent over-tolerance | Close after 3 consecutive intervals | Something is wrong with the link or metering |
 | Peer metrics | Opaque map (key → value), never an input to price | The peer controls its own metrics, so pricing from them lets it price itself |
-| Direction classes | Counters kept per adapter-defined class | Uplink and downlink are different goods; the core stays ignorant of what the classes mean |

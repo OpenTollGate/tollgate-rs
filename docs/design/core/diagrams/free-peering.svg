@@ -43,7 +43,7 @@
   <rect width="720" height="380" rx="8" class="bg"/>
 
   <!-- Title -->
-  <text x="360" y="28" text-anchor="middle" class="title">Zero-Price Peering</text>
+  <text x="360" y="28" text-anchor="middle" class="title">Free Peering</text>
   <text x="360" y="46" text-anchor="middle" class="subtitle">Both prices = 0 — no funding, no metering, no settlement</text>
 
   <!-- Node headers -->
@@ -76,10 +76,10 @@
   <text x="40" y="223" text-anchor="middle" class="annot">Pricing</text>
 
   <line x1="170" y1="215" x2="548" y2="215" stroke="#5080c0" stroke-width="1.5" marker-end="url(#aR)"/>
-  <text x="360" y="208" text-anchor="middle" class="alabel" fill="#5080c0">Offer (zero-price peering)</text>
+  <text x="360" y="208" text-anchor="middle" class="alabel" fill="#5080c0">Offer (no charge)</text>
 
   <line x1="550" y1="240" x2="172" y2="240" stroke="#d0a040" stroke-width="1.5" marker-end="url(#aL)"/>
-  <text x="360" y="233" text-anchor="middle" class="alabel" fill="#d0a040">Offer (zero-price peering)</text>
+  <text x="360" y="233" text-anchor="middle" class="alabel" fill="#d0a040">Offer (no charge)</text>
 
   <line x1="70" y1="260" x2="660" y2="260" class="sep"/>
 

@@ -149,7 +149,7 @@ For open hotspots, plain HTTP is functional but leaves funding proofs visible to
 
 ## ResourceAdapter Implementation
 
-`tollgate-net` provides a `ResourceAdapter` implementation that hooks `tollgate-core` into the kernel networking stack. The implementation has three responsibilities: gate forwarding via firewall rules, expose per-peer traffic counters per direction class, and (optionally) supply peer metrics for operator visibility.
+`tollgate-net` provides a `ResourceAdapter` implementation that hooks `tollgate-core` into the kernel networking stack. The implementation has three responsibilities: gate forwarding via firewall rules, expose per-peer traffic counters, and (optionally) supply peer metrics for operator visibility.
 
 ### Access Control via Firewall Rules
 
@@ -159,7 +159,7 @@ Access control is enforced via **firewall rules** (nftables, iptables, pf):
 |-------------|----------------|
 | `None` | Drop all forwarded traffic from/to this peer's IP. Allow traffic to local ports (TollGate protocol). |
 | `Active` | Allow forwarded traffic from/to this peer's IP. |
-| `ZeroPrice` | Allow forwarded traffic from/to this peer's IP. |
+| `Free` | Allow forwarded traffic from/to this peer's IP. |
 | `Suspended` | Same as `None` — drop forwarded, allow local. |
 
 `set_peer_access()` translates to firewall rule changes. The peer's IP address (from the TollGate session connection) is the identifier. Bloom filter inference is a no-op — bloom filters are not part of the IP model.

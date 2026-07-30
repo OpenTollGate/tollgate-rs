@@ -141,11 +141,11 @@ should track the *signed mean* of divergence rather than its magnitude.
 
 ---
 
-## Zero-Price Peering Is Not Transitive
+## Free Peering Is Not Transitive
 
-Zero-price means free for **that peer's own traffic**, never free for anything
-that peer is nominally the beneficiary of. Otherwise a zero-priced peer becomes
-a way to launder free transit for others.
+Deciding not to charge a peer means free for **that peer's own traffic**, never
+free for anything that peer is nominally the beneficiary of. Otherwise an
+uncharged peer becomes a way to launder free transit for others.
 
 ---
 
@@ -185,6 +185,6 @@ deposit, or an operator allowlist. None is specified.
 | Absolute subsidy budgets, per peer and aggregate | Sign-inverted multipliers; Sybil-multiplied caps |
 | Capacity growth on revenue channels only | Unattended wallet drain via automatic rollover |
 | Sign-aware transit loss resolution | A permanent within-tolerance skim |
-| Zero-price not transitive | Laundered free transit |
+| Free peering not transitive | Laundered free transit |
 | Locks survive every swap | Locks removed by swapping through change |
 | Aggregate caps on anything granted per peer | Free identities multiplying every subsidy |

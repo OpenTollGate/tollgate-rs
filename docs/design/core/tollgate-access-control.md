@@ -18,7 +18,7 @@ Each peer is in exactly one access level at any time:
 |-------|---------|-------------------|-------------------------------|------|
 | `None` | Blocked | Allowed | Hidden | Peer connected, no payment yet |
 | `Active` | Allowed (metered) | Allowed | Visible | Spilman channels funded |
-| `ZeroPrice` | Allowed (unmetered) | Allowed | Visible | Both sides agreed on zero pricing |
+| `Free` | Allowed (unmetered) | Allowed | Visible | Neither side charges the other |
 | `Suspended` | Blocked | Allowed | Hidden | Balance exhausted, awaiting top-up or renegotiation |
 
 The access level says only whether delivery is allowed and how (metered or not). How much the peer has left to spend is tracked by the payment subsystem and does not surface as an access level.
@@ -27,7 +27,7 @@ The access level says only whether delivery is allowed and how (metered or not).
 
 ```
 None --> Active (Spilman channels funded)
-None --> ZeroPrice (zero-price peering agreed)
+None --> Free (free peering agreed)
 Active --> Suspended (channel exhausted with rollover timeout)
 Suspended --> Active (new channel funded)
 Any --> None (disconnect)
@@ -40,10 +40,10 @@ Any --> None (disconnect)
                        ┌──────────────┐
                        │     None     │ (blocked, hidden)
                        └──┬─────────┬─┘
-              payment ok  │         │ zero-price
+              payment ok  │         │ free
                           ▼         ▼
                    ┌──────────┐    ┌───────────┐
-                   │  Active  │    │ ZeroPrice │
+                   │  Active  │    │ Free │
                    └────┬─────┘    └───────────┘
                         │ exhausted (+ timeout for Spilman)
                         ▼
@@ -71,11 +71,13 @@ This means:
 
 Spilman channels are funded. Delivery is allowed and metered, with cost deducted via signed BalanceUpdates.
 
-### ZeroPrice
+### Free
 
-Both sides agreed on zero-price peering — two nodes under one operator, or any pair that agrees to it. No payment infrastructure is needed: neither issues vouchers to the other, delivery is unmetered, and no metering or balance update messages are exchanged. This is the simplest path for free peering.
+Neither side charges the other — two nodes under one operator, or any pair whose operators decided not to. No payment infrastructure is needed: neither issues vouchers to the other, delivery is unmetered, and no metering or balance update messages are exchanged.
 
-**Zero-price is not transitive.** It means free for *that peer's own traffic*, never free for anything that peer is nominally the beneficiary of — otherwise a zero-priced peer becomes a way to launder free transit for others. See [tollgate-hazards.md](tollgate-hazards.md).
+This is a decision about the relationship rather than a price set to zero, and each side decides only for itself. Where only one side charges, that side's peer sits in `Active` and funds one channel; `Free` covers the case where neither does.
+
+**Free is not transitive.** It means free for *that peer's own traffic*, never free for anything that peer is nominally the beneficiary of — otherwise an uncharged peer becomes a way to launder free transit for others. See [tollgate-hazards.md](tollgate-hazards.md).
 
 ### Suspended
 
@@ -106,10 +108,10 @@ In FIPS, bloom filters advertise reachability — "I can reach destination X thr
 |-------------|---------------------------|
 | `None` | No — hidden (FIPS) |
 | `Active` | Yes — visible (FIPS) |
-| `ZeroPrice` | Yes — visible (FIPS) |
+| `Free` | Yes — visible (FIPS) |
 | `Suspended` | No — hidden (FIPS) |
 
-Bloom filter visibility is **inferred from the access level** — the implementation maps `set_peer_access(None/Suspended)` to hidden and `set_peer_access(Active/ZeroPrice)` to visible. No separate API call needed.
+Bloom filter visibility is **inferred from the access level** — the implementation maps `set_peer_access(None/Suspended)` to hidden and `set_peer_access(Active/Free)` to visible. No separate API call needed.
 
 This requires a FIPS modification — the ability to selectively include/exclude peers from bloom filter computation. See [FIPS_FEATURE_REQUESTS.md](../FIPS_FEATURE_REQUESTS.md).
 
@@ -124,7 +126,7 @@ pub trait ResourceAdapter: Send + Sync {
     /// Set the access level for a peer. The implementation enforces delivery rules
     /// AND infers bloom filter visibility from the access level:
     /// - None/Suspended -> hidden from bloom filters (FIPS)
-    /// - Active/ZeroPrice -> visible in bloom filters (FIPS)
+    /// - Active/Free -> visible in bloom filters (FIPS)
     fn set_peer_access(&self, peer: &Pubkey, access: AccessLevel) -> Result<(), AdapterError>;
 
     // ... metering members documented in tollgate-metering.md
@@ -135,8 +137,8 @@ pub enum AccessLevel {
     None,
     /// Delivery allowed, metered against funded Spilman channels.
     Active,
-    /// Delivery allowed, unmetered. Zero-price peering.
-    ZeroPrice,
+    /// Delivery allowed, unmetered. Free peering.
+    Free,
     /// Delivery blocked. Balance exhausted, awaiting payment.
     Suspended,
 }
@@ -195,7 +197,7 @@ A future revision may replace the enum with a directional model that captures bo
 | `InboundOnly` | Blocked | Allowed (we pay them) |
 | `OutboundOnly` | Allowed (they pay us) | Blocked |
 | `Full` | Allowed | Allowed |
-| `ZeroPrice` | Allowed (unmetered) | Allowed (unmetered) |
+| `Free` | Allowed (unmetered) | Allowed (unmetered) |
 
 This makes the asymmetric case (`InboundOnly` / `OutboundOnly`) a first-class state, simplifies bloom-filter-inclusion logic, and maps cleanly to FIPS forwarding policy variants. Out of scope for v1 — flagged for future design work.
 
@@ -208,6 +210,6 @@ This makes the asymmetric case (`InboundOnly` / `OutboundOnly`) a first-class st
 | Default access | None (blocked) | No pay, no service |
 | Unpaid resources | Only local-addressed + TollGate protocol | Peer must be able to negotiate payment |
 | Bloom filter visibility | Inferred from access level (FIPS) | No separate API — access level implies visibility |
-| Zero-price peers | Skip all payment, go to Active; not transitive | Simplest path for free peering; transitivity would launder free transit |
+| Free peers | Skip all payment, go to Active; not transitive | Simplest path for free peering; transitivity would launder free transit |
 | Suspended state | Blocked but can still negotiate | Peer can recover without reconnecting |
 | Protocol messages | Always allowed regardless of access level | Payment negotiation must work even when blocked |

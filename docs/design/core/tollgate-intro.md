@@ -53,7 +53,7 @@ TollGate operates on a single principle: **the provider is paid for delivery, in
 
 **Delivery has no price in the protocol.** A node is paid in its own vouchers, and one voucher is a claim on one unit of its capacity — so `n` units delivered costs exactly `n` vouchers ([tollgate-vouchers.md](tollgate-vouchers.md)). What a unit costs in money is settled where the peer buys those vouchers, which the protocol never sees.
 
-A well-connected node sells its vouchers dearly because its delivery is valuable. A node that wants to favor a peer sells that peer vouchers cheaply. A pair of peers owned by the same operator skips payment entirely with a zero-price flag. Topology, scarcity and relationships all show up in what vouchers fetch, rather than in a price sheet.
+A well-connected node sells its vouchers dearly because its delivery is valuable. A node that wants to favor a peer sells that peer vouchers cheaply. A pair of peers owned by the same operator skips payment entirely by deciding not to charge each other. Topology, scarcity and relationships all show up in what vouchers fetch, rather than in a price sheet.
 
 One price is quoted peer-to-peer: what a node will pay, or charge, to hold the *other* node's vouchers. It is signed and crosses zero, and it is how a leaf pays for its own upload — see Paid Acceptance in [tollgate-vouchers.md](tollgate-vouchers.md).
 
@@ -71,11 +71,26 @@ A peer arrives already holding vouchers for the node it wants service from, or i
 
 4. **Settlement**: Either party can settle at any time. The receiver submits the latest signed balance update to the mint — its own — and the sender reclaims the remaining change.
 
-### Pay-only Clients
+### Both Channels Normally Exist
 
-A **pay-only** client only pays its peers and never charges them. Because the peer never owes the client anything, the peer doesn't fund a channel back toward the client — it would only ever sit at zero balance.
+**A peering has a channel in each direction wherever the node on that side charges.** A channel is absent only when a node has decided not to charge that particular peer — an operator decision about a relationship, not a price set to zero. There is no delivery price to set: one voucher per unit, always.
 
-This is the typical leaf consumer: a phone or laptop that wants to buy resources and has nothing chargeable to deliver. Its uplink is handled by paid acceptance rather than by a reverse channel.
+That decision is **one-sided**. A node controls only whether *it* charges; whether the peer charges back is the peer's call. So three shapes are all normal:
+
+| | A charges B | B charges A | Channels |
+|---|---|---|---|
+| Ordinary peering | yes | yes | both |
+| One-way free | no | yes | one (B→A) |
+| Free peering | no | no | none |
+
+The middle row is easy to overlook. A gateway may decide not to charge a community node while still being charged by its own upstream.
+
+The leaf case is the other easy mistake. A phone that buys transit and delivers nothing anyone wants still has **both** channels:
+
+- **Leaf → relay** funds the relay's deliveries, in relay-vouchers.
+- **Relay → leaf** funds the relay's payments for the leaf's *upload*, in leaf-vouchers — the relay is the payer there because, under the deliverer-is-paid rule, the leaf delivers its own outgoing bytes.
+
+The leaf supplies the leaf-vouchers the relay pays back from, and pays the acceptance price to have them held, so its net outlay covers both directions. See Paid Acceptance in [tollgate-vouchers.md](tollgate-vouchers.md).
 
 ### Offline Resilience
 
@@ -140,7 +155,7 @@ The three layers introduced in [What's in this repo](#whats-in-this-repo) — `t
 `tollgate-core` contains all payment logic, pricing, metering, and access control. It is network-agnostic — it does not know about FIPS, IP, or any specific transport. The consumer provides three things via traits:
 
 1. **Wallet** — Token operations, Spilman channel funding, balance signing, settlement. Must support token locking (NUT-11 2-of-2 multisig).
-2. **Resource Adapter** — Peer identification, metering counters (units delivered per peer, per direction class), access control enforcement, and optional metrics for operator visibility.
+2. **Resource Adapter** — Peer identification, metering counters (units delivered per peer), access control enforcement, and optional metrics for operator visibility.
 3. **Peer Identifiers** — Peers are always identified by their Nostr public key (npub). The consumer provides npubs for connected peers, similar to how FIPS transports provide identifiers to FMP.
 
 ### Separation Model
@@ -190,21 +205,21 @@ tollgate-core (lib)              ← Pure logic, no platform code
 
 - **Spilman Channel Manager**: Manages the channel pair per peer (one per direction). Handles the full lifecycle: channel funding → active payments → rollover → settlement. Each peer initiates rollover for its own outgoing channel — only the funder needs to act, since only the funder puts up new funds. Delegates cryptographic operations to the Wallet trait. Handles offline scenarios gracefully.
 
-- **Voucher Mint**: Each node issues vouchers against its own capacity, one keyset per direction class, and redeems them on delivery. Redemption is a local spent-proof check — the node is the authority on its own paper.
+- **Voucher Mint**: Each node issues vouchers against its own capacity and redeems them on delivery. Redemption is a local spent-proof check — the node is the authority on its own paper.
 
-- **Access Control**: Gates delivery per peer based on payment status. Unpaid peers can only send data addressed to the local node (for payment negotiation). Zero-price peers bypass payment entirely.
+- **Access Control**: Gates delivery per peer based on payment status. Unpaid peers can only send data addressed to the local node (for payment negotiation). Free peers bypass payment entirely.
 
 - **Metering**: Tracks units delivered per peer (outbound — what we charge for). Reports to the Channel Manager for balance updates. Handles transit loss between peers' measurements with configurable tolerance (default 5%).
 
 - **Protocol Messages**: Wire format for offers, channel negotiation, metering reports and balance updates. Designed for minimal back-and-forth between peers.
 
-- **Peer State Machine**: Tracks each peer's payment lifecycle: `new → channel_opening → active → rolling_over → settling → closed`. Zero-price peers go directly to `active`.
+- **Peer State Machine**: Tracks each peer's payment lifecycle: `new → channel_opening → active → rolling_over → settling → closed`. Free peers go directly to `active`.
 
 ---
 
 ## What a Node Advertises
 
-A node's offer is short: the URL of its own mint, the unit it denominates in, the direction classes it issues keysets for, an acceptable metering interval range, and one signed price for the peer's vouchers.
+A node's offer is short: the URL of its own mint, the unit it denominates in, an acceptable metering interval range, and a signed price for each mint whose vouchers it will take.
 
 There are no products, no per-mint rate tables, and no price to renegotiate mid-session. Delivery costs one voucher per unit, and the peer already holds the vouchers.
 

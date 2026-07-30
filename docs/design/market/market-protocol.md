@@ -86,7 +86,7 @@ Ask what it will give. A quote is an offer to trade, valid for
 
 ```json
 { "give": {"mint": "sat-mint-url", "amount": 300},
-  "want": {"mint": "https://gateway.example.com/mint", "class": "down"} }
+  "want": {"mint": "https://gateway.example.com/mint"} }
 ```
 
 ```json
@@ -151,4 +151,3 @@ path.
 | Swap atomicity | One side moves first. A hash-locked construction needs both mints online and has no working implementation. |
 | Quote honesty | Nothing binds a market to honor a quote it issued. Exposure is one swap; reputation is the only correction, and it has the same observability problem as issuer default. |
 | Market discovery | How a peer finds a market at all, if the node it is talking to does not run one. Unspecified — a well-known path on the peer, a directory, or out-of-band. |
-| Class-aware quoting | Quotes name a direction class, so a market must hold inventory per class. Thins books further, as does everything about classes. |
