@@ -1,9 +1,9 @@
 # TollGate Vouchers
 
-This document specifies what TollGate peers pay each other with. It is the
-basis for [tollgate-pricing.md](tollgate-pricing.md), which covers what
-things cost, and [tollgate-payment-channels.md](tollgate-payment-channels.md),
-which covers how payments are batched.
+This document specifies what TollGate peers pay each other with, and what
+delivery costs. [tollgate-payment-channels.md](tollgate-payment-channels.md)
+covers how payments are batched;
+[tollgate-hazards.md](tollgate-hazards.md) covers what must never be priced.
 
 **Voucher** is the plain name for what a Cashu token *means* when its keyset
 is denominated in bytes and its mint is the node that will deliver them: a
@@ -21,26 +21,50 @@ Three things change, and nothing else:
 - the mint is run by the node that will deliver those bytes
 - redemption means that node delivers, rather than a mint paying out
 
-Each node runs its own mint and issues vouchers rather than quoting prices
-in sats. Two peers settle the exchange rate between their vouchers
-themselves, with an optional market on top for price discovery.
+Each node runs its own mint and issues vouchers against its own capacity.
+Two peers settle the exchange rate between their vouchers themselves, with an
+optional market on top for price discovery.
 
 ---
 
 ## Why
 
-An earlier design priced delivery directly: products, price sheets, per-mint
-rates, per-peer multipliers, and a take-it-or-leave-it renegotiation at
-every metering interval. It worked, but pricing was private to each pair of
-peers. A peer could not compare two providers without connecting to both,
-and nothing anywhere priced an operator's *reliability* — a node that took
-payment and delivered poorly was noticed only by the peer that had already
-paid it.
+Pricing delivery directly means pricing it privately, between each pair of
+peers. A peer cannot compare two providers without connecting to both, and
+nothing anywhere prices an operator's *reliability* — a node that takes
+payment and delivers poorly is noticed only by the peer that already paid it.
 
-Vouchers move price discovery out of the private price sheet into a form any
-node can read, and take pricing out of the protocol altogether. What an
-issuer's vouchers fetch is a public, continuously updated measure of what
-the network expects it to deliver.
+Vouchers take pricing out of the protocol entirely and put price discovery
+somewhere any node can read it. What an issuer's vouchers fetch is a public,
+continuously updated measure of what the network expects it to deliver.
+
+---
+
+## Delivery Costs One Voucher Per Unit
+
+A node meters units delivered to a peer and collects the same number of
+vouchers. The exchange is one-to-one by construction: a voucher *is* a claim
+on one unit of capacity, so redeeming `n` of them is delivering `n` units.
+
+```
+units delivered this interval = n
+vouchers collected            = n
+```
+
+**There is no price for delivery anywhere in the protocol** — no rate to
+quote, no product to select, no multiplier to apply. What a unit costs in
+money is settled where a peer acquires vouchers, which the protocol never
+sees ([market/](../market/README.md)).
+
+Three consequences:
+
+- **A node's price is what its vouchers sell for.** A node that wants more
+  revenue per unit sells its vouchers dearer. It renegotiates nothing with
+  its peers.
+- **Per-peer pricing needs no per-peer machinery.** Favoring a peer means
+  selling that peer vouchers more cheaply, or giving them away.
+- **Delivery cannot be repriced mid-session.** The peer already holds the
+  vouchers and their claim is fixed.
 
 ---
 
@@ -113,6 +137,48 @@ powers of two and a payment takes one proof per set bit, so the count scales
 with how many bits the number has. A 1 GiB payment is a 30-bit number and
 takes up to 30 proofs, about 15 on average. That is what the spent-proof set
 below has to absorb.
+
+### Direction Classes
+
+Uplink and downlink are not the same good. Asymmetric backhaul (DSL, cable,
+cellular) runs 5:1 to 20:1, so a unit carried in the scarce direction costs
+the operator far more than one in the abundant direction. One-voucher-per-unit
+across both would underprice the scarce one:
+
+![Direction Classes](diagrams/direction-classes.svg)
+<details><summary>Text version</summary>
+
+```
+Leaf X: 1 GB down, 20 MB up   → 1.02 GB of vouchers
+Leaf Y: 1 GB up,   20 MB down → 1.02 GB of vouchers
+
+On a 10:1 uplink-constrained backhaul, Y consumed ~10× the scarce capacity
+for the same number of vouchers. Sustained uploaders would be subsidized
+by downloaders.
+```
+</details>
+
+A node therefore issues a **separate keyset per direction class**, and the
+one-voucher-per-unit rule applies within a class. An uplink voucher and a
+downlink voucher both claim one byte, of different things.
+
+| Resource | Classes |
+|---|---|
+| Network forwarding | `up`, `down` |
+| Electricity | `import`, `export` |
+| Single-class resource | one class |
+
+The scarcity difference shows up where it belongs — in what each class sells
+for. Uplink vouchers cost more because uplink is scarcer, and the protocol
+still does no arithmetic.
+
+The ResourceAdapter defines its own class names and tags metered units with
+them ([tollgate-metering.md](tollgate-metering.md)). The core neither
+enumerates nor interprets them.
+
+Classes thin each issuer's market further, since the two halves cannot
+substitute for each other — see
+[voucher-price-signal.md](../market/voucher-price-signal.md).
 
 ---
 
@@ -233,6 +299,21 @@ traffic. Correcting it inside the payment flow would mean signed delivery
 prices, sign-aware metering and a spending budget to stop the resulting
 subsidy running away.
 
+![Where the Negative Price Comes From](diagrams/negative-price-inversion.svg)
+<details><summary>Text version</summary>
+
+```
+  Rule: the deliverer is paid
+    Leaf A ──── "delivers" its own uplink bytes ────→ Relay B
+    Leaf A ←─── so the rule has B owing A ─────────── Relay B
+
+  Paid acceptance
+    Leaf A ──── pays B to hold A-vouchers ─────────→ Relay B
+    Leaf A ←─── B pays for the upload with them ──── Relay B
+    both directions positive; the negative price sits on the voucher leg
+```
+</details>
+
 Paid acceptance corrects it outside the payment flow instead. A issues its
 own vouchers, which B has no use for. A **pays B — in B's vouchers — to hold
 them**. B now has A-vouchers on hand to pay A with when A delivers its
@@ -268,7 +349,7 @@ The voucher price measures one thing: how much B wants A's capacity. The
 leaf sits at one end, where B wants it so little that A must pay. A gateway
 trying to attract traffic sits at the other, buying its peers' vouchers
 because it wants what they deliver — the "attract resources" case from
-[tollgate-pricing.md](tollgate-pricing.md), and the same price with the
+[tollgate-hazards.md](tollgate-hazards.md), and the same price with the
 opposite sign.
 
 ### One Price, Crossing Zero
@@ -277,8 +358,9 @@ Paid acceptance and normal operation are one price per peering that happens
 to cross zero, so leaf nodes need no separate rule.
 
 The price is the price **of A's vouchers**, quoted by B. It follows the same
-sign convention as the rest of the design ([tollgate-pricing.md](tollgate-pricing.md),
-where `negative = node pays peer`): positive when the vouchers are worth
+sign convention as the rest of the design: positive when the vouchers are
+worth something, negative when they are a burden someone has to be paid to
+take. positive when the vouchers are worth
 something, negative when they are a burden someone has to be paid to take.
 
 ![Voucher Price Scale](diagrams/voucher-price-scale.svg)
@@ -335,7 +417,7 @@ can check, and B gains nothing by taking them and lying about it.
 The same arrangement applied to traffic is not safe. Accepting traffic can
 be faked: the peer takes it, bills for it, and discards it, having done no
 work. Discarding becomes the most profitable thing it can do. See the
-Negative Pricing section of [tollgate-pricing.md](tollgate-pricing.md).
+[tollgate-hazards.md](tollgate-hazards.md).
 
 Traffic must therefore stay priced as **transit**, which the payer checks
 end-to-end and stops paying for when nothing arrives. Merging the two into a
@@ -515,13 +597,12 @@ it wants service from, or it does not get service.
 
 The routes — Lightning mint quotes, direct purchase from the issuer, local
 swaps of sat tokens, cross-mint swaps — are covered in
-[voucher-acquisition.md](../market/voucher-acquisition.md), along with why
-there is no bootstrap mechanism and what removing it cost.
+[voucher-acquisition.md](../market/voucher-acquisition.md), along with why no
+bootstrap mechanism is needed and what its absence costs.
 
 The one thing worth noting here: a peer can mint, swap and fund against its
-counterparty **over the peering link alone**, because the mint it needs is
-the peer it is already talking to. Mint reachability is never the obstacle
-it used to be.
+counterparty **over the peering link alone**, because the mint it needs is the
+peer it is already talking to. Mint reachability is never the obstacle.
 
 Paying per token for a whole session instead of opening channels still
 works, but the cost falls on the provider. Every interval's payment lands in
@@ -539,7 +620,7 @@ Whether B took the vouchers is a fact. B gains nothing by taking them and
 lying about it. Whether B did anything useful with traffic is not a fact
 anyone can establish, which is why the same arrangement is dangerous there
 (see Never Price Traffic Acceptance in
-[tollgate-pricing.md](tollgate-pricing.md)).
+[tollgate-hazards.md](tollgate-hazards.md)).
 
 **The hazard was never the negative sign. It is pricing acceptance of
 something whose acceptance can be faked.**
@@ -576,9 +657,9 @@ redemptions arriving at once. Both are in Open Problems below.
 
 ## Rate Auction and Token Bucket
 
-Rather than a fixed bandwidth cap, the payment sets the allowance: what a
-peer pays during one interval determines the capacity it gets in the next.
-Each interval becomes a small auction for the link.
+The payment sets the allowance: what a peer pays during one interval
+determines the capacity it gets in the next. Each interval becomes a small
+auction for the link.
 
 This is the arithmetic from Buying a Rate, read backwards. The peer hands
 over `rate × interval` worth of vouchers, and that quantity is what sets its

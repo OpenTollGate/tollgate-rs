@@ -6,7 +6,7 @@ This document specifies the configuration schema for TollGate — the YAML forma
 
 TollGate uses YAML-based configuration following the same pattern as FIPS. Every parameter has a sensible default — a minimal config only specifies what differs.
 
-The config is considerably smaller than it used to be. Delivery has no price to configure: one voucher buys one unit, so products, pricing scales, floors, ceilings, per-peer multipliers and dynamic pricing formulas are all gone ([tollgate-pricing.md](tollgate-pricing.md)). What a unit costs in money is decided where vouchers are sold, which is not the node's protocol configuration.
+Delivery has no price to configure: one voucher buys one unit ([tollgate-vouchers.md](tollgate-vouchers.md)). What a unit costs in money is decided where vouchers are sold, which is not the node's protocol configuration.
 
 ---
 
@@ -264,7 +264,7 @@ metering:
 
 ## Subsidy Limits
 
-Negative *delivery* prices — paying a peer to take a resource off your hands — survive only for surplus disposal on a conserved, physically metered resource ([tollgate-pricing.md](tollgate-pricing.md)). They do not apply to network forwarding.
+Negative *delivery* prices — paying a peer to take a resource off your hands — survive only for surplus disposal on a conserved, physically metered resource ([tollgate-hazards.md](tollgate-hazards.md)). They do not apply to network forwarding.
 
 Where they are used, money leaves the node and no counterparty's willingness to pay bounds the total, so the bound has to be configured.
 
@@ -393,8 +393,6 @@ The implementation watches the config file for changes and applies runtime-chang
 | Format | YAML | Follows FIPS pattern, human-readable, supports comments |
 | Loading | Cascading multi-file with priority | System defaults + user overrides + deployment specifics |
 | Defaults | Every parameter has a sensible default | Minimal config for simple deployments |
-| Products, pricing scales, floors, ceilings, multipliers, dynamic formulas | Removed | Delivery is one voucher per unit; money prices are set where vouchers are sold |
-| Bootstrap block | Removed | The mechanism is gone — see [voucher-acquisition.md](../market/voucher-acquisition.md) |
 | Mint block | Added — every node issues its own vouchers | The node is the mint for its own capacity |
 | Accepted mints | A set per node, own mint implicitly at par, empty by default | One unit of account network-wide makes any mint's vouchers usable; accepting an upstream's mint lets a relay spend what it receives without converting |
 | Market services | Own config section, own endpoints, own protocol, disabled by default | Buying and swapping is not part of paying for delivery. `market.path` may point at a third party, so a node can offer swaps without running a market |

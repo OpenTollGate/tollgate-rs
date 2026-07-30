@@ -51,7 +51,7 @@ TollGate operates on a single principle: **the provider is paid for delivery, in
 ```
 </details>
 
-**Delivery has no price in the protocol.** A node is paid in its own vouchers, and one voucher is a claim on one unit of its capacity — so `n` units delivered costs exactly `n` vouchers ([tollgate-pricing.md](tollgate-pricing.md)). What a unit costs in money is settled where the peer buys those vouchers, which the protocol never sees.
+**Delivery has no price in the protocol.** A node is paid in its own vouchers, and one voucher is a claim on one unit of its capacity — so `n` units delivered costs exactly `n` vouchers ([tollgate-vouchers.md](tollgate-vouchers.md)). What a unit costs in money is settled where the peer buys those vouchers, which the protocol never sees.
 
 A well-connected node sells its vouchers dearly because its delivery is valuable. A node that wants to favor a peer sells that peer vouchers cheaply. A pair of peers owned by the same operator skips payment entirely with a zero-price flag. Topology, scarcity and relationships all show up in what vouchers fetch, rather than in a price sheet.
 
@@ -208,7 +208,7 @@ A node's offer is short: the URL of its own mint, the unit it denominates in, th
 
 There are no products, no per-mint rate tables, and no price to renegotiate mid-session. Delivery costs one voucher per unit, and the peer already holds the vouchers.
 
-Covered in depth in [tollgate-pricing.md](tollgate-pricing.md) and [tollgate-vouchers.md](tollgate-vouchers.md).
+Covered in depth in [tollgate-vouchers.md](tollgate-vouchers.md).
 
 ---
 
@@ -287,11 +287,11 @@ TollGate uses the [Cashu Spilman channel](../../../reference/cashu_spilman_chann
 | Document | Description |
 | -------- | ----------- |
 | [tollgate-vouchers.md](tollgate-vouchers.md) | What peers pay each other with: denomination, paid acceptance, channels as state compression |
-| [tollgate-pricing.md](tollgate-pricing.md) | One voucher per unit; direction classes; what must never be priced |
 | [tollgate-protocol.md](tollgate-protocol.md) | Wire protocol: messages, negotiation, codec |
 | [tollgate-payment-channels.md](tollgate-payment-channels.md) | Spilman channel lifecycle, rollover, offline resilience |
 | [tollgate-access-control.md](tollgate-access-control.md) | Delivery gates, access levels, unpaid peer restrictions |
 | [tollgate-metering.md](tollgate-metering.md) | Metering counters, calibration, transit loss resolution |
+| [tollgate-hazards.md](tollgate-hazards.md) | Constraints that exist because removing them reintroduces a known abuse |
 | [tollgate-configuration.md](tollgate-configuration.md) | Configuration schema and runtime parameters |
 
 ### Market

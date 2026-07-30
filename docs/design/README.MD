@@ -11,8 +11,9 @@ details live in the network-peering section.
 
 **The protocol does not price anything.** Peers pay in vouchers — Cashu
 tokens denominated in the resource itself, issued by the node that will
-deliver it — and one voucher buys one unit. What a unit costs in money is
-settled where vouchers are bought, which the market documents cover.
+deliver it — and one voucher buys one unit
+([tollgate-vouchers.md](core/tollgate-vouchers.md)). What a unit costs in
+money is settled where vouchers are bought, which the market documents cover.
 
 ## Reading Order
 
@@ -26,11 +27,11 @@ can be read independently.
 | -------- | ----------- |
 | [tollgate-intro.md](core/tollgate-intro.md) | Introduction: goals, architecture, payment model, security |
 | [tollgate-vouchers.md](core/tollgate-vouchers.md) | Vouchers: denomination, normal operation, paid acceptance, channels as state compression |
-| [tollgate-pricing.md](core/tollgate-pricing.md) | One voucher per unit; direction classes; what must never be priced |
 | [tollgate-protocol.md](core/tollgate-protocol.md) | Wire protocol: CBOR messages, interval flow, offers |
 | [tollgate-payment-channels.md](core/tollgate-payment-channels.md) | Spilman channels: lifecycle, rollover, netting, wallet trait |
 | [tollgate-access-control.md](core/tollgate-access-control.md) | Access control: delivery gates, access levels, FIPS bloom filter visibility |
 | [tollgate-metering.md](core/tollgate-metering.md) | Metering: counters, direction classes, transit loss resolution, peer metrics |
+| [tollgate-hazards.md](core/tollgate-hazards.md) | Constraints that exist because removing them reintroduces a known abuse |
 
 ### Configuration
 

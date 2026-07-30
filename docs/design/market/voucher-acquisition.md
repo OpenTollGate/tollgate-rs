@@ -10,27 +10,19 @@ rather than executing a protocol phase.
 
 ---
 
-## Why There Is No Bootstrap Mechanism
+## No Bootstrap Mechanism
 
-An earlier design carried **bootstrap tokens**: a regular Cashu token a peer
-could hand over when it could not reach a mint. The problem it solved was
-circular — you need to pay to get online, but funding a payment channel
-needs mint connectivity.
+Systems that price delivery in money need a way for a peer to pay before it
+can reach a mint — the circular problem a *bootstrap token* solves. There is
+nothing circular here: the mint you need is the peer you are already talking
+to, so a peer can mint, swap and fund against its counterparty over the
+peering link alone, with no upstream connectivity at all. Sessions begin at
+channel establishment.
 
-That problem does not exist here. The mint you need is the peer you are
-already talking to. A peer can mint, swap and fund against its counterparty
-over the peering link alone, with no upstream connectivity at all.
-
-So the mechanism is gone, and with it a whole subsystem: the bootstrap state
-machine, its message types, its mint-verification path, its config block,
-and the `bootstrap_received` peer state. Sessions begin at channel
-establishment.
-
-**What that costs:** the design no longer guarantees that a peer holding
-only sats can walk up to any node and get connected. A local swap (below)
-recovers it for nodes that choose to offer one, but it is no longer
-something every node must implement — which also means it is no longer
-something every constrained device must implement.
+**What that costs:** nothing guarantees a peer holding only sats can walk up
+to any node and get connected. A local swap (below) recovers it for nodes that
+choose to offer one, but no node is obliged to — which also means no
+constrained device is obliged to implement it.
 
 ---
 

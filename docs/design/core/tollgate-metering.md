@@ -2,7 +2,7 @@
 
 This document specifies how TollGate counts units delivered between peers, how the two sides reconcile their measurements, and the trait the implementation provides.
 
-Metering produces the inputs to billing. Under vouchers billing is trivial — one voucher per unit delivered, see [tollgate-pricing.md](tollgate-pricing.md). Access control ([tollgate-access-control.md](tollgate-access-control.md)) decides whether delivery happens; metering counts what was delivered.
+Metering produces the inputs to billing. Billing is trivial — one voucher per unit delivered, see [tollgate-vouchers.md](tollgate-vouchers.md). Access control ([tollgate-access-control.md](tollgate-access-control.md)) decides whether delivery happens; metering counts what was delivered.
 
 ---
 
@@ -25,7 +25,7 @@ Counters are kept **per direction class** — `up` and `down` for network
 forwarding, `import` and `export` for electricity. Uplink and downlink are
 different goods on asymmetric backhaul, and a node issues a separate keyset
 per class so the scarce direction can cost more in the market
-([tollgate-pricing.md](tollgate-pricing.md)).
+([tollgate-vouchers.md](tollgate-vouchers.md)).
 
 The classes are defined by the ResourceAdapter. The core neither enumerates
 nor interprets them; it reports and reconciles whatever comes back.
@@ -63,7 +63,7 @@ Within tolerance: both sides note the discrepancy but bill on the value that fav
 
 When the two sides disagree on unit counts, billing uses **the value that favors the deliverer**. Even if the receiver dropped some units, the deliverer still expended resources sending them, so the residual bias is deliberately placed on the party that did the work.
 
-For network forwarding that is always the **higher** of the two counts, because delivery is always paid for by the receiver — one voucher per unit, never negative ([tollgate-pricing.md](tollgate-pricing.md)).
+For network forwarding that is always the **higher** of the two counts, because delivery is always paid for by the receiver — one voucher per unit, never negative ([tollgate-vouchers.md](tollgate-vouchers.md)).
 
 The rule is stated in terms of the deliverer rather than as "use the higher value" because a negative delivery price inverts it. Where negative delivery prices are permitted at all — surplus disposal of a conserved, physically metered resource — the deliverer is the *payer*, and taking the higher value would let a peer inflate its received-count and skim up to the full tolerance every interval, indefinitely, without ever crossing the threshold that triggers a warning.
 

@@ -155,14 +155,12 @@ When both sides set all prices to zero, the pair goes directly to Active with no
 
 ## What the Metering Interval Is For
 
-The interval survives the move to vouchers, but not for the reason it
-originally had. It was described as a renegotiation point — the provider could
-change its price at every interval and the peer could accept or walk away.
-There is nothing to renegotiate now: delivery costs one voucher per unit and
-the peer already holds the vouchers, so their claim is fixed
-([tollgate-pricing.md](tollgate-pricing.md)).
+The interval is **not** a price renegotiation point. Delivery costs one
+voucher per unit and the peer already holds the vouchers, so their claim is
+fixed ([tollgate-vouchers.md](tollgate-vouchers.md)) — there is nothing to
+renegotiate.
 
-Four reasons remain, and they are enough:
+It exists for four other reasons:
 
 - **Batching.** One signature per interval instead of one per unit. This is
   the whole point of a Spilman channel.
@@ -384,9 +382,9 @@ applies is decided deterministically with no extra round-trip.
 | Spent-proof records | More — each rollover adds a set | Fewer |
 
 For peers with similar flow in both directions the shared-mint case
-dramatically extends channel life, exactly as it always did. Losing it costs
-signatures, rollovers, and — because each rollover writes a spent-proof set —
-some of the state compression channels exist to provide.
+dramatically extends channel life. Losing it costs signatures, rollovers,
+and — because each rollover writes a spent-proof set — some of the state
+compression channels exist to provide.
 
 **This is an incentive toward a common mint**, on top of the liquidity one in
 [voucher-price-signal.md](../market/voucher-price-signal.md). Two relays that

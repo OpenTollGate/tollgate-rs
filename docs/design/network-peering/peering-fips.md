@@ -77,7 +77,7 @@ When a peer's access level changes:
 
 ### 3. MMP Metrics Feed
 
-TollGate exposes FIPS MMP metrics through `peer_metrics()`. They are **not** inputs to any price — delivery costs one voucher per unit ([tollgate-pricing.md](../core/tollgate-pricing.md)), and metrics are peer-influenced, so pricing from them would let a peer price itself. They exist for operator visibility and capacity decisions. Per-peer metrics are available after the Noise IK handshake completes and MMP starts reporting:
+TollGate exposes FIPS MMP metrics through `peer_metrics()`. They are **not** inputs to any price — delivery costs one voucher per unit ([tollgate-vouchers.md](../core/tollgate-vouchers.md)), and metrics are peer-influenced, so pricing from them would let a peer price itself. They exist for operator visibility and capacity decisions. Per-peer metrics are available after the Noise IK handshake completes and MMP starts reporting:
 
 | MMP Metric | TollGate use |
 |-----------|-------------|

@@ -176,7 +176,7 @@ Spilman support is universal in v1 — there is no per-token payment mode to sig
 Sent by each peer after Announce. Declares where the sender's own vouchers come from, and which other mints' vouchers it will take.
 
 There is no price for delivery: one voucher buys one unit
-([tollgate-pricing.md](tollgate-pricing.md)). The only prices here are
+([tollgate-vouchers.md](tollgate-vouchers.md)). The only prices here are
 per-accepted-mint — what this node will give for a voucher issued by that
 mint, or charge to take it.
 
@@ -282,7 +282,7 @@ Both peers send MeteringReport. Each side computes the interval delta (`current_
 3. Any voucher-price settlement agreed under paid acceptance
 
 Delivery itself needs no arithmetic — one voucher per unit
-([tollgate-pricing.md](tollgate-pricing.md)) — so both sides trivially agree
+([tollgate-vouchers.md](tollgate-vouchers.md)) — so both sides trivially agree
 on the amounts.
 
 **Whether the two directions net depends on the mint.** If each direction

@@ -206,7 +206,7 @@ If the operator wants visibility, `tollgate-net` can optionally provide:
 - **Loss estimation**: derived from ping success rate
 - **Static estimates**: operator-configured values per peer
 
-These are coarse approximations, and they are not inputs to any price — delivery costs one voucher per unit regardless ([tollgate-pricing.md](../core/tollgate-pricing.md)). They exist for operator visibility and capacity decisions.
+These are coarse approximations, and they are not inputs to any price — delivery costs one voucher per unit regardless ([tollgate-vouchers.md](../core/tollgate-vouchers.md)). They exist for operator visibility and capacity decisions.
 
 ---
 

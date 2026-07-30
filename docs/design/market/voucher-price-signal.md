@@ -84,7 +84,7 @@ problem.
 ### Direction Classes Thin It Further
 
 A node issues a separate keyset per direction class — `up` and `down` for
-network forwarding ([tollgate-pricing.md](../core/tollgate-pricing.md)) —
+network forwarding ([tollgate-vouchers.md](../core/tollgate-vouchers.md)) —
 because a byte of scarce uplink is not a byte of abundant downlink.
 
 That is correct pricing and bad for liquidity: it splits each issuer's

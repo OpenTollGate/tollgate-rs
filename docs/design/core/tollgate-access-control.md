@@ -73,7 +73,9 @@ Spilman channels are funded. Delivery is allowed and metered, with cost deducted
 
 ### ZeroPrice
 
-Both sides agreed on zero-price peering. No payment infrastructure is needed. Delivery is allowed and unmetered, and no metering or balance update messages are exchanged. Zero-price is **not transitive** — it covers that peer's own traffic only.
+Both sides agreed on zero-price peering — two nodes under one operator, or any pair that agrees to it. No payment infrastructure is needed: neither issues vouchers to the other, delivery is unmetered, and no metering or balance update messages are exchanged. This is the simplest path for free peering.
+
+**Zero-price is not transitive.** It means free for *that peer's own traffic*, never free for anything that peer is nominally the beneficiary of — otherwise a zero-priced peer becomes a way to launder free transit for others. See [tollgate-hazards.md](tollgate-hazards.md).
 
 ### Suspended
 

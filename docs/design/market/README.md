@@ -2,7 +2,7 @@
 
 TollGate's payment protocol does not price anything. A voucher is a claim on
 one unit of a node's capacity, and redeeming it is delivery — one for one,
-with no rate to quote ([tollgate-pricing.md](../core/tollgate-pricing.md)).
+with no rate to quote ([tollgate-vouchers.md](../core/tollgate-vouchers.md)).
 
 What a unit costs in money is settled where vouchers change hands. That is
 what these documents cover: how a peer gets vouchers, what determines their
@@ -37,7 +37,7 @@ pay with before it can pay.
 | Question | Answered by |
 | -------- | ----------- |
 | What is a voucher, and how is it spent? | [tollgate-vouchers.md](../core/tollgate-vouchers.md) |
-| What does delivery cost? | [tollgate-pricing.md](../core/tollgate-pricing.md) — one voucher per unit |
+| What does delivery cost? | [tollgate-vouchers.md](../core/tollgate-vouchers.md) — one voucher per unit |
 | Which mints does a node accept as payment? | The Offer message, [tollgate-protocol.md](../core/tollgate-protocol.md) |
 | What does a voucher cost in sats? | Here |
 | How do I buy or swap one? | [market-protocol.md](market-protocol.md) |

@@ -82,7 +82,7 @@ This document consolidates all FIPS modifications required for tollgate-rs integ
 
 **What's needed**: A subscription mode on the existing socket — consumer subscribes once and receives pushed updates as MMP state changes (or at a coalesced rate). `tollgate-net` keeps the latest value cached and reads it when the pricing engine asks. The `show_mmp` query mode can stay alongside for tooling.
 
-**Referenced in**: [peering-fips.md](network-peering/peering-fips.md), [tollgate-pricing.md](core/tollgate-pricing.md)
+**Referenced in**: [peering-fips.md](network-peering/peering-fips.md), [tollgate-metering.md](core/tollgate-metering.md)
 
 ---
 
@@ -110,7 +110,7 @@ This document consolidates all FIPS modifications required for tollgate-rs integ
 
 **Priority**: Low — not needed for initial deployment. Requires careful design to avoid routing instability.
 
-**Referenced in**: [tollgate-pricing.md](core/tollgate-pricing.md), [peering-fips.md](network-peering/peering-fips.md)
+**Referenced in**: [tollgate-metering.md](core/tollgate-metering.md), [peering-fips.md](network-peering/peering-fips.md)
 
 ---
 
