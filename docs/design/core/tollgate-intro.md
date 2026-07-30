@@ -217,12 +217,15 @@ Covered in depth in [tollgate-vouchers.md](tollgate-vouchers.md).
 Each peer pair maintains two independent Spilman channels. At each metering interval (default: 5 seconds):
 
 1. Both sides report their metered usage
-2. The sender signs a balance update reflecting cumulative units delivered
-3. If both sides owe each other, only the net delta needs to move — avoiding unnecessary channel drain
+2. Each side signs a balance update reflecting cumulative units delivered
+
+**Whether the two directions net against each other depends on the mint.** A pays B in a mint from B's accepted set, and B pays A in a mint from A's — usually different ones. Those are claims on different issuers, so there is no difference to take: both channels drain and both sides sign. Netting applies only where some mint appears in **both** accepted sets and both directions settle in it; then the amounts are commensurable and only the net debtor signs. Both peers know both accepted sets from the Offer exchange, so which case applies is decided deterministically.
+
+This makes a shared mint cheaper to settle with — one signature instead of two, and channels draining at the difference rate rather than in full.
 
 Metering drift is expected — transit loss means the two sides may disagree on exact counts. At each metering interval, both parties communicate their measured units sent and received, allowing both sides to calibrate their counters. Peers agree on a transit loss tolerance (default: 5%); as long as measurements stay within tolerance, the value favoring the deliverer is used — the higher count under a positive price, the lower count under a negative one, so the bias always lands on the party that did the work.
 
-Netting details are explored in a dedicated design document.
+Netting details are in [tollgate-payment-channels.md](tollgate-payment-channels.md).
 
 ---
 

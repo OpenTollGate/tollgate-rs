@@ -45,7 +45,7 @@
 
   <!-- Title -->
   <text x="360" y="28" text-anchor="middle" class="title">Interval Netting</text>
-  <text x="360" y="46" text-anchor="middle" class="subtitle">Only the net debtor signs — one signature per interval</text>
+  <text x="360" y="46" text-anchor="middle" class="subtitle">One signature when both directions share a mint; two when they do not</text>
 
   <!-- Node headers -->
   <rect x="120" y="65" width="100" height="42" class="node"/>
@@ -113,8 +113,8 @@
   <!-- Result -->
   <rect x="175" y="475" width="370" height="42" class="result"/>
   <text x="360" y="493" text-anchor="middle" class="clabel" fill="#40a060">Channel B&#8594;A drained by 300</text>
-  <text x="360" y="509" text-anchor="middle" class="clabel" fill="#40a060">Channel A&#8594;B unchanged this interval</text>
+  <text x="360" y="509" text-anchor="middle" class="clabel" fill="#40a060">Channel A&#8594;B unchanged &#8212; shared-mint case shown</text>
 
   <!-- Caption -->
-  <text x="360" y="555" text-anchor="middle" class="caption">Netting reduces channel drain to |A's cost - B's cost| per interval</text>
+  <text x="360" y="555" text-anchor="middle" class="caption">Shared mint: drain falls to |A's cost &#8722; B's cost|. Different mints: both drain in full.</text>
 </svg>
