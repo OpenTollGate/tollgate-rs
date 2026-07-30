@@ -70,7 +70,7 @@
 
   <line x1="170" y1="140" x2="548" y2="140" stroke="#5080c0" stroke-width="1.5" marker-end="url(#aR)"/>
   <text x="360" y="133" text-anchor="middle" class="alabel" fill="#5080c0">MeteringReport (new received multiplier)</text>
-  <text x="360" y="158" text-anchor="middle" class="annot">B inspects field 4-5: a new price is on offer</text>
+  <text x="360" y="158" text-anchor="middle" class="annot">B inspects field 4: a new multiplier is on offer</text>
 
   <line x1="70" y1="178" x2="660" y2="178" class="sep"/>
 

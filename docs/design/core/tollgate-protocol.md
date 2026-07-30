@@ -216,21 +216,26 @@ Spilman support is universal in v1 — there is no per-token payment mode to sig
 
 ### 0x01 Offer
 
-Sent by each peer after Announce. Declares where the sender wants to be paid,
-which other mints it will take, and how welcome the peer's outgoing traffic is.
+Sent by each peer after Announce. Declares which mints the sender will take
+payment in, and how welcome the peer's outgoing traffic is.
 
 ```cbor
 {
   0: 0x01,                         // type: Offer
-  1: <preferred_mint>,             // text — pay me in this
-  2: [<mint_url>, ...],            // text array — also accepted; may be empty
-  3: <unit>,                       // text — "byte", "wh", "ml"
-  4: [<min_interval_ms>, <max_interval_ms>],  // [u32, u32] — metering interval range
-  5: <received_multiplier>,        // u16 — surcharge on units I receive from you,
+  1: [<mint_url>, ...],            // text array — mints accepted, most preferred
+                                   //   first; at least one entry
+  2: <unit>,                       // text — "byte", "wh", "ml"
+  3: [<min_interval_ms>, <max_interval_ms>],  // [u32, u32] — metering interval range
+  4: <received_multiplier>,        // u16 — surcharge on units I receive from you,
                                    //   on top of you paying for what I deliver.
                                    //   Default 0 = no surcharge
 }
 ```
+
+Field 1 is ordered: the first entry is what the sender would rather hold, and
+a payer that can fund in any of them should fund in the earliest it can. An
+Offer with an empty list is malformed — a node that will take no payment has
+nothing to offer.
 
 **There is no price here.** Delivery is one voucher per unit
 ([tollgate-vouchers.md](tollgate-vouchers.md)), and what a voucher costs in
@@ -239,9 +244,9 @@ there is no haircut, because what an issuer's paper is worth is expressed in
 what you pay for it, not in a discount applied at settlement.
 
 The sender's **own** mint need not appear at all. A peer never needs it: it
-funds its channel in `preferred_mint`, and this node pays the peer in whatever
-the *peer* prefers. A pure pass-through relay can therefore name its
-upstream's mint and never issue vouchers of its own.
+funds its channel in one of the mints this node listed, and this node pays the
+peer in one of the mints the *peer* listed. A pure pass-through relay can
+therefore name its upstream's mint alone and never issue vouchers of its own.
 
 The base rule is symmetric and needs no field: **each side pays for what it
 received**, which is what the other delivered. Both owe, both fund a channel.
@@ -277,8 +282,8 @@ Sent by the peer to accept the offer and fund its outgoing channel.
 }
 ```
 
-There is nothing to echo back: the offer carries a single preferred mint, a
-single unit, and one multiplier.
+There is nothing to echo back: the payer picks a mint from the list the offer
+already carried, and the unit and multiplier admit no choice.
 
 The metering interval is resolved deterministically by both sides:
 ```
@@ -492,8 +497,8 @@ Both sides send Offer and Accept because each delivers independently. The interv
      B → A: Announce (v1, pubkey_B, capabilities)
 
   2. Offer
-     A → B: Offer (preferred mint, accepted mints, unit, interval, multiplier)
-     B → A: Offer (preferred mint, accepted mints, unit, interval, multiplier)
+     A → B: Offer (accepted mints, unit, interval, multiplier)
+     B → A: Offer (accepted mints, unit, interval, multiplier)
 
   3. Channels
      B → A: Accept + funding (B→A channel)
@@ -588,7 +593,7 @@ Typical message sizes (CBOR encoded):
 | Message | Estimated size |
 |---------|---------------|
 | Announce | ~40 bytes |
-| Offer (preferred mint only) | ~80 bytes |
+| Offer (one mint) | ~80 bytes |
 | Offer (3 accepted mints) | ~180 bytes |
 | Accept | ~180 bytes (dominated by Spilman funding) |
 | ChannelReady | ~40 bytes |
@@ -618,7 +623,7 @@ Plus 2 bytes of length prefix per message. These are infrequent (every 5 s at th
 | Metering counters | Cumulative since session start, not deltas | Self-healing: lost/duplicated reports don't corrupt accounting |
 | Interval flow | MeteringReport (both) → BalanceUpdate | One update per direction when the mints differ; one net update when both sides settle in the same mint. Decided deterministically from the Offers |
 | Delivery pricing | None in the protocol — one voucher per unit, both directions | A voucher is a claim on one unit, so redemption is delivery |
-| Accepted mints | One preferred mint plus an optional accepted set; no prices | Accept or refuse is binary. What an issuer's paper is worth is expressed in what you pay for it on the market, not in a settlement discount |
+| Accepted mints | One ordered list, at least one entry, no prices | Accept or refuse is binary. What an issuer's paper is worth is expressed in what you pay for it on the market, not in a settlement discount |
 | Who pays | Whoever the traffic is for, for both directions | One rule covers upload and download, so no reverse payment and no negative amount anywhere |
 | Received multiplier | Unsigned u16 per peer, piggybacked for renegotiation | Prices scarce uplink and signals how welcome a peer's traffic is. Unsigned makes paying a peer to send traffic unrepresentable rather than merely forbidden |
 | Metering counts | Unchanged: delivered and received, raw | Billing changed, measurement did not — both counters already existed and already mean the peer's download and upload |

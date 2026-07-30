@@ -347,7 +347,7 @@ Multipliers default to 0, so by default each simply pays for what it received.
 **Whether these can be netted depends on whether they are denominated in the
 same mint.** They usually are not.
 
-A pays B in B's preferred mint; B pays A in A's
+A pays B in a mint B accepts; B pays A in a mint A accepts
 ([tollgate-vouchers.md](tollgate-vouchers.md)). Those are claims on different
 issuers. 500 A-vouchers and 200 B-vouchers are not commensurable — one claims
 A's capacity, the other claims B's — so there is no difference to take, and

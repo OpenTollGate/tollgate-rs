@@ -227,7 +227,7 @@ Each peer pair maintains two independent Spilman channels. At each metering inte
 1. Both sides report their metered usage
 2. Each side signs a balance update reflecting cumulative units delivered
 
-**Whether the two directions net against each other depends on the mint.** A pays B in B's preferred mint, and B pays A in A's — usually different ones. Those are claims on different issuers, so there is no difference to take: both channels drain and both sides sign. Netting applies only where both sides are paid in the same mint; then the amounts are commensurable and only the net debtor signs. Both peers know both preferences from the Offer exchange, so which case applies is decided deterministically.
+**Whether the two directions net against each other depends on the mint.** A pays B in a mint B accepts, and B pays A in a mint A accepts — usually different ones. Those are claims on different issuers, so there is no difference to take: both channels drain and both sides sign. Netting applies only where both sides are paid in the same mint; then the amounts are commensurable and only the net debtor signs. Both peers know both preferences from the Offer exchange, so which case applies is decided deterministically.
 
 This makes a shared mint cheaper to settle with — one signature instead of two, and channels draining at the difference rate rather than in full.
 

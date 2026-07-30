@@ -228,19 +228,24 @@ already means "I am happy to pay you for this."
 
 Because the unit is the same everywhere, a node is not limited to its own
 vouchers. A byte-voucher from any mint claims one byte; only the issuer
-differs. **A node advertises a set of mints whose vouchers it will take**, in
-its Offer, and its own mint is simply the first entry.
+differs. **A node advertises a list of mints whose vouchers it will take**, in
+its Offer, ordered by preference and never empty.
 
 This is a merchant accepting several banks' notes: one unit of account,
 several credits, each worth what its issuer is worth.
 
 ```yaml
-# what this node will take
-preferred mint                 pay me in this
-mint A (upstream provider)     also accepted — we can spend these onward
-mint C (well-known hub)        also accepted — widely held
+# what this node will take, best first
+mint A (upstream provider)     we can spend these onward
+own mint                       we issue these
+mint C (well-known hub)        widely held
 anything else                  refused
 ```
+
+Order is a preference, not a rule: a payer that holds vouchers from more than
+one accepted mint should reach for the earliest, and a node that lists only
+one mint has said everything it needs to. Its own mint has no special place —
+the relay above would rather be paid in the vouchers it owes upstream.
 
 **Accept or refuse is binary — there is no haircut.** What an issuer's paper
 is worth is expressed in what you pay for it on the market, not in a discount
@@ -601,7 +606,7 @@ here is protocol-side.
 | Acquiring vouchers | Not a protocol concern — see the market documents | The direct route from the issuer is enough to operate, and checking a voucher takes one hop |
 | Bootstrap tokens | Removed | Provider-as-mint dissolves the mint-reachability problem the mechanism existed for. The state machine, messages, verification path and config block all come out |
 | Received multiplier | An unsigned surcharge per peer on what that peer pushes at us, default `0` | Net rate is `m − 1`, so `1` makes a peer's upload free, `2` charges it like a download, `k + 1` charges it `k` times. Unsigned, so a node can never pay a bonus on top of what it already owes for delivery |
-| Accepted mints | One preferred mint plus an optional accepted set; no prices | One unit of account network-wide makes any mint's vouchers usable. A relay accepting its upstream's mint can spend what it receives without converting |
+| Accepted mints | One ordered list, at least one entry, no prices | One unit of account network-wide makes any mint's vouchers usable. A relay accepting its upstream's mint can spend what it receives without converting |
 | Accepted-mint haircuts | None — accept or refuse | What an issuer's paper is worth belongs on the market, not in a settlement discount |
 | Foreign voucher cost | Gives up free settlement, local double-spend checks, and payment-liveness-equals-service-liveness | Those three properties hold only for own vouchers, so the accepted set should lean toward neighbors and upstreams |
 | Market operations | Separate endpoints and protocol; never TollGate messages | Buying and swapping is not paying for delivery. A node offering neither is fully functional — see [market-protocol.md](../market/market-protocol.md) |

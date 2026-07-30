@@ -97,8 +97,8 @@ outgoing traffic is.
 
 ```yaml
 vouchers:
-  preferred_mint: "https://gateway.example.com/mint"   # pay me in this
-  also_accept:                                         # optional
+  accepted_mints:               # most preferred first; at least one
+    - "https://gateway.example.com/mint"
     - "https://upstream.example.com/mint"
     - "https://hub.example.com/mint"
 
@@ -110,9 +110,10 @@ either accepted or it is not — what an issuer's paper is worth is expressed in
 what you pay for it on the market, not in a discount applied at settlement
 ([tollgate-vouchers.md](tollgate-vouchers.md)).
 
-`preferred_mint` need not be this node's own. A pure pass-through relay can
-name its upstream's mint, take payment in vouchers it can spend directly, and
-never issue any of its own.
+No entry need be this node's own mint. A pure pass-through relay can list its
+upstream's mint alone, take payment in vouchers it can spend directly, and
+never issue any of its own. Order is a preference a payer should honor when it
+can fund in more than one of them.
 
 `received_multiplier` is an unsigned surcharge on what a peer pushes at us, on
 top of that peer already being paid for delivering it. Netted out:
@@ -131,8 +132,7 @@ set `received_multiplier = k + 1`. Setting `10` gives 9×, not 10×.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `preferred_mint` | *(required)* | Mint this node wants to be paid in |
-| `also_accept` | `[]` | Other mints accepted; each one taken on is that issuer's credit risk |
+| `accepted_mints` | *(required)* | Mints this node will take payment in, best first; at least one. Each one taken on is that issuer's credit risk |
 | `received_multiplier` | `0` | No surcharge; each side simply pays for what it received. Per-peer overrides in the `peers` section |
 
 ---
@@ -306,7 +306,8 @@ mint:
   unit: "byte"
 
 vouchers:
-  preferred_mint: "https://upstream.example.com/mint"   # spend these onward
+  accepted_mints:
+    - "https://upstream.example.com/mint"               # spend these onward
   received_multiplier: 2                                # uploads cost the same as downloads
 
 access:
@@ -359,7 +360,7 @@ The implementation watches the config file for changes and applies runtime-chang
 | Loading | Cascading multi-file with priority | System defaults + user overrides + deployment specifics |
 | Defaults | Every parameter has a sensible default | Minimal config for simple deployments |
 | Mint block | Added — every node issues its own vouchers | The node is the mint for its own capacity |
-| Accepted mints | One preferred mint plus an optional accepted set, no prices | Accept or refuse is binary; what an issuer's paper is worth belongs on the market |
+| Accepted mints | One ordered list, at least one entry, no prices | Accept or refuse is binary; what an issuer's paper is worth belongs on the market |
 | Received multiplier | Unsigned, per peer | Prices scarce uplink and signals how welcome a peer's traffic is, without any signed number in the protocol |
 | Market services | Own config section, own endpoints, own protocol, disabled by default | Buying and swapping is not part of paying for delivery. `market.path` may point at a third party, so a node can offer swaps without running a market |
 | Per-peer favoritism | Sell that peer vouchers cheaper, outside the protocol | Same capability, no multiplier machinery |
