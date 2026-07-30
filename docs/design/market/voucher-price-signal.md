@@ -61,7 +61,7 @@ router stops redeeming — see [issuer-risk.md](issuer-risk.md). The business
 case for providing that liquidity is unproven, and it does not obviously
 improve with scale: more issuers means more books, each thinner.
 
-Two things make it less bad than it first looks:
+Three things make it less bad than it first looks:
 
 - **The market is optional.** Value moves without it, via direct purchase
   and paid acceptance ([voucher-acquisition.md](voucher-acquisition.md)). A
@@ -69,6 +69,17 @@ Two things make it less bad than it first looks:
 - **Issuers are natural market makers in their own paper.** A node always
   wants to sell its own vouchers and is always willing to redeem them, so
   each book has one committed participant by construction.
+- **Multi-mint acceptance concentrates demand without anyone planning it.**
+  Because a node can accept any mint denominated in the same unit
+  ([tollgate-vouchers.md](../core/tollgate-vouchers.md)), the vouchers that
+  many nodes happen to accept become the ones worth holding. Those books get
+  deep while the rest stay shallow, and the deep ones start functioning as
+  money for the network. Nothing designates a hub currency; acceptance
+  decisions produce one.
+
+That last point cuts the other way too. A voucher accepted everywhere is
+systemically important, and its issuer's failure stops being one router's
+problem.
 
 ### Direction Classes Thin It Further
 

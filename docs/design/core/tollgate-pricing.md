@@ -37,6 +37,11 @@ Consequences worth stating plainly:
 - **A node's price is expressed by what its vouchers sell for.** A node that
   wants more revenue per byte issues fewer vouchers or sells them dearer. It
   does not renegotiate anything with its peers.
+- **A node need not be paid in its own vouchers.** Because the unit is the
+  same network-wide, a node can advertise a set of mints it will take, each
+  at its own price. A relay that accepts its upstream's mint can spend what
+  it receives without converting anything. See Accepted Mints in
+  [tollgate-vouchers.md](tollgate-vouchers.md).
 - **Prices cannot change mid-session under a peer.** The peer already holds
   the vouchers; their claim is fixed. The old design's take-it-or-leave-it
   price update at every metering interval no longer exists.
@@ -84,11 +89,17 @@ them. The core neither enumerates nor interprets them.
 
 ---
 
-## The One Price In The Protocol
+## The Only Prices In The Protocol
 
-Exactly one price is quoted peer-to-peer: **the price of a peer's own
-vouchers**, which is what makes paid acceptance work
-([tollgate-vouchers.md](tollgate-vouchers.md)).
+One kind of price is quoted peer-to-peer: **what a node will give for a
+voucher, per issuing mint**. Its own mint is par by definition; every other
+accepted mint carries a price ([tollgate-vouchers.md](tollgate-vouchers.md)).
+
+Accepting several mints is what lets a relay be paid in paper it can spend
+onward, and lets a widely-held mint's vouchers work as common currency. The
+price is where the operator expresses what it thinks that issuer is worth.
+
+The same field also makes paid acceptance work.
 
 A leaf's upload is the case that needs it. The relay gains nothing from
 receiving a leaf's outgoing traffic, so the leaf has to pay for it — but on
@@ -112,19 +123,21 @@ leaf-vouchers. Both directions then run at ordinary positive prices.
 ```
 </details>
 
-The voucher price is **signed and crosses zero**, on the same convention as
+Each price is **signed and crosses zero**, on the same convention as
 everywhere else in this design:
 
 | Voucher price | Meaning |
 |---|---|
-| Positive | The peer wants these vouchers and buys them |
+| Above par | The mint's vouchers are in demand |
+| Par | Taken at face value |
+| Between zero and par | Taken at a haircut |
 | Zero | An even swap |
 | Negative | The issuer pays to have them held — paid acceptance |
-| Refused | No price works; the peering runs one-way |
+| Absent | Refused |
 
-**Refused is the default.** A node that has not been configured to accept
-other nodes' vouchers refuses, and the peering falls back to ordinary
-one-direction payment.
+**An empty accepted set is the default.** A node that has not been configured
+to take other mints' vouchers takes only its own, and the peering falls back
+to ordinary one-direction payment.
 
 ---
 
@@ -219,8 +232,8 @@ Neither is required by the protocol. See
 | Per-peer pricing | Sell that peer vouchers cheaper | Same capability, no per-peer machinery in the protocol |
 | Mid-session price changes | Not possible | The peer already holds the vouchers and their claim is fixed |
 | Direction classes | Separate keyset per class; one voucher per unit within a class | Keeps the protocol free of arithmetic while letting scarce directions cost more in the market |
-| Voucher price | The only peer-to-peer price; signed, crossing zero | Makes paid acceptance work without any negative number reaching the payment flow |
-| Foreign vouchers | Refused by default | The peering falls back to ordinary one-direction payment |
+| Voucher prices | One per accepted mint; signed, crossing zero | Any mint denominated in the same unit is usable, and the price is where issuer risk is expressed. Makes paid acceptance work without any negative number reaching the payment flow |
+| Foreign vouchers | Accepted set is empty by default | Accepting a foreign mint gives up local verification and free settlement, so it is an explicit operator choice |
 | Traffic acceptance | Never priced | Acceptance can be faked; discarding would become the most profitable strategy |
 | Price-aware routing | Blocked while any price for traffic acceptance exists | Free identities plus paid acceptance plus price-driven path selection selects for blackholes |
 | Negative delivery prices | Only for a conserved, physically metered resource, with an absolute budget | Bytes can be quietly discarded; watt-hours cannot |

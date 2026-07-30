@@ -98,27 +98,42 @@ How this node treats vouchers issued by *other* nodes. This is the only price in
 
 ```yaml
 vouchers:
-  accept_foreign: false        # refuse other nodes' vouchers by default
   price_scale: 1000            # divisor for the prices below
-  default_price: 0             # scaled; applies to peers with no override
+  sat_swap: false              # sell accepted vouchers for sats on request
+
+  accept:                      # mints whose vouchers this node takes
+    - url: "https://upstream.example.com/mint"
+      price: 1000              # par — this is our upstream, we can spend these
+    - url: "https://neighbor.example.com/mint"
+      price: 950               # 5% haircut
+    - url: "https://hub.example.com/mint"
+      price: 1000              # widely held
 ```
 
-`default_price` is signed and crosses zero:
+This node's own mint is accepted at par by definition and does not appear in
+`accept`. An empty `accept` list means own vouchers only, which is the
+default and the conservative choice — see Accepted Mints in
+[tollgate-vouchers.md](tollgate-vouchers.md) for what accepting a foreign
+mint costs.
+
+Each `price` is signed and crosses zero:
 
 | Value | Meaning |
 |---|---|
-| `> 0` | We buy the peer's vouchers — we want what they deliver |
+| `> price_scale` | Premium — we want these more than face value |
+| `= price_scale` | Par |
+| `0 < price < scale` | Haircut — we take them at a discount |
 | `0` | Even swap |
-| `< 0` | The peer pays us to hold them — paid acceptance |
-| `accept_foreign: false` | Refused; the peering runs one-way |
+| `< 0` | The holder pays us to take them — paid acceptance |
+| absent | Refused |
 
 ### Defaults
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `accept_foreign` | `false` | Refusing is the safe default; otherwise a node accumulates vouchers it cannot redeem |
 | `price_scale` | `1000` | Sub-unit precision divisor |
-| `default_price` | `0` | Even swap when acceptance is enabled at all |
+| `sat_swap` | `false` | Whether to sell accepted vouchers for sats on request |
+| `accept` | `[]` | Own vouchers only; a foreign mint costs local verification and free settlement |
 
 ---
 
@@ -241,7 +256,7 @@ peers:
   "02abc...":
     zero_price: true
 
-  # Accept this peer's vouchers at a specific price
+  # Override the price for this peer's own mint
   "03def...":
     voucher_price: -50           # scaled; peer pays us to hold its vouchers
 
@@ -259,7 +274,7 @@ peers:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `zero_price` | `false` | Skip payment entirely with this peer |
-| `voucher_price` | *(from `vouchers.default_price`)* | Signed price for this peer's vouchers |
+| `voucher_price` | *(from `vouchers.accept`, else refused)* | Signed price for this peer's own mint, overriding the global entry |
 | `blocked` | `false` | Refuse all service to this peer |
 | `endpoint` | *(none)* | Static endpoint for IP peering |
 
@@ -279,9 +294,11 @@ mint:
   classes: ["up", "down"]
 
 vouchers:
-  accept_foreign: true
   price_scale: 1000
-  default_price: -20            # we charge peers to hold their vouchers
+  sat_swap: true
+  accept:
+    - url: "https://upstream.example.com/mint"
+      price: 1000               # our upstream — we spend these onward
 
 access:
   minimum_flow:
@@ -312,13 +329,13 @@ Some parameters can be changed at runtime without restarting the node:
 
 | Parameter | Runtime changeable? | Notes |
 |-----------|-------------------|-------|
-| Voucher prices | Yes | New price takes effect at next metering interval |
+| Accepted mints and their prices | Yes | Changes take effect at the next metering interval |
 | Minimum flow allowance | Yes | Applies to the next interval |
 | Subsidy limits | Yes | Lowering a cap applies immediately; already-spent budget is not refunded |
 | Peer overrides | Yes | Add/remove/modify peer policies |
 | Channel parameters | No | Applies to new channels only |
 | Metering interval | No | Applies to new sessions only |
-| Mint URL, unit, classes | No | Requires restart; changing them invalidates outstanding vouchers |
+| Own mint URL, unit, classes | No | Requires restart; changing them invalidates outstanding vouchers |
 | Identity | No | Requires restart |
 
 The implementation watches the config file for changes and applies runtime-changeable parameters without interrupting active sessions.
@@ -335,7 +352,8 @@ The implementation watches the config file for changes and applies runtime-chang
 | Products, pricing scales, floors, ceilings, multipliers, dynamic formulas | Removed | Delivery is one voucher per unit; money prices are set where vouchers are sold |
 | Bootstrap block | Removed | The mechanism is gone — see [voucher-acquisition.md](../market/voucher-acquisition.md) |
 | Mint block | Added — every node issues its own vouchers | The node is the mint for its own capacity |
-| Foreign vouchers | Refused by default | Otherwise a node accumulates vouchers it cannot redeem |
+| Accepted mints | A set per node, own mint implicitly at par, empty by default | One unit of account network-wide makes any mint's vouchers usable; accepting an upstream's mint lets a relay spend what it receives without converting |
+| Sat swap | Optional, advertised in Offer | Lets a peer arrive with only sats without adding a protocol phase |
 | Per-peer favoritism | Sell that peer vouchers cheaper, outside the protocol | Same capability, no multiplier machinery |
 | Zero-price peering | Per-peer flag, not transitive | Transitivity would launder free transit for others |
 | Negative delivery prices | Absolute caps, per peer and aggregate, conserved resources only | No counterparty bounds outbound spend; per-peer caps alone are defeated by free identities |

@@ -105,7 +105,7 @@ Suitable for higher-frequency exchanges, infrastructure peering, and lower-laten
 | Type | Name | Direction | Purpose |
 |------|------|-----------|---------|
 | 0x00 | Announce | Bidirectional | "I am a TollGate node" — protocol version, pubkey |
-| 0x01 | Offer | Bidirectional | Mint URL, unit, direction classes, interval range, voucher price |
+| 0x01 | Offer | Bidirectional | Own mint, unit, direction classes, interval range, accepted mints |
 | 0x02 | Accept | Bidirectional | Accept the offer, provide Spilman funding |
 | 0x03 | ChannelReady | Bidirectional | Confirm Spilman channel funded and active |
 | 0x04 | MeteringReport | Bidirectional | Unsigned resource stats for this interval |
@@ -150,12 +150,12 @@ Spilman support is universal in v1 — there is no per-token payment mode to sig
 
 ### 0x01 Offer
 
-Sent by each peer after Announce. Declares where the sender's own vouchers come from and how it will deal with the other side's.
+Sent by each peer after Announce. Declares where the sender's own vouchers come from, and which other mints' vouchers it will take.
 
 There is no price for delivery: one voucher buys one unit
-([tollgate-pricing.md](tollgate-pricing.md)). The only price here is
-`voucher_price`, which is what this node will pay, or charge, to hold the
-*peer's* vouchers.
+([tollgate-pricing.md](tollgate-pricing.md)). The only prices here are
+per-accepted-mint — what this node will give for a voucher issued by that
+mint, or charge to take it.
 
 ```cbor
 {
@@ -164,19 +164,38 @@ There is no price for delivery: one voucher buys one unit
   2: <unit>,                       // text — "byte", "wh", "ml"
   3: [<class>, ...],               // array of text — direction classes, e.g. ["up", "down"]
   4: [<min_interval_ms>, <max_interval_ms>],  // [u32, u32] — metering interval range
-  5: <voucher_price>,              // i64 | null — scaled price of the PEER's vouchers;
-                                   //   > 0 we buy them, 0 even swap,
-                                   //   < 0 the peer pays us to hold them,
-                                   //   null we refuse them (default)
-  6: <price_scale>,                // u32 — divisor for voucher_price; default 1000
+  5: [                             // mints whose vouchers this node accepts
+    {
+      1: <mint_url>,               // text
+      2: <price>,                  // i64 — scaled; > 0 we buy them,
+                                   //   0 even swap, < 0 the holder pays us to take them
+    },
+    ...
+  ],
+  6: <price_scale>,                // u32 — divisor for prices; default 1000
+  7: <sat_swap>,                   // bool — will swap sats for accepted vouchers on request
 }
 ```
 
-Keysets, and therefore per-class amounts, are fetched from `mint_url` by
+Field 1 is implicitly accepted at par and need not appear in field 5. An
+empty field 5 means the node takes only its own vouchers, which is the
+default.
+
+Because the unit is the same network-wide, any mint's vouchers are
+denominated identically — only the issuer differs, which is what the
+per-mint price expresses. See Accepted Mints in
+[tollgate-vouchers.md](tollgate-vouchers.md).
+
+Keysets, and therefore per-class amounts, are fetched from each `mint_url` by
 ordinary Cashu means (NUT-01/02). The protocol does not restate them.
 
-`voucher_price` is the only field that can change mid-session, and only via
-MeteringReport.
+Field 7 signals the node will sell its accepted vouchers for sats on request,
+so a peer arriving with only sats need not go elsewhere first — see
+[voucher-acquisition.md](../market/voucher-acquisition.md). The swap itself is
+a Cashu operation against the node's mint, not a TollGate message.
+
+The accepted-mint prices are the only fields that can change mid-session, and
+only via MeteringReport.
 
 ### 0x02 Accept
 
@@ -231,7 +250,7 @@ Sent by both peers at each metering interval. Contains **unsigned** resource sta
   1: <elapsed_ms>,                 // u64 — milliseconds since session start (cumulative)
   2: [{<class>: <delivered>}, ...], // cumulative units we delivered TO this peer, per class
   3: [{<class>: <received>}, ...],  // cumulative units we received FROM this peer, per class
-  4: <new_voucher_price>,          // i64 | null — updated price for the peer's vouchers
+  4: [{1: <mint_url>, 2: <price>}, ...],  // updated accepted-mint prices, or null
 }
 ```
 
@@ -245,7 +264,7 @@ Delivery itself needs no arithmetic — one voucher per unit
 ([tollgate-pricing.md](tollgate-pricing.md)) — so both sides trivially agree
 on the amounts. This is deterministic.
 
-**Field 4** is the only renegotiation mechanism left. A node that wants to change what it pays or charges to hold the peer's vouchers includes the new value; the peer accepts by continuing, or rejects with ChannelClose. Delivery cannot be repriced mid-session — the peer already holds the vouchers and their claim is fixed.
+**Field 4** is the only renegotiation mechanism left. A node that wants to change what it will give for some mint's vouchers — including dropping a mint from the accepted set — includes the revised entries; the peer accepts by continuing, or rejects with ChannelClose. Delivery cannot be repriced mid-session, because the peer already holds the vouchers and their claim is fixed.
 
 ### 0x05 BalanceUpdate
 
@@ -350,7 +369,7 @@ General-purpose rejection for any proposal.
 | Code | Meaning |
 |------|---------|
 | 0x01 | Voucher price unacceptable |
-| 0x02 | Mint not accepted |
+| 0x02 | Mint not in the accepted set |
 | 0x03 | Unit not accepted |
 | 0x04 | Metering interval out of range |
 | 0x05 | Channel funding invalid |
@@ -389,8 +408,8 @@ Both sides send Offer and Accept because each delivers independently. The interv
      B → A: Announce (v1, pubkey_B, capabilities)
 
   2. Offer
-     A → B: Offer (mint, unit, classes, interval range, voucher price)
-     B → A: Offer (mint, unit, classes, interval range, voucher price)
+     A → B: Offer (own mint, unit, classes, interval range, accepted mints)
+     B → A: Offer (own mint, unit, classes, interval range, accepted mints)
 
   3. Channels
      B → A: Accept + funding (B→A channel)
@@ -416,9 +435,9 @@ service. There is no pre-channel phase.
 <details><summary>Text version</summary>
 
 ```
-  A wants to change what it pays or charges to hold B's vouchers:
+  A wants to change what it will give for some mint's vouchers:
 
-  A → B: MeteringReport (field 4: new_voucher_price)
+  A → B: MeteringReport (field 4: revised accepted-mint prices)
 
   alt: ACCEPT (continue)
        B → A: MeteringReport (continues normally)
@@ -485,7 +504,8 @@ Typical message sizes (CBOR encoded):
 | Message | Estimated size |
 |---------|---------------|
 | Announce | ~40 bytes |
-| Offer | ~90 bytes |
+| Offer (own mint only) | ~90 bytes |
+| Offer (3 accepted mints) | ~200 bytes |
 | Accept | ~180 bytes (dominated by Spilman funding) |
 | ChannelReady | ~40 bytes |
 | MeteringReport | ~70 bytes (two direction classes) |
@@ -511,7 +531,9 @@ These are infrequent messages (every 5s at the metering interval, one-time for s
 | Metering counters | Cumulative since session start, not deltas | Self-healing: lost/duplicated reports don't corrupt accounting |
 | Interval flow | MeteringReport (both) → BalanceUpdate (net debtor only) → Ack | Deterministic netting, only net amount moves |
 | Delivery pricing | None in the protocol — one voucher per unit | A voucher is a claim on one unit, so redemption is delivery |
-| Voucher price changes | Piggybacked on MeteringReport (field 4) | No extra round-trips; the only price that can change mid-session |
+| Accepted mints | A set per node, own mint implicitly at par, each foreign mint carrying a signed price | One unit of account network-wide means any mint's vouchers are usable; the price is where issuer risk is expressed |
+| Accepted-mint price changes | Piggybacked on MeteringReport (field 4) | No extra round-trips; the only prices that can change mid-session |
+| Sat swap | A boolean in Offer; the swap itself is a plain Cashu operation | Lets a peer arrive with only sats without adding a protocol phase |
 | Bootstrap messages | Removed, type codes 0x07/0x08 left reserved | The mint a peer needs is the peer it is talking to; a retired code should Reject cleanly rather than misparse |
 | Zero-price mode | Accept without funding, skip metering | Simplest path for free peering |
 | Channel ownership | Each peer manages its own outgoing channel | Channels carry shared state, but rollover is initiated by the funder alone — only the party putting up new funds decides when to do it |

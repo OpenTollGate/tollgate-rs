@@ -116,6 +116,72 @@ below has to absorb.
 
 ---
 
+## Accepted Mints
+
+Because the unit is the same everywhere, a node is not limited to its own
+vouchers. A byte-voucher from any mint claims one byte; only the issuer
+differs. **A node advertises a set of mints whose vouchers it will take**, in
+its Offer, and its own mint is simply the first entry.
+
+This is a merchant accepting several banks' notes: one unit of account,
+several credits, each worth what its issuer is worth.
+
+```yaml
+# what this node will take, and at what price
+own mint                     par by definition
+mint A (upstream provider)   1.00   — accepted at face value
+mint B (neighbor relay)      0.95   — 5% haircut
+mint C (well-known hub)      1.00   — widely held, taken at par
+anything else                refused
+```
+
+The price per mint is the same signed, zero-crossing number as in Paid
+Acceptance below. Accepting a mint's vouchers at par when that issuer is
+unreliable is a subsidy, so the haircut is where an operator prices issuer
+risk ([issuer-risk.md](../market/issuer-risk.md)).
+
+### What This Buys
+
+**Relays stop holding a currency position.** A relay that buys upstream
+transit from A can accept A-vouchers from its downstream customers and spend
+them upstream unchanged. No swap, no spread, no rebalancing. This was listed
+below as a real cost of the design; multi-mint acceptance removes most of it,
+because the vouchers a relay wants to receive are exactly the ones it needs
+to pay with.
+
+**Buyers stop swapping per peering.** A client holding vouchers from a mint
+several nodes accept can move between them without acquiring anything new.
+
+**Hub vouchers become usable as common currency.** A well-regarded mint's
+paper gets accepted broadly because accepting it is cheap and useful, and it
+starts functioning as money for the network — without anyone designating it,
+and without the protocol knowing. The N-currency problem softens on its own
+wherever demand concentrates.
+
+**Market spreads narrow.** Every mint a node accepts is one fewer swap
+somebody has to pay for.
+
+### What It Costs
+
+The three properties that make own-voucher redemption cheap hold **only for
+own vouchers**:
+
+| Property | Own vouchers | Foreign vouchers |
+|---|---|---|
+| Settlement cost | Free — cancels a claim | Must be redeemed somewhere else |
+| Double-spend check | Local database lookup | Requires reaching that mint |
+| Payment liveness | Equals service liveness | Depends on that mint being reachable |
+
+A foreign mint that is also a directly connected peer is one hop away, so
+the accepted set should lean toward neighbors and toward mints the node
+already buys from. Accepting a distant hub buys flexibility at the price of
+needing connectivity to verify.
+
+Accepting a mint also means taking its issuer's credit risk, bounded by how
+many of its vouchers the node holds at once.
+
+---
+
 ## Normal Operation
 
 One Cashu token settles one metering interval. Which node's keyset it was
@@ -364,16 +430,19 @@ pay for anything. That is not a protocol concern (see Acquiring Vouchers
 below), which keeps the protocol small but leaves the peer to solve it — via
 another link, a Lightning payment, or a node willing to swap sats locally.
 
-**Relays hold two kinds of vouchers.** A relay receives its own vouchers
-from downstream and needs upstream vouchers to pay onward. Its margin is the
-gap between the two, and it has to keep rebalancing. On an ESP32 that is a
-real burden.
+**Relays can end up holding two kinds of vouchers.** A relay paid in its own
+vouchers still needs upstream vouchers to pay onward, and rebalancing between
+the two is real work on an ESP32.
 
-Paid acceptance reduces it without removing it. A relay's capacity is
-genuinely useful to its upstream, because return traffic flows through it,
-so the relay's own vouchers price positive and it holds fewer foreign ones.
-The burden lands hardest on leaf nodes, which are net consumers bringing in
-outside money anyway.
+Two things reduce this, and together they mostly remove it. Accepting the
+upstream's mint (see Accepted Mints above) lets the relay take downstream
+payment in exactly the paper it needs to spend, so nothing has to be
+converted. And paid acceptance means a relay's own capacity is genuinely
+useful to its upstream, because return traffic flows through it, so its
+vouchers price positive.
+
+What remains is the relay that accepts only its own mint and has no upstream
+overlap — an operator choice rather than a structural cost.
 
 **A market needs liquidity that may not appear.** Each issuer is its own
 small, thin market, and cross-mint atomic swap has no working
@@ -621,8 +690,10 @@ here is protocol-side.
 | Acquiring vouchers | Not a protocol concern — see the market documents | The direct route from the issuer is enough to operate, and checking a voucher takes one hop |
 | Bootstrap tokens | Removed | Provider-as-mint dissolves the mint-reachability problem the mechanism existed for. The state machine, messages, verification path and config block all come out |
 | Paid acceptance | Pay a peer to hold your vouchers when it has no use for them | Covers a leaf paying for its own upload. The negative price sits entirely in the voucher price, so the payment protocol runs both directions at positive prices |
-| Voucher price | One price per peering, crossing zero — positive (peer buys), zero (even swap), negative (paid acceptance), refused | Normal operation and paid acceptance are the same price at different points, so leaf nodes need no separate rule |
-| Foreign vouchers | Refused by default | The default is then plain normal operation; otherwise a node builds up vouchers it cannot redeem |
+| Accepted mints | A set per node, own mint implicitly at par, empty by default | One unit of account network-wide makes any mint's vouchers usable. A relay accepting its upstream's mint can spend what it receives without converting |
+| Voucher price | One per accepted mint, crossing zero — above par, par, haircut, zero, negative (paid acceptance), absent | Normal operation and paid acceptance are the same price at different points, so leaf nodes need no separate rule. The price is also where issuer risk is expressed |
+| Foreign voucher cost | Gives up free settlement, local double-spend checks, and payment-liveness-equals-service-liveness | Those three properties hold only for own vouchers, so the accepted set should lean toward neighbors and upstreams |
+| Sat swap | Optional; a node may sell any accepted mint's vouchers for sats | Recovers the walk-up case bootstrap tokens existed for, without a protocol phase |
 | Subsidy funding | Buying the peer's vouchers deliberately, in a fixed amount | No standing outgoing channel to refill, so an unattended drain cannot start |
 | Voucher acceptance vs traffic acceptance | Priced separately, never merged | Whether vouchers were accepted can be checked; whether traffic was accepted cannot, and merging them brings back the discard abuse |
 | Minimum flow allowance | Ordinary unlocked vouchers; keep it small | Locking it would need a mint that preserves locks through swaps and change, which standard Cashu does not do. Small size bounds the resale value economically instead |

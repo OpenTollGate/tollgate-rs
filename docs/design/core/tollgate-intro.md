@@ -11,6 +11,7 @@ TollGate is not a network protocol. It is a payment layer that operates alongsid
 | Layer | What it is |
 |---|---|
 | **tollgate-protocol** | Wire format and lifecycle defined in these design documents. Resource-agnostic. Currently lives as a `protocol` module inside `tollgate-core`; it may be extracted into its own crate when there's a real second consumer (a Go or TypeScript implementation, or another Rust crate that needs only message types). |
+| **market** | Where vouchers get their money price: acquisition routes, the reliability signal, issuer risk. Specification only — no code depends on it, and a node works without any of it. |
 | **tollgate-core** | Rust library implementing the protocol's resource-agnostic logic: channels, metering, vouchers, access control. Consumers plug in a `Wallet` and a `ResourceAdapter` via traits. |
 | **tollgate-net** | First deployment of TollGate: **(re)selling network access**. Built on `tollgate-core`, it ships the network-forwarding `ResourceAdapter` (traditional IP or a mesh such as [FIPS](https://github.com/nicobao/fips)) and a Cashu wallet. |
 
@@ -26,7 +27,7 @@ A constrained-device variant (`tollgate-net-esp32`) lives in a separate project 
 
 **Autonomous operation**: Devices negotiate, pay, and settle without human intervention. A TollGate node can operate unattended indefinitely — opening and rolling over payment channels, surviving network partitions and upstream failures. The operator decides what to sell vouchers for; the device executes delivery.
 
-**Operator sovereignty**: The operator controls their node's economic behavior by deciding what to sell its vouchers for, and to whom. **The operator's margin is the spread between what its own vouchers fetch and what it pays for its peers'.** TollGate provides the tools; the operator makes the business decisions.
+**Operator sovereignty**: The operator controls their node's economic behavior by deciding what to sell its vouchers for, and to whom. **The operator's margin is the spread between what they earn for delivery, and what they pay their peers.** TollGate provides the tools; the operator makes the business decisions.
 
 **Network and transport agnostic**: The protocol doesn't dictate how resources travel or how protocol messages reach the peer. The underlying system handles routing and delivery; TollGate handles commerce. Messages can travel over any bidirectional channel between authenticated peers. The same `tollgate-core` library can power a high-end Linux router, a constrained OpenWrt device, or an ESP32 microcontroller — each with its own wallet and resource adapter.
 
