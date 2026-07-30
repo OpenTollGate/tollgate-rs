@@ -28,7 +28,7 @@ Each pair of TollGate peers maintains **two unidirectional Spilman channels** �
 
 Spilman channels enable **streaming micropayments**: the sender locks ecash in a 2-of-2 multisig with a time-locked refund path, then signs incremental balance updates as resource is metered. The receiver holds the latest signed update and can settle with the mint at any time.
 
-At each metering interval, both sides exchange metering reports. The net debtor (whichever side owes more) signs a single balance update on their channel for the net amount. Only one signature per interval, and only the delta moves.
+At each metering interval, both sides exchange metering reports and then sign balance updates. Whether that is one signature or two depends on whether both directions settle in the same mint — see [Netting](#netting).
 
 ### Interval Netting
 
@@ -46,12 +46,18 @@ At each metering interval, both sides exchange metering reports. The net debtor 
     B owes A: 500 units A delivered to B  = 500 A-vouchers
     (one voucher per unit — nothing to multiply)
 
-  Phase 3 — Settle
-    B → A: BalanceUpdate (channel B→A, +500, signed)
-    A → B: BalanceAck
+  Phase 3 — Settle, different mints (the usual case)
+    A → B: BalanceUpdate (channel A→B, +200 B-vouchers, signed)
+    B → A: BalanceUpdate (channel B→A, +500 A-vouchers, signed)
+    each acks the other
+    Result: both channels drain. Nothing to net — the two amounts
+            are claims on different issuers.
 
-  Result: Channel B→A drained by 500. Channel A→B drained by 200.
-          Netting applies only where both sides accept the same mint.
+  Phase 3' — Settle, shared mint M
+    net: B owes A 300 M
+    B → A: BalanceUpdate (channel B→A, +300 M, signed)
+    A → B: BalanceAck
+    Result: only B→A drains, at the difference rate.
 ```
 </details>
 
@@ -95,8 +101,8 @@ The funding process follows the Cashu Spilman protocol:
 
 Both channels are funded and verified. Metering and balance updates proceed:
 - Every metering interval, both sides send MeteringReport
-- Net debtor sends BalanceUpdate (signed Spilman balance update)
-- Net creditor sends BalanceAck
+- Different mints: each side sends a BalanceUpdate on its own channel
+- Shared mint: the net debtor sends one BalanceUpdate, the creditor acks
 
 ### RollingOver
 
@@ -144,6 +150,42 @@ Settlement complete. Proofs distributed. Channel is done.
 ### Zero-Price Shortcut
 
 When both sides set all prices to zero, the pair goes directly to Active with no funding, no channels, no metering, and no balance updates. Delivery is free.
+
+---
+
+## What the Metering Interval Is For
+
+The interval survives the move to vouchers, but not for the reason it
+originally had. It was described as a renegotiation point — the provider could
+change its price at every interval and the peer could accept or walk away.
+There is nothing to renegotiate now: delivery costs one voucher per unit and
+the peer already holds the vouchers, so their claim is fixed
+([tollgate-pricing.md](tollgate-pricing.md)).
+
+Four reasons remain, and they are enough:
+
+- **Batching.** One signature per interval instead of one per unit. This is
+  the whole point of a Spilman channel.
+- **Bounding the provider's exposure.** A peer that vanishes mid-interval
+  leaves at most one interval of delivered-but-unpaid resource. Shorter
+  interval, smaller loss.
+- **Reconciliation.** Both sides exchange counters and compare, which is how
+  transit loss is detected at all ([tollgate-metering.md](tollgate-metering.md)).
+- **Rate control.** What a peer pays in one interval sets its allowance for
+  the next, which is the rate auction
+  ([tollgate-vouchers.md](tollgate-vouchers.md)).
+
+The two exposures are bounded by different knobs, and it is worth keeping them
+apart:
+
+| Risk | Bounded by |
+|---|---|
+| Provider delivers and is not paid | The metering interval |
+| Peer funds a channel and the issuer refuses to honor the refund | Channel capacity |
+
+The second is the trust cost of the issuer being the mint
+([issuer-risk.md](../market/issuer-risk.md)). Shortening the interval does not
+help it; funding smaller channels does.
 
 ---
 
@@ -295,34 +337,66 @@ Danger zone:      expiry - safety_margin (e.g., expiry - 60 seconds)
 Each metering interval, both sides owe each other independently:
 
 ```
-A owes B: B's pricing × (elapsed seconds + units B delivered to A)
-B owes A: A's pricing × (elapsed seconds + units A delivered to B)
-Net: A_owes - B_owes
+A owes B: units B delivered to A   (one voucher per unit)
+B owes A: units A delivered to B
 ```
 
-If the net is positive (A owes more), A signs a BalanceUpdate on the A→B channel for the net amount. If negative, B signs on the B→A channel. If zero, no update needed.
+**Whether these can be netted depends on whether they are denominated in the
+same mint.** They usually are not.
 
-This means:
-- Only one channel is used per metering interval (the debtor's)
-- The other channel's balance doesn't change
-- Channel drain is slower (only net amounts move)
-- Both channels last longer before rollover
+A pays B in a mint from B's accepted set; B pays A in a mint from A's
+([tollgate-vouchers.md](tollgate-vouchers.md)). Those are claims on different
+issuers. 500 A-vouchers and 200 B-vouchers are not commensurable — one claims
+A's capacity, the other claims B's — so there is no difference to take, and
+subtracting them would silently assume the two issuers are worth the same.
 
-### Netting and Channel Drain
+### Two Cases
 
-Without netting, both channels drain at their full rate. With netting, channels drain at the difference rate:
+**Different mints — no netting.** Both channels drain at their full rate and
+both sides sign a BalanceUpdate each interval.
 
 ```
-Without netting:
-  A→B channel drains at: A's cost to B per interval
-  B→A channel drains at: B's cost to A per interval
-
-With netting:
-  Only one channel drains per interval
-  Drain rate = |A's cost - B's cost| per interval
+  A → B: BalanceUpdate on A→B channel   (200 B-vouchers)
+  B → A: BalanceUpdate on B→A channel   (500 A-vouchers)
+  each acks the other
 ```
 
-For peers with similar resource flow in both directions, netting dramatically extends channel life.
+**A mint both sides accept — netting applies.** If some mint `M` appears in
+both accepted sets and both directions settle in `M`-vouchers, the amounts are
+commensurable and only the difference moves.
+
+```
+  A owes B 200 M,  B owes A 500 M   →   net: B owes A 300 M
+  B → A: BalanceUpdate on B→A channel (+300 M, signed)
+  A → B: BalanceAck
+```
+
+Both peers know both accepted sets from the Offer exchange, so which case
+applies is decided deterministically with no extra round-trip.
+
+### What Netting Is Worth
+
+| | Different mints | Shared mint |
+|---|---|---|
+| Signatures per interval | 2 | 1 |
+| Channels draining | Both, at full rate | One, at the difference rate |
+| Rollover frequency | Higher | Lower |
+| Spent-proof records | More — each rollover adds a set | Fewer |
+
+For peers with similar flow in both directions the shared-mint case
+dramatically extends channel life, exactly as it always did. Losing it costs
+signatures, rollovers, and — because each rollover writes a spent-proof set —
+some of the state compression channels exist to provide.
+
+**This is an incentive toward a common mint**, on top of the liquidity one in
+[voucher-price-signal.md](../market/voucher-price-signal.md). Two relays that
+both accept a shared hub mint get cheaper settlement than two that only accept
+their own. Nothing enforces convergence; it is simply cheaper.
+
+Note the cost lands only on **bidirectional** peers. A pay-only leaf has one
+channel and nothing to net, so it is unaffected — and bidirectional peers are
+the ones most likely to share a mint anyway, since a relay accepting its
+upstream's mint is the common case.
 
 ---
 
@@ -494,7 +568,8 @@ When metering reports diverge beyond the agreed tolerance, the channel layer's r
 | Rollover threshold | 80% capacity (configurable, default 20% overlap) | New channel ready before old exhausts |
 | Rollover drain | Old channel drains to 100%, then new channel continues | No wasted capacity |
 | Stale session timeout | 60 seconds (configurable) | Close if rollover can't complete |
-| Netting | Only net debtor signs per interval | Fewer signatures, slower channel drain |
+| Netting | Only where both directions settle in the same mint | Vouchers from different issuers are not commensurable, so there is no difference to take. Shared-mint peers get one signature and difference-rate drain; others get two signatures and full-rate drain |
+| Metering interval | Kept, for batching, exposure bounding, reconciliation and rate control | It is no longer a price renegotiation point — there is no delivery price to renegotiate |
 | Transit loss resolution | Use the deliverer-favoring value | Favors the party that did the work; a flat "higher value" rule inverts under negative prices |
 | Channel capacity | Start small, grow with relationship | Don't over-commit to new peers |
 | Capacity growth on subsidy channels | Disabled — capacity stays flat, rollover bounded by subsidy budget | Growth rewards a stable revenue relationship; on an outbound subsidy it rewards the fastest drain |

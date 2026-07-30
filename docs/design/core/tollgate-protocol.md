@@ -280,17 +280,25 @@ Both peers send MeteringReport. Each side computes the interval delta (`current_
 1. Units A delivered to B this interval — B owes A that many A-vouchers
 2. Units B delivered to A this interval — A owes B that many B-vouchers
 3. Any voucher-price settlement agreed under paid acceptance
-4. Net per channel; the debtor sends BalanceUpdate, the creditor acks
 
 Delivery itself needs no arithmetic — one voucher per unit
 ([tollgate-pricing.md](tollgate-pricing.md)) — so both sides trivially agree
-on the amounts. This is deterministic.
+on the amounts.
+
+**Whether the two directions net depends on the mint.** If each direction
+settles in a different mint, the amounts are claims on different issuers and
+cannot be subtracted: both sides send a BalanceUpdate on their own channel. If
+some mint appears in both accepted sets and both directions use it, the
+amounts are commensurable and only the net debtor sends one. Both peers know
+both accepted sets from the Offer exchange, so the choice is deterministic and
+costs no extra round-trip. See
+[Netting](tollgate-payment-channels.md#netting).
 
 **Field 4** is the only renegotiation mechanism left. A node that wants to change what it will give for some mint's vouchers — including dropping a mint from the accepted set — includes the revised entries; the peer accepts by continuing, or rejects with ChannelClose. Delivery cannot be repriced mid-session, because the peer already holds the vouchers and their claim is fixed.
 
 ### 0x05 BalanceUpdate
 
-Sent by the **net debtor** after both MeteringReports have been exchanged. Contains the signed Spilman balance update for only the net amount owed.
+Sent after both MeteringReports have been exchanged. Where the two directions settle in different mints, each side sends one on its own channel. Where they share a mint, only the net debtor sends one, for the net amount.
 
 ```cbor
 {
@@ -551,7 +559,7 @@ These are infrequent messages (every 5s at the metering interval, one-time for s
 | Message discrimination | Integer `type` field (key 0) | Simple, extensible |
 | First message | Announce (protocol version + pubkey) | Identifies TollGate capability before negotiation |
 | Metering counters | Cumulative since session start, not deltas | Self-healing: lost/duplicated reports don't corrupt accounting |
-| Interval flow | MeteringReport (both) → BalanceUpdate (net debtor only) → Ack | Deterministic netting, only net amount moves |
+| Interval flow | MeteringReport (both) → BalanceUpdate | One update per direction when the mints differ; one net update when both sides settle in the same mint. Decided deterministically from the Offers |
 | Delivery pricing | None in the protocol — one voucher per unit | A voucher is a claim on one unit, so redemption is delivery |
 | Accepted mints | A set per node, own mint implicitly at par, each foreign mint carrying a signed price | One unit of account network-wide means any mint's vouchers are usable; the price is where issuer risk is expressed |
 | Accepted-mint price changes | Piggybacked on MeteringReport (field 4) | No extra round-trips; the only prices that can change mid-session |
