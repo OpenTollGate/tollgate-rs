@@ -8,16 +8,20 @@ Metering produces the inputs to billing. Billing is trivial — one voucher per 
 
 ## What is Metered
 
-Each node meters **units delivered to each peer** (outbound). This is what the node charges for — it did the work of delivering those resources.
+Each node meters two things per peer, link-local: **units delivered to it** and **units received from it**. Both are billable — the peer pays for its downloads and its uploads alike ([tollgate-vouchers.md](tollgate-vouchers.md)).
 
 ```
-Node A delivers 1000 units to Peer B this interval
-A's metering: units_delivered_to_B += 1000
+This interval, for peer B:
+  delivered_to_B  += 1,000,000     (B's download)
+  received_from_B +=    50,000     (B's upload)
 ```
+
+Billing applies the received multiplier; metering does not. The counts on the
+wire stay raw so both sides can reconcile them against each other.
 
 Both sides meter independently. Each side's counters are local; they are reconciled at each metering interval via the MeteringReport message.
 
-All units delivered to a peer are metered — including TollGate protocol messages and locally-addressed resources. Distinguishing control plane from data plane at the metering layer adds complexity for negligible savings (protocol messages are tiny relative to delivered resources).
+All units crossing the link are metered — including TollGate protocol messages and locally-addressed resources. Distinguishing control plane from data plane at the metering layer adds complexity for negligible savings (protocol messages are tiny relative to delivered resources).
 
 ## Cumulative Counter Model
 
@@ -39,31 +43,28 @@ B says: "I received 980 units from you this interval"   (delta from cumulative)
 Transit loss = |1000 - 980| / 1000 = 2%   (within default 5% tolerance)
 ```
 
-Within tolerance: both sides note the discrepancy but bill on the value that favors the deliverer. Outside tolerance: see Transit Loss Resolution below.
+Within tolerance: both sides note the discrepancy but bill on the higher value. Outside tolerance: see Transit Loss Resolution below.
 
 ---
 
 ## Transit Loss Resolution
 
-When the two sides disagree on unit counts, billing uses **the value that favors the deliverer**. Even if the receiver dropped some units, the deliverer still expended resources sending them, so the residual bias is deliberately placed on the party that did the work.
+When the two sides disagree on unit counts, billing uses **the higher of the
+two counts**. The node that carried the traffic expended resources doing so
+even if some was lost in transit, so the residual bias sits with the party that
+did the work.
 
-For network forwarding that is always the **higher** of the two counts, because delivery is always paid for by the receiver — one voucher per unit, never negative ([tollgate-vouchers.md](tollgate-vouchers.md)).
-
-The rule is stated in terms of the deliverer rather than as "use the higher value" because a negative delivery price inverts it. Where negative delivery prices are permitted at all — surplus disposal of a conserved, physically metered resource — the deliverer is the *payer*, and taking the higher value would let a peer inflate its received-count and skim up to the full tolerance every interval, indefinitely, without ever crossing the threshold that triggers a warning.
-
-| Price sign | Who pays | Billable value |
-|---|---|---|
-| `price > 0` (all network forwarding) | receiver of the delivery | **higher** of the two counts |
-| `price < 0` (surplus disposal only) | deliverer | **lower** of the two counts |
-| `price == 0` | nobody | no billing |
+There is no sign to reason about. Every billable amount is a count of units,
+and the multiplier that scales the received side is unsigned, so nothing
+billable can be negative.
 
 | Situation | Billable amount | Action |
 |-----------|----------------|--------|
-| Within tolerance (default 5%) | Deliverer-favoring value | Normal — both sides note discrepancy |
-| Exceeds tolerance | Deliverer-favoring value | Warning sent (Reject: transit loss tolerance exceeded) |
-| Persistent (3+ intervals) | Deliverer-favoring value | Close and renegotiate |
+| Within tolerance (default 5%) | Higher value | Normal — both sides note discrepancy |
+| Exceeds tolerance | Higher value | Warning sent (Reject: transit loss tolerance exceeded) |
+| Persistent (3+ intervals) | Higher value | Close and renegotiate |
 
-**Note:** this rule is honest-deliverer-optimistic. A dishonest provider could inflate unit counts, and under a negative price a dishonest subsidy payer could deflate them. In both cases the abuse is capped at the tolerance. Mitigation (proof-of-delivery, reputation systems) requires further design — out of scope for v1.
+**Note:** this rule is honest-carrier-optimistic. A dishonest node could inflate what it claims to have carried, capped at the tolerance. Mitigation (proof-of-delivery, reputation systems) requires further design — out of scope for v1.
 
 Tolerance and the consecutive-over-tolerance threshold are configurable — see [tollgate-configuration.md](tollgate-configuration.md).
 
@@ -120,11 +121,11 @@ pub type PeerMetrics = HashMap<String, MetricValue>;
 
 | Decision | Resolution | Rationale |
 |----------|-----------|-----------|
-| Metering target | All outbound units (delivered to peer) | What we charge for; protocol overhead is negligible at normal volumes |
+| Metering target | Both directions of the link, per peer | The peer pays for its downloads and uploads alike; the counters were already there |
 | Counter model | Cumulative since session start, not deltas | Self-healing: lost/duplicated reports don't corrupt accounting |
 | Counter delivery | Push/stream (watch channels) | Continuous updates from adapter; core snapshots at each metering interval |
 | Reporting | Bidirectional (delivered + received) | Calibration without trust |
-| Transit loss resolution | Use the deliverer-favoring value (higher if price > 0, lower if price < 0) | Favors the party that did the work, deterministic, and sign-stable. A flat "higher value" rule inverts under negative prices. Dishonest peer mitigation is future work. |
+| Transit loss resolution | Use the higher of the two counts | Favors the party that did the work. No sign to handle: every billable amount is a count, and the multiplier that scales the received side is unsigned |
 | Within-tolerance divergence | Track the signed mean across intervals | Persistent offset at the tolerance edge is manipulation; honest transit loss is noisy around a small mean |
 | Transit loss tolerance | 5% default, configurable | Accounts for loss between measurement points |
 | Persistent over-tolerance | Close after 3 consecutive intervals | Something is wrong with the link or metering |

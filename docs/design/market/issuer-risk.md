@@ -17,14 +17,14 @@ rather than by proof.
 
 An issuer can mint more vouchers than its capacity can honor.
 
-**What limits it:** subsidy and revenue use the same vouchers. A node cannot
-inflate its issuance without diluting every outstanding claim, including the
-ones it sold for real money and the ones its paying customers are holding.
-Overissuing punishes the issuer directly rather than merely being
-detectable.
+**What limits it:** everything the issuer gives away and everything it earns
+use the same vouchers. A node cannot inflate its issuance without diluting
+every outstanding claim, including the ones it sold for real money and the ones
+its paying customers are holding. Overissuing punishes the issuer directly
+rather than merely being detectable.
 
-This is a genuine structural improvement over a money-denominated subsidy,
-where printing costs the issuer nothing.
+That is a structural improvement over giving away money, where printing costs
+the issuer nothing.
 
 ---
 
@@ -90,10 +90,10 @@ party holds at once.**
 | A peer buying service | One metering interval's worth | The same bound the design already accepts for a receiver who settles and vanishes |
 | A peer that bought in bulk | The whole bag | Forced by expensive cross-mint swaps — see [voucher-acquisition.md](voucher-acquisition.md) |
 | A market maker | Inventory across many issuers | The business that makes the price signal possible is also the one carrying this risk |
-| A node under paid acceptance | However much foreign paper it agreed to hold | Directly controlled by the price it quotes |
+| A node accepting foreign mints | However much of that issuer's paper it holds | Directly controlled by which mints it accepts at all |
 
-The last row is the good case: the price a node quotes for a peer's vouchers
-*is* its exposure control, and it renegotiates every metering interval.
+The last row is the good case: accepting a mint is a binary choice a node
+makes deliberately, and it can stop at any session boundary.
 
 ---
 

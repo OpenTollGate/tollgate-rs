@@ -48,7 +48,7 @@ selling a claim it will honor by delivering, not moving money.
 ### Local sat swap
 
 The most useful route in practice. The peer hands over sat-denominated
-tokens and the node returns vouchers — **for any mint in its accepted set**,
+tokens and the node returns vouchers — **for any mint it accepts**,
 not only its own ([tollgate-vouchers.md](../core/tollgate-vouchers.md)). The
 node has upstream connectivity and can verify the sats with their mint.
 
@@ -95,4 +95,4 @@ between them, and a relay can spend what it receives straight upstream.
 | Cross-mint atomic swap | No working Cashu implementation. Blocks the price signal, not operation. |
 | First connection with no connectivity | A peer holding only sats and having no other link depends on some node choosing to offer a local swap. Nothing guarantees one will. |
 | Bulk holding | Amortizing expensive swaps means holding a large position in one issuer's vouchers, which is exactly the exposure the design otherwise tries to keep to one metering interval. |
-| Choosing an accepted set | A node has to decide which mints to take and at what haircut, continuously. Neighbors and upstreams it already buys from are the safe choices; a distant hub buys reach at the cost of needing connectivity to verify. |
+| Choosing an accepted set | A node has to decide which mints to take at all — accept or refuse, with no haircut to soften the choice. Neighbors and upstreams it already buys from are the safe ones; a distant hub buys reach at the cost of needing connectivity to verify. |

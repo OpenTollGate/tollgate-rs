@@ -6,7 +6,7 @@ What peers pay each other with is documented in [tollgate-vouchers.md](tollgate-
 
 ## Overview
 
-Each pair of TollGate peers maintains **two unidirectional Spilman channels** — one per delivery direction. Each channel is funded by the party that owes payment (the peer receiving the delivery service).
+Each pair of TollGate peers maintains **two unidirectional Spilman channels** — one per direction. Each is funded by the party that owes, and by default both sides owe: each pays for what it received from the other. A channel is absent only where a node has decided not to charge that peer at all.
 
 ![Channel Pair Structure](diagrams/channel-pair.svg)
 <details><summary>Text version</summary>
@@ -14,15 +14,17 @@ Each pair of TollGate peers maintains **two unidirectional Spilman channels** �
 ```
   Peer A                                          Peer B
   ┌──────────┐                              ┌──────────┐
-  │ sender   │── A delivers to B ──────────→│ receiver │
-  │ on A→B   │╌╌ Channel A→B: A pays B ───→│ on A→B   │
+  │ receiver │←────── B delivers to A ──────│ sender   │
+  │ on A→B   │╌╌ Channel A→B: A pays B ────→│ on A→B   │
   │          │                              │          │
-  │ receiver │←────────── B delivers to A ──│ sender   │
+  │ sender   │────── A delivers to B ──────→│ receiver │
   │ on B→A   │←╌╌ Channel B→A: B pays A ╌╌╌│ on B→A   │
   └──────────┘                              └──────────┘
 
   ── resource   ╌╌ payment (Spilman channel)
-  The provider is paid in its own vouchers by whoever received the service.
+  Each side pays for what it received. Both channels, by default.
+  A received_multiplier adds a surcharge on top, where a node
+  would rather not carry what a peer pushes at it.
 ```
 </details>
 
@@ -42,9 +44,8 @@ At each metering interval, both sides exchange metering reports and then sign ba
     Both compute interval deltas from previous cumulative values.
 
   Phase 2 — Compute (both sides, deterministic)
-    A owes B: 200 units B delivered to A  = 200 B-vouchers
-    B owes A: 500 units A delivered to B  = 500 A-vouchers
-    (one voucher per unit — nothing to multiply)
+    A owes B: B.delivered + B.received × B's multiplier
+    B owes A: A.delivered + A.received × A's multiplier
 
   Phase 3 — Settle, different mints (the usual case)
     A → B: BalanceUpdate (channel A→B, +200 B-vouchers, signed)
@@ -86,8 +87,8 @@ The Spilman channel lifecycle begins after peers have exchanged Announce and Off
 ### Funding
 
 Both peers can reach a mint. They exchange Accept messages containing Spilman funding proofs. Each side creates a channel where they are the sender (funder):
-- B creates and funds the B→A channel (B pays for A's delivery to B)
-- A creates and funds the A→B channel (A pays for B's delivery to A)
+- A creates and funds the A→B channel (A pays B for what B delivered to A)
+- B creates and funds the B→A channel (B pays A for what A delivered to B)
 
 The funding process follows the Cashu Spilman protocol:
 1. Sender creates a 2-of-2 multisig token: `P2PK: (Sender AND Receiver) OR (Sender after expiry)`
@@ -157,10 +158,10 @@ This is a decision about a relationship, not a price — there is no delivery pr
 
 ## What the Metering Interval Is For
 
-The interval is **not** a price renegotiation point. Delivery costs one
-voucher per unit and the peer already holds the vouchers, so their claim is
-fixed ([tollgate-vouchers.md](tollgate-vouchers.md)) — there is nothing to
-renegotiate.
+The interval is **not** a price renegotiation point. Delivery costs one voucher
+per unit and the peer already holds the vouchers, so their claim is fixed
+([tollgate-vouchers.md](tollgate-vouchers.md)). Only the received multiplier
+can change, and that piggybacks on the report.
 
 It exists for four other reasons:
 
@@ -302,7 +303,7 @@ The channel's expiry timestamp (`expiry_timestamp`) must balance two concerns:
 - **Too short**: Frequent rollovers, more mint interaction, more overhead
 - **Too long**: More capital locked up, longer exposure if peer disappears
 
-Default TTL: **1 hour**. Configurable per product.
+Default TTL: **1 hour**. Configurable.
 
 ### Safety Margin
 
@@ -337,14 +338,16 @@ Danger zone:      expiry - safety_margin (e.g., expiry - 60 seconds)
 Each metering interval, both sides owe each other independently:
 
 ```
-A owes B: units B delivered to A   (one voucher per unit)
-B owes A: units A delivered to B
+A owes B: B.delivered + B.received × B's received_multiplier
+B owes A: A.delivered + A.received × A's received_multiplier
+
+Multipliers default to 0, so by default each simply pays for what it received.
 ```
 
 **Whether these can be netted depends on whether they are denominated in the
 same mint.** They usually are not.
 
-A pays B in a mint from B's accepted set; B pays A in a mint from A's
+A pays B in B's preferred mint; B pays A in A's
 ([tollgate-vouchers.md](tollgate-vouchers.md)). Those are claims on different
 issuers. 500 A-vouchers and 200 B-vouchers are not commensurable — one claims
 A's capacity, the other claims B's — so there is no difference to take, and
@@ -361,9 +364,8 @@ both sides sign a BalanceUpdate each interval.
   each acks the other
 ```
 
-**A mint both sides accept — netting applies.** If some mint `M` appears in
-both accepted sets and both directions settle in `M`-vouchers, the amounts are
-commensurable and only the difference moves.
+**A mint both sides are paid in — netting applies.** If both sides settle in
+the same mint `M`, the amounts are commensurable and only the difference moves.
 
 ```
   A owes B 200 M,  B owes A 500 M   →   net: B owes A 300 M
@@ -371,8 +373,8 @@ commensurable and only the difference moves.
   A → B: BalanceAck
 ```
 
-Both peers know both accepted sets from the Offer exchange, so which case
-applies is decided deterministically with no extra round-trip.
+Both peers know both preferences from the Offer exchange, so which case applies
+is decided deterministically with no extra round-trip.
 
 ### What Netting Is Worth
 
@@ -390,14 +392,13 @@ compression channels exist to provide.
 
 **This is an incentive toward a common mint**, on top of the liquidity one in
 [voucher-price-signal.md](../market/voucher-price-signal.md). Two relays that
-both accept a shared hub mint get cheaper settlement than two that only accept
-their own. Nothing enforces convergence; it is simply cheaper.
+both take payment in a shared hub mint get cheaper settlement than two that
+insist on their own. Nothing enforces convergence; it is simply cheaper.
 
-A peering has both channels wherever both sides charge, so most peerings have
-something to net or not net. Relays are the ones most likely to
-share a mint, since a relay accepting its upstream's mint is the common case —
-which is also where netting is worth the most, because flow in both directions
-is comparable.
+Both channels exist by default, so every peering has something to net or not
+net. Relays are the ones most likely to share a mint, since taking payment in
+an upstream's mint is the common case — which is also where netting is worth
+the most, because flow in both directions is comparable.
 
 ---
 
@@ -408,7 +409,7 @@ is comparable.
 Channel capacity starts **small** because the session may not last long. A new peer connection doesn't warrant a large upfront commitment.
 
 Factors:
-- **Estimated usage**: Based on selected product's pricing and expected consumption
+- **Estimated usage**: Based on expected consumption over the session
 - **Expected session duration**: Short for mobile peers, longer for infrastructure
 - **Operator configuration**: Minimum and maximum channel capacity settings
 - **Available balance**: Can't fund more than the wallet holds
@@ -425,32 +426,6 @@ After 10 rollovers: 1000 (configurable cap)
 ```
 
 The exact growth curve is operator-configurable.
-
-### Capacity Growth Does Not Apply to Subsidy Channels
-
-Capacity growth is a reward for a stable *revenue* relationship: a peer that
-keeps paying and rolling over is worth committing more capacity to. On a
-channel funded because the price is **negative** — the node is paying the
-peer — the same rule rewards whichever peer drains the node fastest.
-
-A negatively-priced channel with automatic growth and automatic rollover is
-an unattended drain on the wallet. The peer sends traffic, the channel drains, rollover
-refunds it, and capacity grows on each cycle until it reaches
-`max_capacity` — after which the node keeps refilling at that size for as
-long as the peer keeps sending. Nothing in the channel layer bounds the
-total.
-
-Therefore, when a channel is funded because the node owes the peer:
-
-- `capacity_growth_factor` is **not** applied; capacity stays flat
-- rollover is refused once the peer's subsidy budget for the current window
-  is exhausted (see `subsidy` in
-  [tollgate-configuration.md](tollgate-configuration.md))
-- refusal closes the session for that direction rather than pausing it — a
-  paused subsidy channel is indistinguishable from a stalled one
-
-Budgets are enforced per peer and in aggregate. A per-peer budget alone is
-defeated by creating more peers.
 
 ---
 
@@ -556,7 +531,7 @@ If a received BalanceUpdate fails signature verification:
 
 ### Transit Loss Tolerance Exceeded
 
-When metering reports diverge beyond the agreed tolerance, the channel layer's role is to act on the warning: if persistent (3+ consecutive intervals over tolerance) the channel is closed and renegotiated. The resolution rule itself (deliverer-favoring value, tolerances, billing per interval) is documented in [tollgate-metering.md](tollgate-metering.md).
+When metering reports diverge beyond the agreed tolerance, the channel layer's role is to act on the warning: if persistent (3+ consecutive intervals over tolerance) the channel is closed and renegotiated. The resolution rule itself (higher of the two counts, tolerances, billing per interval) is documented in [tollgate-metering.md](tollgate-metering.md).
 
 ---
 
@@ -564,16 +539,15 @@ When metering reports diverge beyond the agreed tolerance, the channel layer's r
 
 | Decision | Resolution | Rationale |
 |----------|-----------|-----------|
-| Channels per peer pair | Two unidirectional (one per direction) | Matches Spilman's unidirectional model; enables netting |
+| Channels per peer pair | Two unidirectional, one per direction | Each side pays for what it received, so both owe by default. Absent only where a node declines to charge a peer |
 | Channel ownership | Sender manages own channel lifecycle | Rollover initiated by the funder alone — only the party putting up new funds decides when |
 | Rollover threshold | 80% capacity (configurable, default 20% overlap) | New channel ready before old exhausts |
 | Rollover drain | Old channel drains to 100%, then new channel continues | No wasted capacity |
 | Stale session timeout | 60 seconds (configurable) | Close if rollover can't complete |
 | Netting | Only where both directions settle in the same mint | Vouchers from different issuers are not commensurable, so there is no difference to take. Shared-mint peers get one signature and difference-rate drain; others get two signatures and full-rate drain |
 | Metering interval | Kept, for batching, exposure bounding, reconciliation and rate control | It is no longer a price renegotiation point — there is no delivery price to renegotiate |
-| Transit loss resolution | Use the deliverer-favoring value | Favors the party that did the work; a flat "higher value" rule inverts under negative prices |
+| Transit loss resolution | Use the higher of the two counts | Favors the party that did the work. No sign to handle — every billable amount is a count and the multiplier is unsigned |
 | Channel capacity | Start small, grow with relationship | Don't over-commit to new peers |
-| Capacity growth on subsidy channels | Disabled — capacity stays flat, rollover bounded by subsidy budget | Growth rewards a stable revenue relationship; on an outbound subsidy it rewards the fastest drain |
 | Channel TTL | 1 hour default, configurable | Balance between overhead and capital lockup |
 | Safety margin | max(60s, 2×interval) before expiry — triggers rollover | Create new channel, settle old before expiry |
 | Settlement | Only receiver submits to mint | Receiver holds the signed proof |

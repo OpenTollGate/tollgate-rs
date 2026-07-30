@@ -23,31 +23,20 @@ peer that already paid it.
 
 ---
 
-## The Same Price, Below Zero
+## No Price Goes Below Zero
 
-The selling price above and the voucher price quoted in **paid acceptance**
-([tollgate-vouchers.md](../core/tollgate-vouchers.md)) are one number, not
-two. Paid acceptance is what happens when it goes below zero.
+A voucher's price is what someone will give for it, and the floor is zero —
+worthless, not a liability. Nothing in the design pays a party to take a
+voucher off someone's hands.
 
-![Voucher Price Scale](../core/diagrams/voucher-price-scale.svg)
-<details><summary>Text version</summary>
+Where an unwanted flow does need pricing, it is the **received multiplier**
+([tollgate-vouchers.md](../core/tollgate-vouchers.md)): a node charges more
+for carrying a peer's outgoing traffic when that traffic is unwelcome or its
+uplink is scarce. The number is unsigned, so no arrangement anywhere in the
+design pays a peer to accept something.
 
-```
-  voucher price:  positive ──────── zero ──────── negative ──── refused
-                     peer buys       even swap     issuer pays   nobody will
-                     them                          to place them hold them
-```
-</details>
-
-- **Above 1.00** — access to the issuer is scarce.
-- **Between 0 and 1.00** — the market discounts the issuer's promise.
-- **At 0** — the vouchers are neither wanted nor a burden.
-- **Below 0** — the issuer must pay to have them held at all. This is a leaf
-  node whose only "capacity" is uplink nobody upstream wants.
-- **Refused** — no price works.
-
-A leaf sits permanently at the negative end, and that is correct rather than
-a failure: its capacity genuinely is worth nothing to its parent.
+That keeps the signal simple to read: a voucher trading below face value means
+the market doubts the issuer, and nothing else.
 
 ---
 
@@ -64,8 +53,8 @@ improve with scale: more issuers means more books, each thinner.
 Three things make it less bad than it first looks:
 
 - **The market is optional.** Value moves without it, via direct purchase
-  and paid acceptance ([voucher-acquisition.md](voucher-acquisition.md)). A
-  market that never appears costs the reliability signal, not the network.
+  from the issuer ([voucher-acquisition.md](voucher-acquisition.md)). A market
+  that never appears costs the reliability signal, not the network.
 - **Issuers are natural market makers in their own paper.** A node always
   wants to sell its own vouchers and is always willing to redeem them, so
   each book has one committed participant by construction.

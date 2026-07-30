@@ -43,12 +43,11 @@ On OpenWrt, the primary config path is `/etc/tollgate/tollgate.yaml`. UCI integr
 ```yaml
 identity:    # Node identity (keypair)
 mint:        # This node's own mint — what it issues vouchers against
-vouchers:    # Which mints' vouchers this node takes as payment
+vouchers:    # Which mints this node takes payment in, and per-peer traffic terms
 market:      # Optional: buying and swapping services (separate protocol)
 access:      # Minimum flow allowance
 channels:    # Spilman channel parameters
 metering:    # Metering interval and drift tolerance
-subsidy:     # Negative delivery prices (conserved resources only)
 peers:       # Static peer overrides
 ```
 
@@ -87,50 +86,56 @@ mint:
 | `url` | *(required)* | Mint URL advertised to peers |
 | `unit` | `"byte"` | Quantity unit — `byte`, `wh`, `ml` |
 
-The unit is fixed by the resource and must match across every node selling it. There is no per-direction unit: what a peer pays to have its own outgoing traffic carried is the acceptance price on its vouchers, not a second keyset ([tollgate-vouchers.md](tollgate-vouchers.md)).
+The unit is fixed by the resource and must match across every node selling it. There is no per-direction unit: what a peer pays to have its outgoing traffic carried is the received multiplier, not a second keyset ([tollgate-vouchers.md](tollgate-vouchers.md)).
 
 ---
 
 ## Vouchers
 
-Which mints' vouchers this node takes as payment, and at what settlement ratio. These are the only prices in the protocol — see Accepted Mints in [tollgate-vouchers.md](tollgate-vouchers.md). Selling or swapping vouchers is configured separately; see [market-protocol.md](../market/market-protocol.md).
+Which mints this node will take payment in, and how welcome each peer's
+outgoing traffic is.
 
 ```yaml
 vouchers:
-  price_scale: 1000            # divisor for the prices below
+  preferred_mint: "https://gateway.example.com/mint"   # pay me in this
+  also_accept:                                         # optional
+    - "https://upstream.example.com/mint"
+    - "https://hub.example.com/mint"
 
-  accept:                      # mints whose vouchers this node takes
-    - url: "https://upstream.example.com/mint"
-      price: 1000              # par — this is our upstream, we can spend these
-    - url: "https://neighbor.example.com/mint"
-      price: 950               # 5% haircut
-    - url: "https://hub.example.com/mint"
-      price: 1000              # widely held
+  received_multiplier: 0        # surcharge default; 0 = none
 ```
 
-This node's own mint is accepted at par by definition and does not appear in
-`accept`. An empty `accept` list means own vouchers only, which is the
-default and the conservative choice — see Accepted Mints in
-[tollgate-vouchers.md](tollgate-vouchers.md) for what accepting a foreign
-mint costs.
+There are **no prices here.** Delivery is one voucher per unit, and a mint is
+either accepted or it is not — what an issuer's paper is worth is expressed in
+what you pay for it on the market, not in a discount applied at settlement
+([tollgate-vouchers.md](tollgate-vouchers.md)).
 
-Each `price` is signed and crosses zero:
+`preferred_mint` need not be this node's own. A pure pass-through relay can
+name its upstream's mint, take payment in vouchers it can spend directly, and
+never issue any of its own.
 
-| Value | Meaning |
+`received_multiplier` is an unsigned surcharge on what a peer pushes at us, on
+top of that peer already being paid for delivering it. Netted out:
+
+| Value | Net effect per unit that peer uploads |
 |---|---|
-| `> price_scale` | Premium — we want these more than face value |
-| `= price_scale` | Par |
-| `0 < price < scale` | Haircut — we take them at a discount |
-| `0` | Even swap |
-| `< 0` | The holder pays us to take them — paid acceptance |
-| absent | Refused |
+| `0` (default) | We pay them 1× — we want the traffic |
+| `1` | Nets to zero — their upload is free |
+| `2` | They pay 1× — upload costs the same as download |
+| `11` | They pay 10× — matches a 10:1 backhaul |
+
+The net rate is `m − 1`, so to charge uploads at `k` times the download rate,
+set `received_multiplier = k + 1`. Setting `10` gives 9×, not 10×.
 
 ### Defaults
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `price_scale` | `1000` | Sub-unit precision divisor |
-| `accept` | `[]` | Own vouchers only; a foreign mint costs local verification and free settlement |
+| `preferred_mint` | *(required)* | Mint this node wants to be paid in |
+| `also_accept` | `[]` | Other mints accepted; each one taken on is that issuer's credit risk |
+| `received_multiplier` | `0` | No surcharge; each side simply pays for what it received. Per-peer overrides in the `peers` section |
+
+---
 
 ---
 
@@ -189,13 +194,13 @@ access:
     bytes_per_interval: 0
 ```
 
-A small allowance every peer gets without paying, so a new peer can acquire vouchers before it can pay for anything. It is a subsidy and can be farmed — see Minimum Flow Allowance in [tollgate-vouchers.md](tollgate-vouchers.md) for what bounds it and what does not.
+A small amount of traffic every peer gets free, so a new peer can acquire vouchers before it can pay for anything, and so basic things work regardless. It is given away, so it can be farmed — see Minimum Flow Allowance in [tollgate-vouchers.md](tollgate-vouchers.md) for what bounds it and what does not.
 
 ### Defaults
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `minimum_flow.enabled` | `false` | Off by default; it is a subsidy |
+| `minimum_flow.enabled` | `false` | Off by default; it is traffic given away |
 | `minimum_flow.bytes_per_interval` | `0` | Keep small — resale value is bounded economically, not cryptographically |
 
 ---
@@ -227,13 +232,7 @@ channels:
 | `safety_margin_seconds` | `60` | Emergency rollover window before expiry |
 | `stale_timeout_seconds` | `60` | Session closed if rollover blocked this long |
 
-`capacity_growth_factor` rewards a peer relationship that has proven stable across rollovers. That is the right incentive on a channel the *peer* funds. On a channel this node funds because it owes the peer, the same rule rewards whichever peer drains it fastest, and combined with automatic rollover it drains the wallet unattended, limited only by the balance:
-
-```
-10 → 20 → 40 → 80 → … → max_capacity, then refilled indefinitely
-```
-
-Growth is therefore not applied to channels funded under a negative price, and their rollover is bounded by `subsidy` below.
+`capacity_growth_factor` rewards a peer relationship that has proven stable across rollovers. Every channel is funded by the party that owes, so growth always tracks a paying relationship and has nothing to run away on.
 
 ---
 
@@ -260,35 +259,6 @@ metering:
 
 ---
 
-## Subsidy Limits
-
-Negative *delivery* prices — paying a peer to take a resource off your hands — survive only for surplus disposal on a conserved, physically metered resource ([tollgate-hazards.md](tollgate-hazards.md)). They do not apply to network forwarding.
-
-Where they are used, money leaves the node and no counterparty's willingness to pay bounds the total, so the bound has to be configured.
-
-```yaml
-subsidy:
-  enabled: false                     # negative delivery prices refused unless true
-  max_per_peer_per_hour: 0           # absolute cap per peer
-  max_total_per_hour: 0              # aggregate cap across all peers
-  require_conserved_resource: true   # only where delivery is physically metered
-  on_budget_exhausted: "close"       # close | stop_paying
-```
-
-Both caps are enforced. A per-peer cap alone is defeated by creating more peer identities, which are free; an aggregate cap alone lets one peer consume the whole budget.
-
-`require_conserved_resource` restricts negative delivery prices to resources the ResourceAdapter declares physically metered and conserved. For resources that can be silently discarded — network bytes — a peer can accept, bill, and drop, and no meter can tell the difference.
-
-### Defaults
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `subsidy.enabled` | `false` | Refused unless explicitly enabled |
-| `max_per_peer_per_hour` | `0` | Absolute per-peer cap |
-| `max_total_per_hour` | `0` | Absolute aggregate cap |
-| `require_conserved_resource` | `true` | Restrict to physically metered resources |
-| `on_budget_exhausted` | `"close"` | Close the session rather than silently continue |
-
 ---
 
 ## Peer Overrides
@@ -299,9 +269,9 @@ peers:
   "02abc...":
     no_charge: true
 
-  # Override the price for this peer's own mint
+  # Charge this peer 10× for what it pushes at us (net rate is m − 1)
   "03def...":
-    voucher_price: -50           # scaled; peer pays us to hold its vouchers
+    received_multiplier: 11
 
   # Block a peer entirely
   "04ghi...":
@@ -317,7 +287,7 @@ peers:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `no_charge` | `false` | Do not charge this peer. One-sided — whether the peer charges back is its own decision |
-| `voucher_price` | *(from `vouchers.accept`, else refused)* | Signed price for this peer's own mint, overriding the global entry |
+| `received_multiplier` | *(from `vouchers.received_multiplier`)* | Unsigned surcharge on what this peer pushes at us, on top of it being paid for delivering it |
 | `blocked` | `false` | Refuse all service to this peer |
 | `endpoint` | *(none)* | Static endpoint for IP peering |
 
@@ -336,10 +306,8 @@ mint:
   unit: "byte"
 
 vouchers:
-  price_scale: 1000
-  accept:
-    - url: "https://upstream.example.com/mint"
-      price: 1000               # our upstream — we spend these onward
+  preferred_mint: "https://upstream.example.com/mint"   # spend these onward
+  received_multiplier: 2                                # uploads cost the same as downloads
 
 access:
   minimum_flow:
@@ -391,9 +359,10 @@ The implementation watches the config file for changes and applies runtime-chang
 | Loading | Cascading multi-file with priority | System defaults + user overrides + deployment specifics |
 | Defaults | Every parameter has a sensible default | Minimal config for simple deployments |
 | Mint block | Added — every node issues its own vouchers | The node is the mint for its own capacity |
-| Accepted mints | A set per node, own mint implicitly at par, empty by default | One unit of account network-wide makes any mint's vouchers usable; accepting an upstream's mint lets a relay spend what it receives without converting |
+| Accepted mints | One preferred mint plus an optional accepted set, no prices | Accept or refuse is binary; what an issuer's paper is worth belongs on the market |
+| Received multiplier | Unsigned, per peer | Prices scarce uplink and signals how welcome a peer's traffic is, without any signed number in the protocol |
 | Market services | Own config section, own endpoints, own protocol, disabled by default | Buying and swapping is not part of paying for delivery. `market.path` may point at a third party, so a node can offer swaps without running a market |
 | Per-peer favoritism | Sell that peer vouchers cheaper, outside the protocol | Same capability, no multiplier machinery |
 | Free peering | Per-peer `no_charge` flag, one-sided, not transitive | It is a decision about a relationship rather than a price; transitivity would launder free transit for others |
 | Negative delivery prices | Absolute caps, per peer and aggregate, conserved resources only | No counterparty bounds outbound spend; per-peer caps alone are defeated by free identities |
-| Capacity growth | Revenue channels only | On a subsidy channel it rewards the fastest drain |
+| Capacity growth | Applies to every channel | Every channel is funded by the party that owes, so growth always tracks a paying relationship |

@@ -49,7 +49,7 @@
 
   <!-- Title -->
   <text x="360" y="28" text-anchor="middle" class="title">Price Change at Metering Interval</text>
-  <text x="360" y="46" text-anchor="middle" class="subtitle">New pricing piggybacked on MeteringReport — accept by continuing, reject by closing</text>
+  <text x="360" y="46" text-anchor="middle" class="subtitle">Revised multiplier piggybacked on MeteringReport — accept by continuing, reject by closing</text>
 
   <!-- Node headers -->
   <rect x="110" y="65" width="100" height="42" class="node" stroke-width="2" rx="6"/>
@@ -69,7 +69,7 @@
   <text x="40" y="148" text-anchor="middle" class="annot">Update</text>
 
   <line x1="170" y1="140" x2="548" y2="140" stroke="#5080c0" stroke-width="1.5" marker-end="url(#aR)"/>
-  <text x="360" y="133" text-anchor="middle" class="alabel" fill="#5080c0">MeteringReport (new voucher price)</text>
+  <text x="360" y="133" text-anchor="middle" class="alabel" fill="#5080c0">MeteringReport (new received multiplier)</text>
   <text x="360" y="158" text-anchor="middle" class="annot">B inspects field 4-5: a new price is on offer</text>
 
   <line x1="70" y1="178" x2="660" y2="178" class="sep"/>

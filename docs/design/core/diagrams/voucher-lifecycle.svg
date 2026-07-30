@@ -62,7 +62,7 @@
 
   <rect x="100" y="266" width="600" height="46" rx="4" class="callout" stroke="#40a060" stroke-width="1"/>
   <text x="400" y="284" text-anchor="middle" class="annot" fill="#40a060">Redeeming cancels B's own claim &#8212; no mint round-trip and nobody to trust.</text>
-  <text x="400" y="300" text-anchor="middle" class="annot">Shown paying in B-vouchers only. B may also accept A-vouchers &#8212; see paid acceptance.</text>
+  <text x="400" y="300" text-anchor="middle" class="annot">B may also accept other mints' vouchers as payment &#8212; see accepted mints.</text>
 
   <text x="400" y="338" text-anchor="middle" class="caption">How fast a spend may be used up is a protocol rule. The voucher itself is just a quantity.</text>
 </svg>

@@ -33,29 +33,29 @@ A constrained-device variant (`tollgate-net-esp32`) lives in a separate project 
 
 ## How Payment Works
 
-TollGate operates on a single principle: **the provider is paid for delivery, in its own vouchers**. When node A delivers to node B, B pays A in A-vouchers. If B also delivers to A, A pays B in B-vouchers. Each direction is settled independently.
+TollGate operates on a single principle: **each side pays for what it received, in the vouchers of whoever delivered it**. Both peers owe each other by default, so both fund a channel.
 
 ![Pricing Direction](diagrams/pricing-direction.svg)
 <details><summary>Text version</summary>
 
 ```
-    A ──────[delivers to B]──────→ B
-    A is paid in A-vouchers (A is doing the work)
-    Channel B→A: B pays A (B funds)
-
     B ──────[delivers to A]──────→ A
-    B is paid in B-vouchers (B is doing the work)
+    A pays B in B-vouchers for what it received
     Channel A→B: A pays B (A funds)
+
+    A ──────[delivers to B]──────→ B
+    B pays A in A-vouchers for what it received
+    Channel B→A: B pays A (B funds)
 
     ── resources    ╌╌ payment (Spilman channel)
 ```
 </details>
 
-**Delivery has no price in the protocol.** A node is paid in its own vouchers, and one voucher is a claim on one unit of its capacity — so `n` units delivered costs exactly `n` vouchers ([tollgate-vouchers.md](tollgate-vouchers.md)). What a unit costs in money is settled where the peer buys those vouchers, which the protocol never sees.
+**Delivery has no price in the protocol.** One voucher is a claim on one unit of capacity, so `n` units received costs `n` vouchers ([tollgate-vouchers.md](tollgate-vouchers.md)). What a unit costs in money is settled where the peer buys those vouchers, which the protocol never sees.
 
 A well-connected node sells its vouchers dearly because its delivery is valuable. A node that wants to favor a peer sells that peer vouchers cheaply. A pair of peers owned by the same operator skips payment entirely by deciding not to charge each other. Topology, scarcity and relationships all show up in what vouchers fetch, rather than in a price sheet.
 
-One price is quoted peer-to-peer: what a node will pay, or charge, to hold the *other* node's vouchers. It is signed and crosses zero, and it is how a leaf pays for its own upload — see Paid Acceptance in [tollgate-vouchers.md](tollgate-vouchers.md).
+One number is quoted peer-to-peer: the **received multiplier**, a surcharge on what a peer pushes at this node, on top of that peer already being paid for delivering it. Default `0`; only above `1` does the peer pay net for both directions. Unsigned, so a node can discourage traffic but never pay a bonus for it. See [tollgate-vouchers.md](tollgate-vouchers.md).
 
 Payment flows through **Cashu Spilman channels** — unidirectional payment channels where the sender locks vouchers in a 2-of-2 multisig and signs incremental balance updates as resources are metered. Two channels per peer pair (one per direction) enable bidirectional payment. Under vouchers their job is to keep the issuer's spent-proof set bounded rather than to prevent theft.
 
@@ -71,26 +71,19 @@ A peer arrives already holding vouchers for the node it wants service from, or i
 
 4. **Settlement**: Either party can settle at any time. The receiver submits the latest signed balance update to the mint — its own — and the sender reclaims the remaining change.
 
-### Both Channels Normally Exist
+### How Many Channels
 
-**A peering has a channel in each direction wherever the node on that side charges.** A channel is absent only when a node has decided not to charge that particular peer — an operator decision about a relationship, not a price set to zero. There is no delivery price to set: one voucher per unit, always.
+**A channel exists in each direction where that side handled traffic for the other, and charges for it.** Two independent questions, so several shapes are normal:
 
-That decision is **one-sided**. A node controls only whether *it* charges; whether the peer charges back is the peer's call. So three shapes are all normal:
-
-| | A charges B | B charges A | Channels |
+| | B charges A | A charges B | Channels |
 |---|---|---|---|
-| Ordinary peering | yes | yes | both |
-| One-way free | no | yes | one (B→A) |
-| Free peering | no | no | none |
+| **Default, any peering** | yes | yes | **two** |
+| One-way free | `no_charge` | yes | one (B→A) |
+| Free peering | `no_charge` | `no_charge` | none |
 
-The middle row is easy to overlook. A gateway may decide not to charge a community node while still being charged by its own upstream.
+A leaf is not a special case: it delivers its uploads, so the relay owes it for those, and both channels exist. What makes a leaf a net payer is the relay's `received_multiplier`, which surcharges the upload above what it earns.
 
-The leaf case is the other easy mistake. A phone that buys transit and delivers nothing anyone wants still has **both** channels:
-
-- **Leaf → relay** funds the relay's deliveries, in relay-vouchers.
-- **Relay → leaf** funds the relay's payments for the leaf's *upload*, in leaf-vouchers — the relay is the payer there because, under the deliverer-is-paid rule, the leaf delivers its own outgoing bytes.
-
-The leaf supplies the leaf-vouchers the relay pays back from, and pays the acceptance price to have them held, so its net outlay covers both directions. See Paid Acceptance in [tollgate-vouchers.md](tollgate-vouchers.md).
+A node may also decide not to charge a particular peer at all. That decision is **one-sided**: it controls only whether *it* charges, never whether the peer charges back.
 
 ### Offline Resilience
 
@@ -234,7 +227,7 @@ Each peer pair maintains two independent Spilman channels. At each metering inte
 1. Both sides report their metered usage
 2. Each side signs a balance update reflecting cumulative units delivered
 
-**Whether the two directions net against each other depends on the mint.** A pays B in a mint from B's accepted set, and B pays A in a mint from A's — usually different ones. Those are claims on different issuers, so there is no difference to take: both channels drain and both sides sign. Netting applies only where some mint appears in **both** accepted sets and both directions settle in it; then the amounts are commensurable and only the net debtor signs. Both peers know both accepted sets from the Offer exchange, so which case applies is decided deterministically.
+**Whether the two directions net against each other depends on the mint.** A pays B in B's preferred mint, and B pays A in A's — usually different ones. Those are claims on different issuers, so there is no difference to take: both channels drain and both sides sign. Netting applies only where both sides are paid in the same mint; then the amounts are commensurable and only the net debtor signs. Both peers know both preferences from the Offer exchange, so which case applies is decided deterministically.
 
 This makes a shared mint cheaper to settle with — one signature instead of two, and channels draining at the difference rate rather than in full.
 
@@ -304,7 +297,7 @@ TollGate uses the [Cashu Spilman channel](../../../reference/cashu_spilman_chann
 
 | Document | Description |
 | -------- | ----------- |
-| [tollgate-vouchers.md](tollgate-vouchers.md) | What peers pay each other with: denomination, paid acceptance, channels as state compression |
+| [tollgate-vouchers.md](tollgate-vouchers.md) | What peers pay each other with: denomination, who pays, the received multiplier, channels as state compression |
 | [tollgate-protocol.md](tollgate-protocol.md) | Wire protocol: messages, negotiation, codec |
 | [tollgate-payment-channels.md](tollgate-payment-channels.md) | Spilman channel lifecycle, rollover, offline resilience |
 | [tollgate-access-control.md](tollgate-access-control.md) | Delivery gates, access levels, unpaid peer restrictions |

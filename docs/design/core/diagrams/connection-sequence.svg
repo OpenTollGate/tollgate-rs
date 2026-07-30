@@ -83,11 +83,11 @@
 
   <!-- A → B Offer -->
   <line x1="170" y1="215" x2="548" y2="215" stroke="#5080c0" stroke-width="1.5" marker-end="url(#aR)"/>
-  <text x="360" y="208" text-anchor="middle" class="alabel" fill="#5080c0">Offer (mint, unit, classes, voucher price)</text>
+  <text x="360" y="208" text-anchor="middle" class="alabel" fill="#5080c0">Offer (mint, accepted, unit, multiplier)</text>
 
   <!-- B → A Offer -->
   <line x1="550" y1="240" x2="172" y2="240" stroke="#d0a040" stroke-width="1.5" marker-end="url(#aL)"/>
-  <text x="360" y="233" text-anchor="middle" class="alabel" fill="#d0a040">Offer (mint, unit, classes, voucher price)</text>
+  <text x="360" y="233" text-anchor="middle" class="alabel" fill="#d0a040">Offer (mint, accepted, unit, multiplier)</text>
 
   <!-- separator -->
   <line x1="70" y1="260" x2="660" y2="260" class="sep"/>

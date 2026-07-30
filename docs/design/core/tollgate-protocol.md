@@ -65,10 +65,9 @@ separation is structural rather than a convention:
   own vouchers through its Cashu mint, or does not sell them at all, and
   peers arrive holding what they need.
 
-The per-mint prices in Offer are the one place this could be misread. They
-are settlement ratios — how many units of delivery a voucher from a given
-mint is credited as — not exchange rates against money. Both peers need them
-to agree on a balance.
+The Offer carries no price at all. It names which mints this node will take
+payment in, and one unsigned multiplier saying how much a unit carried
+*outward* on the peer's behalf counts. Neither is denominated in money.
 
 ---
 
@@ -172,7 +171,7 @@ TollGate peer; human-facing UI is currently a non-goal
 | Type | Name | Direction | Purpose |
 |------|------|-----------|---------|
 | 0x00 | Announce | Bidirectional | "I am a TollGate node" — protocol version, pubkey |
-| 0x01 | Offer | Bidirectional | Own mint, unit, interval range, accepted mints |
+| 0x01 | Offer | Bidirectional | Preferred mint, accepted mints, unit, interval range, received multiplier |
 | 0x02 | Accept | Bidirectional | Accept the offer, provide Spilman funding |
 | 0x03 | ChannelReady | Bidirectional | Confirm Spilman channel funded and active |
 | 0x04 | MeteringReport | Bidirectional | Unsigned resource stats for this interval |
@@ -217,56 +216,54 @@ Spilman support is universal in v1 — there is no per-token payment mode to sig
 
 ### 0x01 Offer
 
-Sent by each peer after Announce. Declares where the sender's own vouchers come from, and which other mints' vouchers it will take.
-
-There is no price for delivery: one voucher buys one unit
-([tollgate-vouchers.md](tollgate-vouchers.md)). The only prices here are
-per-accepted-mint — what this node will give for a voucher issued by that
-mint, or charge to take it.
+Sent by each peer after Announce. Declares where the sender wants to be paid,
+which other mints it will take, and how welcome the peer's outgoing traffic is.
 
 ```cbor
 {
   0: 0x01,                         // type: Offer
-  1: <mint_url>,                   // text — this node's own mint
-  2: <unit>,                       // text — "byte", "wh", "ml"
-  3: [<min_interval_ms>, <max_interval_ms>],  // [u32, u32] — metering interval range
-  4: [                             // mints whose vouchers this node accepts
-    {
-      1: <mint_url>,               // text
-      2: <price>,                  // i64 — scaled; > 0 we buy them,
-                                   //   0 even swap, < 0 the holder pays us to take them
-    },
-    ...
-  ],
-  5: <price_scale>,                // u32 — divisor for prices; default 1000
+  1: <preferred_mint>,             // text — pay me in this
+  2: [<mint_url>, ...],            // text array — also accepted; may be empty
+  3: <unit>,                       // text — "byte", "wh", "ml"
+  4: [<min_interval_ms>, <max_interval_ms>],  // [u32, u32] — metering interval range
+  5: <received_multiplier>,        // u16 — surcharge on units I receive from you,
+                                   //   on top of you paying for what I deliver.
+                                   //   Default 0 = no surcharge
 }
 ```
 
-Field 1 is implicitly accepted at par and need not appear in field 4. An
-empty field 4 means the node takes only its own vouchers, which is the
-default.
+**There is no price here.** Delivery is one voucher per unit
+([tollgate-vouchers.md](tollgate-vouchers.md)), and what a voucher costs in
+money is settled on the market. A mint is either accepted or it is not —
+there is no haircut, because what an issuer's paper is worth is expressed in
+what you pay for it, not in a discount applied at settlement.
 
-**The Offer prices delivery only.** What a peer pays to have its *own*
-outgoing traffic carried is settled by paid acceptance — the price this node
-quotes for that peer's vouchers, which is field 4
-([tollgate-vouchers.md](tollgate-vouchers.md)). There is no separate uplink
-rate, because that price already is one.
+The sender's **own** mint need not appear at all. A peer never needs it: it
+funds its channel in `preferred_mint`, and this node pays the peer in whatever
+the *peer* prefers. A pure pass-through relay can therefore name its
+upstream's mint and never issue vouchers of its own.
 
-Because the unit is the same network-wide, any mint's vouchers are
-denominated identically — only the issuer differs, which is what the
-per-mint price expresses. See Accepted Mints in
-[tollgate-vouchers.md](tollgate-vouchers.md).
+The base rule is symmetric and needs no field: **each side pays for what it
+received**, which is what the other delivered. Both owe, both fund a channel.
 
-Keysets are fetched from each `mint_url` by ordinary Cashu means
-(NUT-01/02). The protocol does not restate them.
+`received_multiplier` is a surcharge on top of that, for the case where a node
+would rather not carry what a peer pushes at it. It defaults to `0`. Because
+the peer is still paid for delivering, the **net** rate on its upload is
+`m − 1`: `1` makes the upload free, `2` charges it at the same rate as a
+download, `k + 1` charges it at `k` times
+([tollgate-vouchers.md](tollgate-vouchers.md)).
 
-The per-mint price is a **settlement ratio**, not a money price: it says how
-many units of delivery a voucher from that mint is credited as. Both sides
-need it to agree on a balance, which is why it belongs here. No amount in
-this message is denominated in money.
+It is **unsigned**. A negative surcharge would mean paying a peer on top of
+already paying for its delivery, compounding into the sink hazard
+([tollgate-hazards.md](tollgate-hazards.md)) — so it is unrepresentable rather
+than merely forbidden.
 
-The accepted-mint prices are the only fields that can change mid-session, and
-only via MeteringReport.
+Keysets are fetched from each mint by ordinary Cashu means (NUT-01/02). The
+protocol does not restate them.
+
+The multiplier is the only field that can change mid-session, via
+MeteringReport. The accepted-mint set is fixed for the session, because a peer's
+channel is funded in a specific mint and dropping it would strand the channel.
 
 ### 0x02 Accept
 
@@ -280,8 +277,8 @@ Sent by the peer to accept the offer and fund its outgoing channel.
 }
 ```
 
-There is no product or option to echo back: the offer carries a single mint,
-a single unit, and one voucher price.
+There is nothing to echo back: the offer carries a single preferred mint, a
+single unit, and one multiplier.
 
 The metering interval is resolved deterministically by both sides:
 ```
@@ -313,37 +310,46 @@ All MeteringReport values are **cumulative since session start** (the ChannelRea
 
 ### 0x04 MeteringReport
 
-Sent by both peers at each metering interval. Contains **unsigned** resource stats only — no balance signature. This exchange allows both sides to compute the same cost and determine the net.
+Sent by both peers at each metering interval. **Unsigned** resource stats only
+— no balance signature.
 
 ```cbor
 {
   0: 0x04,                         // type: MeteringReport
-  1: <elapsed_ms>,                 // u64 — milliseconds since session start (cumulative)
-  2: <delivered>,                  // u64 — cumulative units we delivered TO this peer
-  3: <received>,                   // u64 — cumulative units we received FROM this peer
-  4: [{1: <mint_url>, 2: <price>}, ...],  // updated accepted-mint prices, or null
+  1: <elapsed_ms>,                 // u64 — since session start (cumulative)
+  2: <delivered>,                  // u64 — cumulative units delivered TO this peer
+  3: <received>,                   // u64 — cumulative units received FROM this peer
+  4: <new_received_multiplier>,    // u16 | null — revised multiplier
 }
 ```
 
-Both peers send MeteringReport. Each side computes the interval delta (`current_cumulative - previous_cumulative`). Once both reports are received, each side independently computes:
-1. Units A delivered to B this interval — B owes A that many A-vouchers
-2. Units B delivered to A this interval — A owes B that many B-vouchers
-3. Any voucher-price settlement agreed under paid acceptance
+Counts are **raw**, cumulative since session start, with no multiplier applied.
+That keeps the bill checkable: each side's `delivered` pairs with the other's
+`received`, exactly as it always has.
 
-Delivery itself needs no arithmetic — one voucher per unit
-([tollgate-vouchers.md](tollgate-vouchers.md)) — so both sides trivially agree
-on the amounts.
+Each side then computes what it owes from the **other side's** counts and the
+multiplier that side quoted:
 
-**Whether the two directions net depends on the mint.** If each direction
-settles in a different mint, the amounts are claims on different issuers and
-cannot be subtracted: both sides send a BalanceUpdate on their own channel. If
-some mint appears in both accepted sets and both directions use it, the
-amounts are commensurable and only the net debtor sends one. Both peers know
-both accepted sets from the Offer exchange, so the choice is deterministic and
-costs no extra round-trip. See
+```
+A owes B = B.delivered + B.received × B.received_multiplier
+B owes A = A.delivered + A.received × A.received_multiplier
+```
+
+With both multipliers at `0` this reduces to each side paying for what it
+received, which is the default and gives two channels. A surcharge above `1`
+is what makes a peer pay net for both directions of its own traffic.
+
+**Whether the two directions net depends on the mint.** If each side is paid in
+a different mint the amounts are claims on different issuers and cannot be
+subtracted: both sides send a BalanceUpdate. If both are paid in the same mint,
+only the net debtor sends one. Both peers know both preferences from the Offer
+exchange, so the choice is deterministic. See
 [Netting](tollgate-payment-channels.md#netting).
 
-**Field 4** is the only renegotiation mechanism left. A node that wants to change what it will give for some mint's vouchers — including dropping a mint from the accepted set — includes the revised entries; the peer accepts by continuing, or rejects with ChannelClose. Delivery cannot be repriced mid-session, because the peer already holds the vouchers and their claim is fixed.
+**Field 4** is the only renegotiation left. A node raising what it charges for
+traffic a peer pushes at it includes the new value; the peer accepts by
+continuing, or rejects with ChannelClose. Delivery itself cannot be repriced —
+the peer already holds the vouchers and their claim is fixed.
 
 ### 0x05 BalanceUpdate
 
@@ -447,7 +453,7 @@ General-purpose rejection for any proposal.
 
 | Code | Meaning |
 |------|---------|
-| 0x01 | Voucher price unacceptable |
+| 0x01 | Received multiplier unacceptable |
 | 0x02 | Mint not in the accepted set |
 | 0x03 | Unit not accepted |
 | 0x04 | Metering interval out of range |
@@ -486,8 +492,8 @@ Both sides send Offer and Accept because each delivers independently. The interv
      B → A: Announce (v1, pubkey_B, capabilities)
 
   2. Offer
-     A → B: Offer (own mint, unit, interval range, accepted mints)
-     B → A: Offer (own mint, unit, interval range, accepted mints)
+     A → B: Offer (preferred mint, accepted mints, unit, interval, multiplier)
+     B → A: Offer (preferred mint, accepted mints, unit, interval, multiplier)
 
   3. Channels
      B → A: Accept + funding (B→A channel)
@@ -507,15 +513,15 @@ Both sides send Offer and Accept because each delivers independently. The interv
 A peer arrives already holding the other side's vouchers, or it gets no
 service. There is no pre-channel phase.
 
-### Voucher Price Change at Metering Interval
+### Multiplier Change at Metering Interval
 
 ![Price Change](diagrams/price-change.svg)
 <details><summary>Text version</summary>
 
 ```
-  A wants to change what it will give for some mint's vouchers:
+  A wants to change what it charges for traffic B pushes at it:
 
-  A → B: MeteringReport (field 4: revised accepted-mint prices)
+  A → B: MeteringReport (field 4: revised received multiplier)
 
   alt: ACCEPT (continue)
        B → A: MeteringReport (continues normally)
@@ -582,11 +588,11 @@ Typical message sizes (CBOR encoded):
 | Message | Estimated size |
 |---------|---------------|
 | Announce | ~40 bytes |
-| Offer (own mint only) | ~90 bytes |
-| Offer (3 accepted mints) | ~200 bytes |
+| Offer (preferred mint only) | ~80 bytes |
+| Offer (3 accepted mints) | ~180 bytes |
 | Accept | ~180 bytes (dominated by Spilman funding) |
 | ChannelReady | ~40 bytes |
-| MeteringReport | ~50 bytes |
+| MeteringReport | ~60 bytes |
 | BalanceUpdate | ~110 bytes |
 | BalanceAck | ~40 bytes |
 | RolloverInit | ~200 bytes (Spilman funding) |
@@ -611,9 +617,11 @@ Plus 2 bytes of length prefix per message. These are infrequent (every 5 s at th
 | First message | Announce (protocol version + pubkey) | Identifies TollGate capability before negotiation |
 | Metering counters | Cumulative since session start, not deltas | Self-healing: lost/duplicated reports don't corrupt accounting |
 | Interval flow | MeteringReport (both) → BalanceUpdate | One update per direction when the mints differ; one net update when both sides settle in the same mint. Decided deterministically from the Offers |
-| Delivery pricing | None in the protocol — one voucher per unit | A voucher is a claim on one unit, so redemption is delivery |
-| Accepted mints | A set per node, own mint implicitly at par, each foreign mint carrying a signed price | One unit of account network-wide means any mint's vouchers are usable; the price is where issuer risk is expressed |
-| Accepted-mint price changes | Piggybacked on MeteringReport (field 4) | No extra round-trips; the only prices that can change mid-session |
+| Delivery pricing | None in the protocol — one voucher per unit, both directions | A voucher is a claim on one unit, so redemption is delivery |
+| Accepted mints | One preferred mint plus an optional accepted set; no prices | Accept or refuse is binary. What an issuer's paper is worth is expressed in what you pay for it on the market, not in a settlement discount |
+| Who pays | Whoever the traffic is for, for both directions | One rule covers upload and download, so no reverse payment and no negative amount anywhere |
+| Received multiplier | Unsigned u16 per peer, piggybacked for renegotiation | Prices scarce uplink and signals how welcome a peer's traffic is. Unsigned makes paying a peer to send traffic unrepresentable rather than merely forbidden |
+| Metering counts | Unchanged: delivered and received, raw | Billing changed, measurement did not — both counters already existed and already mean the peer's download and upload |
 | Market operations | Separate endpoints and a separate protocol; never TollGate messages | Buying and swapping vouchers is not part of paying for delivery, and a node that offers neither is fully functional |
 | Money in the protocol | Never appears | Sats are a market concern; the payment protocol only ever counts units and vouchers |
 | Bootstrap messages | Removed, type codes 0x07/0x08 left reserved | The mint a peer needs is the peer it is talking to; a retired code should Reject cleanly rather than misparse |

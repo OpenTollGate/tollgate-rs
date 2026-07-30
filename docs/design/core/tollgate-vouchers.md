@@ -138,47 +138,89 @@ with how many bits the number has. A 1 GiB payment is a 30-bit number and
 takes up to 30 proofs, about 15 on average. That is what the spent-proof set
 below has to absorb.
 
-### Uplink Is Priced By Paid Acceptance, Not By A Second Unit
+### Each Side Pays For What It Received
 
-Uplink and downlink are not the same good. Asymmetric backhaul (DSL, cable,
-cellular) runs 5:1 to 20:1, so a unit carried in the scarce direction costs
-the operator far more. One-voucher-per-unit across both would underprice it:
+The base rule is unchanged and symmetric: **a node pays for what it received
+from a peer**, which is what that peer delivered. Both sides owe each other,
+both fund a channel, and both settle every interval.
 
-![Uplink Asymmetry](diagrams/uplink-asymmetry.svg)
+```
+A owes B = B.delivered      (what B handed to A — A's download)
+B owes A = A.delivered      (what A handed to B — A's upload)
+```
+
+For an ordinary peering that is the whole story, and it is why **two channels
+is the default**, not an exception.
+
+### The Received Multiplier
+
+That leaves one gap. A leaf's upload is something the leaf *delivers*, so by
+the base rule the relay pays the leaf for it — which is backwards when the
+relay would rather not carry it at all.
+
+A node closes the gap by adding a **surcharge on what it receives** from a
+given peer:
+
+```
+A owes B = B.delivered + B.received × m_B
+B owes A = A.delivered + A.received × m_A
+```
+
+> **`received_multiplier`** — a surcharge on units I receive from you.
+> Default `0`: no surcharge, the base rule stands.
+
+Netted out on the leg where A delivered `X` to B, the base payment and the
+surcharge partly cancel — B still owes A `X` for delivering it:
+
+| `m_B` | B pays A | A pays B | **Net per unit A uploads** |
+|---|---|---|---|
+| `0` (default) | `X` | — | **B pays 1×** — the traffic is wanted |
+| `1` | `X` | `X` | **zero** — upload is free to A |
+| `2` | `X` | `2X` | **A pays 1×** — upload costs the same as download |
+| `10` | `X` | `10X` | **A pays 9×** |
+| `11` | `X` | `11X` | **A pays 10×** — matches a 10:1 backhaul |
+
+**The net rate is `m − 1`, not `m`.** To charge uploads at `k` times the rate
+of downloads, set:
+
+```
+received_multiplier = k + 1
+```
+
+An operator that wants 10× uplink and sets `10` gets 9×. The off-by-one is the
+price of the field being unsigned, and it is worth the trade: with no negative
+value available, a node can decline traffic as hard as it likes but can never
+pay a *bonus* on top of what it already owes for delivery. `0` is the floor,
+and `0` is simply the base rule with no surcharge at all.
+
+![Each Side Pays For What It Received](diagrams/who-pays.svg)
 <details><summary>Text version</summary>
 
 ```
-Leaf X: 1 GB down, 50 MB up
-Leaf Y: 1 GB up,   50 MB down
+Ordinary peering, both multipliers 0:
+  A owes B = B.delivered        both pay, two channels
+  B owes A = A.delivered
 
-On a 10:1 uplink-constrained backhaul Y consumes ~10× the scarce capacity.
-Charging both the same per byte would have downloaders subsidize uploaders.
+Relay charging upload at the same rate as download, m_B = 2:
+  A owes B = B.delivered + 2 × A's upload
+  B owes A = A's upload
+  net: A pays 1× for each, in both directions
+
+Relay on a 10:1 backhaul, m_B = 11:
+  net: A pays 1× per unit down, 10× per unit up
 ```
 </details>
 
-**No second unit is needed to fix this**, because the two directions are
-already paid for by two different mechanisms:
+It is **per peer**, so a node can welcome one peer's traffic and discourage
+another's. Metering reports carry raw counts, so reconciliation is untouched
+and the surcharge is applied afterwards, from the multiplier the other side
+quoted.
 
-| | Who delivers | How it is paid |
-|---|---|---|
-| Download | the relay | 1 voucher per unit, from the Offer |
-| Upload | the leaf | the acceptance price on the leaf's vouchers |
-
-Paid acceptance below is the uplink charge. The relay must hold leaf-vouchers
-in proportion to what the leaf uploads, so the price it quotes for them *is* a
-per-uplink-unit rate:
-
-```
-1 GB down                       → 1 GB of relay-vouchers
-50 MB up, acceptance price 10   → 500 MB of relay-vouchers
-                          total → 1.5 GB
-```
-
-An operator on symmetric fibre quotes near zero. One on a 10:1 cellular
-uplink quotes deeply negative. Same economics a per-direction unit would give,
-using a price that already exists, already crosses zero, and is already
-negotiated per peering — and without splitting the issuer's vouchers into two
-non-interchangeable kinds.
+**The field is unsigned, and that is load-bearing.** A negative surcharge would
+mean paying a peer *on top of* already paying for its delivery — compounding
+into the sink hazard, where generating unwanted traffic becomes profitable
+([tollgate-hazards.md](tollgate-hazards.md)). Zero is the floor, and zero
+already means "I am happy to pay you for this."
 
 ---
 
@@ -193,18 +235,18 @@ This is a merchant accepting several banks' notes: one unit of account,
 several credits, each worth what its issuer is worth.
 
 ```yaml
-# what this node will take, and at what price
-own mint                     par by definition
-mint A (upstream provider)   1.00   — accepted at face value
-mint B (neighbor relay)      0.95   — 5% haircut
-mint C (well-known hub)      1.00   — widely held, taken at par
-anything else                refused
+# what this node will take
+preferred mint                 pay me in this
+mint A (upstream provider)     also accepted — we can spend these onward
+mint C (well-known hub)        also accepted — widely held
+anything else                  refused
 ```
 
-The price per mint is the same signed, zero-crossing number as in Paid
-Acceptance below. Accepting a mint's vouchers at par when that issuer is
-unreliable is a subsidy, so the haircut is where an operator prices issuer
-risk ([issuer-risk.md](../market/issuer-risk.md)).
+**Accept or refuse is binary — there is no haircut.** What an issuer's paper
+is worth is expressed in what you pay for it on the market, not in a discount
+applied at settlement. Taking a mint on means taking its credit, so the
+decision to accept it at all is where an operator weighs issuer risk
+([issuer-risk.md](../market/issuer-risk.md)).
 
 ### What This Buys
 
@@ -271,175 +313,14 @@ of whoever is delivering**, one voucher per unit.
 ```
 </details>
 
-If A also delivers something B wants, the same thing happens in the other
-direction with A-vouchers, priced and paid separately. Where A delivers
-nothing B wants — a leaf node — that second payment is simply absent.
-Nothing has to be uncharged or cancelled out; there is one payment instead
-of two.
+The same thing happens in the other direction, in the other node's vouchers,
+settled separately. A leaf is no exception: it delivers its uploads, so its
+relay owes it for those, and both channels exist. What makes the leaf a net
+payer is the relay's received multiplier, not a missing channel.
 
 That is the whole mechanism for the large majority of peerings. Vouchers can
 be acquired **on a market or directly from the issuer**, and the rest of
 this document only needs the direct route.
-
----
-
-## Paid Acceptance
-
-Take a leaf node A peering with its parent relay B. A's download is
-straightforward — B delivers it, A pays for it in B-vouchers. A's upload is
-the awkward half.
-
-B gains nothing from receiving A's upload. It is not a service A performs
-for B; it is traffic B has to carry onward on A's behalf, at a cost to B.
-So **A has to pay for its upload too**.
-
-The payment protocol says the deliverer is paid, and on the upload leg the
-deliverer is A. Taken literally that has B owing A for A's own outgoing
-traffic. Correcting it inside the payment flow would mean signed delivery
-prices, sign-aware metering and a spending budget to stop the resulting
-subsidy running away.
-
-![Where the Negative Price Comes From](diagrams/negative-price-inversion.svg)
-<details><summary>Text version</summary>
-
-```
-  Rule: the deliverer is paid
-    Leaf A ──── "delivers" its own uplink bytes ────→ Relay B
-    Leaf A ←─── so the rule has B owing A ─────────── Relay B
-
-  Paid acceptance
-    Leaf A ──── pays B to hold A-vouchers ─────────→ Relay B
-    Leaf A ←─── B pays for the upload with them ──── Relay B
-    both directions positive; the negative price sits on the voucher leg
-```
-</details>
-
-Paid acceptance corrects it outside the payment flow instead. A issues its
-own vouchers, which B has no use for. A **pays B — in B's vouchers — to hold
-them**. B now has A-vouchers on hand to pay A with when A delivers its
-upload, and both directions run under the ordinary rule with ordinary
-positive prices.
-
-**The negative price lives entirely in the price of A's vouchers, so the
-payment protocol never sees a negative number.**
-
-![Paid Acceptance](diagrams/paid-acceptance.svg)
-<details><summary>Text version</summary>
-
-```
-  A → B:  an A-voucher worth n  +  a B-voucher worth m
-
-  The voucher price is −m/n: A pays m to place n, so A's vouchers
-  price out negative. Quoted by B, renegotiated at each metering
-  interval like any other price.
-```
-</details>
-
-Following the value through one interval: A hands B `m` B-vouchers plus some
-of its own. When A delivers its upload, B pays for it with those same
-A-vouchers, and A redeems them — canceling a claim it issued itself, at no
-cost to anyone. A's real outlay is the `m` B-vouchers, which is what having
-B carry the upload is worth.
-
-The A-voucher side is a float A keeps topped up. If A stops topping it up, B
-runs out and cannot pay for A's upload — which costs A nothing, since A
-never wanted to be paid for it in the first place.
-
-The voucher price measures one thing: how much B wants A's capacity. The
-leaf sits at one end, where B wants it so little that A must pay. A gateway
-trying to attract traffic sits at the other, buying its peers' vouchers
-because it wants what they deliver — the "attract resources" case from
-[tollgate-hazards.md](tollgate-hazards.md), and the same price with the
-opposite sign.
-
-### One Price, Crossing Zero
-
-Paid acceptance and normal operation are one price per peering that happens
-to cross zero, so leaf nodes need no separate rule.
-
-The price is the price **of A's vouchers**, quoted by B. It follows the same
-sign convention as the rest of the design: positive when the vouchers are
-worth something, negative when they are a burden someone has to be paid to
-take. positive when the vouchers are worth
-something, negative when they are a burden someone has to be paid to take.
-
-![Voucher Price Scale](diagrams/voucher-price-scale.svg)
-<details><summary>Text version</summary>
-
-```
-  voucher price:  positive ──────── zero ──────── negative ──── refused
-                     B buys A's       even swap     A pays B      B will not
-                     vouchers                       to take them  hold them
-                     │                │             │             at any price
-                     │                │             │             │
-                     normal operation │             paid          normal
-                     in the other     │             acceptance    operation,
-                     direction        │                           one payment
-```
-</details>
-
-- **Positive** — B wants A's vouchers enough to buy them. That is normal
-  operation running in the other direction.
-- **Zero** — an even swap; the two sides trade vouchers and nothing else
-  moves.
-- **Negative** — A pays B to take them. Paid acceptance.
-- **Refused** — B will not hold A's vouchers at any price. A pays purely in
-  B-vouchers, which is normal operation with only one direction.
-
-Above zero this is the same number as the selling price in One Unit Per
-Resource, Many Issuers — 1.05 for a node in demand, 0.70 for one the market
-doubts. The scale simply continues below zero, where the issuer has to pay
-to place its vouchers at all.
-
-The refused end is the **safe default**. A node not configured to accept
-other nodes' vouchers refuses, everything still works, and the peering falls
-back to normal operation.
-
-Three consequences:
-
-- **A market is not required to operate.** Cross-mint atomic swap and market
-  liquidity are still needed for the reliability signal above, but not for
-  moving value.
-- **Checking a voucher takes one hop.** B validates A-vouchers by asking A,
-  the peer it is already connected to and already exchanging metering
-  reports with. No third-party mint has to be reachable. The risk that A
-  refuses to redeem is unchanged, and is limited by how many A-vouchers B
-  agrees to hold — which is what the voucher price controls.
-- **Issuing more vouchers does not help the issuer.** B sets the acceptance
-  price from its own estimate of A's capacity, not from how many vouchers A
-  offers, so printing more only moves the price.
-
-### Pay for Voucher Acceptance, Never for Traffic Acceptance
-
-Paid acceptance is safe because whether B took the vouchers is a fact anyone
-can check, and B gains nothing by taking them and lying about it.
-
-The same arrangement applied to traffic is not safe. Accepting traffic can
-be faked: the peer takes it, bills for it, and discards it, having done no
-work. Discarding becomes the most profitable thing it can do. See the
-[tollgate-hazards.md](tollgate-hazards.md).
-
-Traffic must therefore stay priced as **transit**, which the payer checks
-end-to-end and stops paying for when nothing arrives. Merging the two into a
-single "pay you to take my traffic" price brings that abuse straight back.
-
-![Two Things, Priced Separately](diagrams/voucher-two-legs.svg)
-<details><summary>Text version</summary>
-
-```
-  voucher acceptance — the negative price lives here
-  A ─────── pays B to accept A-vouchers ──────→ B
-            ✓ whether B took them can be checked directly
-
-  transit — always positive, always the beneficiary paying
-  A ←────────── B provides transit ──────────── B
-            ✓ A checks end-to-end, stops paying if nothing arrives
-
-  ✗ never merge into one "pay you to take my traffic" price —
-    accepting traffic can be faked, and discarding it then becomes
-    the most profitable thing the peer can do.
-```
-</details>
 
 ---
 
@@ -451,8 +332,8 @@ nobody to rely on. All the work moves to whoever acquires the vouchers, who
 can spread it over many payments.
 
 This applies to the redemption step. A node that also accepts its peers'
-vouchers under paid acceptance does take on those issuers, and prices that
-risk through the voucher price it quotes.
+vouchers from other mints takes on those issuers, bounded by how many it holds
+at once.
 
 **Double-spend checking becomes local.** Today a provider must reach a
 third-party mint to confirm a token is unspent, and that network hop is
@@ -519,9 +400,7 @@ the two is real work on an ESP32.
 Two things reduce this, and together they mostly remove it. Accepting the
 upstream's mint (see Accepted Mints above) lets the relay take downstream
 payment in exactly the paper it needs to spend, so nothing has to be
-converted. And paid acceptance means a relay's own capacity is genuinely
-useful to its upstream, because return traffic flows through it, so its
-vouchers price positive.
+converted.
 
 What remains is the relay that accepts only its own mint and has no upstream
 overlap — an operator choice rather than a structural cost.
@@ -529,8 +408,7 @@ overlap — an operator choice rather than a structural cost.
 **A market needs liquidity that may not appear.** Each issuer is its own
 small, thin market, and cross-mint atomic swap has no working
 implementation. None of that blocks operation — vouchers can be bought
-directly from the issuer, and paid acceptance exchanges them inside the
-peering. It blocks the **reliability signal**, which is the original reason
+directly from the issuer. It blocks the **reliability signal**, which is the original reason
 for the design and the part least likely to arrive on its own. See
 [voucher-price-signal.md](../market/voucher-price-signal.md) and
 [voucher-acquisition.md](../market/voucher-acquisition.md).
@@ -610,51 +488,6 @@ its spent-proof set, which is the growth channels exist to avoid.
 
 ---
 
-## Why the Negative Price Is Safe Here
-
-A peer accepting another node's vouchers *is* being paid to take something
-it did not ask for — a negative price, in the ordinary sense. What makes it
-safe is that it sits on the **voucher** leg rather than the traffic leg.
-
-Whether B took the vouchers is a fact. B gains nothing by taking them and
-lying about it. Whether B did anything useful with traffic is not a fact
-anyone can establish, which is why the same arrangement is dangerous there
-(see Never Price Traffic Acceptance in
-[tollgate-hazards.md](tollgate-hazards.md)).
-
-**The hazard was never the negative sign. It is pricing acceptance of
-something whose acceptance can be faked.**
-
-Two further properties follow from paying in vouchers rather than money.
-
-**The instrument filters out sinks.** A pays B in B's vouchers, which exist
-only because B issued them, against capacity somebody believed it would
-deliver. A node whose service nobody wants has no vouchers in circulation
-and therefore **cannot be paid at all**. Fake identities and traffic
-discarders are excluded by what you pay with, before any policy has to
-notice them.
-
-**Subsidy and revenue use the same vouchers.** A node cannot increase its
-subsidy without making the vouchers its paying customers hold worth less.
-Issuing beyond capacity dilutes every outstanding claim, including the ones
-it sold for real money, so overissuing punishes the issuer directly rather
-than merely being detectable. A node receiving its own vouchers back is
-canceling a claim it previously sold, so a subsidy can never exceed what the
-issuer already earned by selling those vouchers.
-
-**There is no wallet to drain.** A money-denominated subsidy drains because
-the paying node funds an outgoing channel that rolls over automatically — an
-unattended loop limited only by wallet balance. Under paid acceptance there
-is no standing outgoing channel to refill. Every subsidy payment is a
-deliberate purchase of the peer's vouchers, in a fixed amount, at a quoted
-price. The worst case is a subsidy that does not work, not an empty wallet,
-and it holds without the operator configuring anything correctly.
-
-Two problems remain — selling vouchers without redeeming them, and too many
-redemptions arriving at once. Both are in Open Problems below.
-
----
-
 ## Rate Auction and Token Bucket
 
 The payment sets the allowance: what a peer pays during one interval
@@ -678,8 +511,7 @@ each other and produce sawtooth throughput. A bucket smooths the same
 allocation, allows bursts, and lets the 5 s default metering interval stand
 instead of forcing per-second payments and five times the signing load.
 
-This maps onto the existing `extensions.bandwidth_limit` field: the cap
-comes from payment history instead of from static configuration.
+The cap comes from payment history rather than from static configuration.
 
 ---
 
@@ -703,13 +535,13 @@ access:
 
 ### Abuse
 
-The allowance is a subsidy, so it can be farmed. Identities are free, so N
-of them collect N allowances. Two separate harms follow:
+The allowance is given away, so it can be farmed. Identities are free, so N of
+them collect N allowances. Two separate harms follow:
 
 - **Consumption.** N identities draw N allowances of real bandwidth, and one
   machine can run all N over the same physical link.
 - **Resale.** Granted vouchers are bearer instruments, so an attacker can
-  accumulate and sell them, turning a service subsidy into sats.
+  accumulate and sell them, turning free traffic into sats.
 
 Resale could be closed by issuing the allowance P2PK-locked to the receiving
 peer, so only that peer could spend it. The obstacle is that a lock only
@@ -745,8 +577,8 @@ here is protocol-side.
 
 | Problem | Notes |
 |---|---|
-| Quoting a price for a peer's vouchers | Every node has to price every peer's vouchers, continuously. That is new work for the operator, and a node accepting vouchers at close to full value quietly builds up paper it can never redeem. Refusing foreign vouchers by default avoids the question rather than answering it. |
-| Relays holding two kinds of vouchers | Multi-hop relays sit between two issuers and must keep rebalancing. Burdensome on constrained devices. |
+| Choosing a received multiplier | Every node has to decide, per peer, how much to surcharge what that peer pushes at it. New operator work with no obvious default beyond `0`. |
+| Relays holding two kinds of vouchers | A relay that does not accept its upstream's mint sits between two issuers and must keep rebalancing. Accepting it removes the problem; not every relay can. |
 | Minimum-flow abuse | N free identities draw N allowances of real bandwidth, and one machine can run all N over the same link. Needs an aggregate cap across unpaid peers plus a cost to holding an identity. |
 | Locking the allowance | Issuing it P2PK-locked would close the resale route, but a lock only holds if it survives every swap including change, which standard Cashu mints do not do. Needs modified mint software or a scheme not yet designed. |
 | Allowance accumulation | Whether an unspent allowance carries into the next interval. Accumulating helps a peer that needs a burst, and equally helps an attacker gather a large grant before spending it. |
@@ -765,16 +597,14 @@ here is protocol-side.
 | Unit | Fixed by the resource, one per resource, and always a quantity — watt-hours, not watts | Every node selling the same resource denominates the same way, which is what makes one issuer's vouchers comparable to another's |
 | Network unit | The byte | Metering is exact and no payment rounds. The cost is proof count: a 23-bit interval amount takes ~11–12 proofs, which the spent-proof set has to absorb |
 | Buying a rate | `voucher_amount = desired_rate × interval` | The interval is fixed for the peering before payment starts, so a desired rate converts to an amount by multiplication. Paying more in one interval buys a higher rate for the next |
-| Normal operation | Pay in the vouchers of whoever is delivering; each direction priced and paid on its own | Covers the large majority of peerings with one payment and no exchange. A leaf simply has no second payment, rather than a zero or negative one |
+| Who pays | Each side pays for what it received, in the vouchers of whoever delivered it | Symmetric and unchanged. Both owe by default, so both fund a channel |
 | Acquiring vouchers | Not a protocol concern — see the market documents | The direct route from the issuer is enough to operate, and checking a voucher takes one hop |
 | Bootstrap tokens | Removed | Provider-as-mint dissolves the mint-reachability problem the mechanism existed for. The state machine, messages, verification path and config block all come out |
-| Paid acceptance | Pay a peer to hold your vouchers when it has no use for them | Covers a leaf paying for its own upload. The negative price sits entirely in the voucher price, so the payment protocol runs both directions at positive prices |
-| Accepted mints | A set per node, own mint implicitly at par, empty by default | One unit of account network-wide makes any mint's vouchers usable. A relay accepting its upstream's mint can spend what it receives without converting |
-| Voucher price | One per accepted mint, crossing zero — above par, par, haircut, zero, negative (paid acceptance), absent | Normal operation and paid acceptance are the same price at different points, so leaf nodes need no separate rule. The price is also where issuer risk is expressed |
+| Received multiplier | An unsigned surcharge per peer on what that peer pushes at us, default `0` | Net rate is `m − 1`, so `1` makes a peer's upload free, `2` charges it like a download, `k + 1` charges it `k` times. Unsigned, so a node can never pay a bonus on top of what it already owes for delivery |
+| Accepted mints | One preferred mint plus an optional accepted set; no prices | One unit of account network-wide makes any mint's vouchers usable. A relay accepting its upstream's mint can spend what it receives without converting |
+| Accepted-mint haircuts | None — accept or refuse | What an issuer's paper is worth belongs on the market, not in a settlement discount |
 | Foreign voucher cost | Gives up free settlement, local double-spend checks, and payment-liveness-equals-service-liveness | Those three properties hold only for own vouchers, so the accepted set should lean toward neighbors and upstreams |
 | Market operations | Separate endpoints and protocol; never TollGate messages | Buying and swapping is not paying for delivery. A node offering neither is fully functional — see [market-protocol.md](../market/market-protocol.md) |
-| Subsidy funding | Buying the peer's vouchers deliberately, in a fixed amount | No standing outgoing channel to refill, so an unattended drain cannot start |
-| Voucher acceptance vs traffic acceptance | Priced separately, never merged | Whether vouchers were accepted can be checked; whether traffic was accepted cannot, and merging them brings back the discard abuse |
 | Minimum flow allowance | Ordinary unlocked vouchers; keep it small | Locking it would need a mint that preserves locks through swaps and change, which standard Cashu does not do. Small size bounds the resale value economically instead |
 | Spilman channels | Kept, to bound the issuer's database rather than to prevent theft | The spent-proof set is ~700× larger without channels |
 | Cryptographic effort | Concentrate on the exchange step | The only step with a real adversary once the issuer redeems its own vouchers |
