@@ -219,7 +219,7 @@ The wire-level transport spec — framing, failure detection, reconnection — i
 - Suitable for constrained clients and open-access hotspot scenarios.
 - Works through NATs, proxies, and firewalls — any HTTP client can participate.
 - Stateless on the server: no need to maintain open connections per peer.
-- Polling cadence equals the metering interval (default 5s); clients may poll more aggressively during initial channel setup.
+- Polling cadence is the client's choice, bounded by the grant window it buys; clients may poll more aggressively during initial channel setup.
 
 ### WebSocket (`GET /tollgate/v1/ws`)
 

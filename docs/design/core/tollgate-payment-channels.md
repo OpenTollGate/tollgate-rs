@@ -28,37 +28,31 @@ Each pair of TollGate peers maintains **two unidirectional Spilman channels** �
 ```
 </details>
 
-Spilman channels enable **streaming micropayments**: the sender locks ecash in a 2-of-2 multisig with a time-locked refund path, then signs incremental balance updates as resource is metered. The receiver holds the latest signed update and can settle with the mint at any time.
+Spilman channels enable **streaming micropayments**: the sender locks ecash in a 2-of-2 multisig with a time-locked refund path, then signs successively larger balance updates. The receiver holds the latest signed update and can settle with the mint at any time.
 
-At each metering interval, both sides exchange metering reports and then sign balance updates. Whether that is one signature or two depends on whether both directions settle in the same mint — see [Netting](#netting).
+A Spilman channel is already a prepaid instrument — funding it is money committed before anything is delivered, and each update ratchets the receiver's claim upward. Grants use it as exactly that: **one TopUp is one signed update and one purchase**, and the state it carries is the cumulative total the payer has authorized on that channel ([tollgate-protocol.md](tollgate-protocol.md)).
 
-### Interval Netting
+### Grants On A Channel
 
-![Interval Netting](diagrams/interval-netting.svg)
 <details><summary>Text version</summary>
 
 ```
-  Phase 1 — Metering (cumulative since session start)
-    A → B: MeteringReport (cumulative delivered 500, received 200)
-    B → A: MeteringReport (cumulative delivered 200, received 500)
-    Both compute interval deltas from previous cumulative values.
+  Channel A→B, funded by A, capacity 500 M units.
 
-  Phase 2 — Compute (both sides, deterministic)
-    A owes B: B.delivered + B.received × B's multiplier
-    B owes A: A.delivered + A.received × A's multiplier
+  t=0    A → B: TopUp (cumulative 6.25M, window 5000 ms)
+                B verifies, shapes A to 1.25 M/s until t=5
+                B's claim on the channel: 6.25M
 
-  Phase 3 — Settle, different mints (the usual case)
-    A → B: BalanceUpdate (channel A→B, +200 B-vouchers, signed)
-    B → A: BalanceUpdate (channel B→A, +500 A-vouchers, signed)
-    each acks the other
-    Result: both channels drain. Nothing to net — the two amounts
-            are claims on different issuers.
+  t=3    A → B: TopUp (cumulative 106.25M, window 5000 ms)
+                grant 100M, so 20 M/s until t=8
+                B's claim on the channel: 106.25M
+                A forfeits whatever was left of the first grant
 
-  Phase 3' — Settle, shared mint M
-    net: B owes A 300 M
-    B → A: BalanceUpdate (channel B→A, +300 M, signed)
-    A → B: BalanceAck
-    Result: only B→A drains, at the difference rate.
+  No acknowledgment. Cumulative state is self-correcting, so a lost
+  or reordered TopUp costs nothing and A never waits for a reply.
+
+  Channel B→A runs the same way, funded by B, on B's own schedule.
+  The two never meet.
 ```
 </details>
 
@@ -100,10 +94,10 @@ The funding process follows the Cashu Spilman protocol:
 
 ### Active
 
-Both channels are funded and verified. Metering and balance updates proceed:
-- Every metering interval, both sides send MeteringReport
-- Different mints: each side sends a BalanceUpdate on its own channel
-- Shared mint: the net debtor sends one BalanceUpdate, the creditor acks
+Both channels are funded and verified. Each side buys grants on its own channel:
+- A payer sends TopUp whenever it wants capacity, at least once per window if it wants continuous service
+- The provider verifies, ratchets its claim, and shapes to `grant / window`
+- Nothing is acknowledged and the two directions never synchronize
 
 ### RollingOver
 
@@ -130,7 +124,7 @@ Both the old (draining) and new channel are active simultaneously during the ove
   │                    │                      │
   │                    ├──── overlap period ───┤
   │                                           │
-  │                    e.g. 2 vouchers remain + 5 voucher interval cost
+  │                    e.g. 2 vouchers remain + a 5 voucher grant
   │                        = 2 to old, 3 to new
   ├──────────────────── time ─────────────────────────────→
 ```
@@ -156,37 +150,44 @@ This is a decision about a relationship, not a price — there is no delivery pr
 
 ---
 
-## What the Metering Interval Is For
+## What the Grant Window Is For
 
-The interval is **not** a price renegotiation point. Delivery costs one voucher
-per unit and the peer already holds the vouchers, so their claim is fixed
-([tollgate-vouchers.md](tollgate-vouchers.md)). Only the received multiplier
-can change, and that piggybacks on the report.
+The window is **not** a settlement clock and not a renegotiation point. It is
+the denominator of a rate: a grant of `n` units over a window of `w` buys
+`n / w` ([tollgate-vouchers.md](tollgate-vouchers.md)).
 
-It exists for four other reasons:
+It is chosen by the payer, per grant, inside the range the provider advertised.
+Nothing is agreed between the two sides, and no boundary is shared — each side
+buys on its own schedule for its own windows.
 
-- **Batching.** One signature per interval instead of one per unit. This is
-  the whole point of a Spilman channel.
-- **Bounding the provider's exposure.** A peer that vanishes mid-interval
-  leaves at most one interval of delivered-but-unpaid resource. Shorter
-  interval, smaller loss.
-- **Reconciliation.** Both sides exchange counters and compare, which is how
-  transit loss is detected at all ([tollgate-metering.md](tollgate-metering.md)).
-- **Rate control.** What a peer pays in one interval sets its allowance for
-  the next, which is the rate auction
-  ([tollgate-vouchers.md](tollgate-vouchers.md)).
+Three things follow from where the payer sets it:
 
-The two exposures are bounded by different knobs, and it is worth keeping them
-apart:
+- **Batching.** One signature per grant rather than one per unit, which is the
+  whole point of a Spilman channel. A longer window means fewer signatures.
+- **Forfeiture risk.** Raising the rate before a window ends discards the
+  remainder, so the most a misjudgment can cost is one window's worth.
+- **Reaction granularity.** A short window makes a rate change cheap, so a
+  payer that expects bursty demand pays for that with message volume.
+
+The provider bounds it from both ends, for reasons of its own:
+
+| Bound | What it protects |
+|---|---|
+| `max_window_ms` | Stops capacity being bought off-peak and presented at peak |
+| `min_window_ms` | Caps signature verifications per second — the binding constraint on a constrained device, not bandwidth |
+
+**The provider carries no delivery exposure at all.** Payment lands before the
+traffic it covers, so a peer that vanishes leaves nothing unpaid. What remains
+is the payer's exposure, and it has two distinct bounds:
 
 | Risk | Bounded by |
 |---|---|
-| Provider delivers and is not paid | The metering interval |
-| Peer funds a channel and the issuer refuses to honor the refund | Channel capacity |
+| Payer buys a grant and the provider does not deliver | The grant — which is one window's worth |
+| Payer funds a channel and the issuer refuses to honor the refund | Channel capacity |
 
 The second is the trust cost of the issuer being the mint
-([issuer-risk.md](../market/issuer-risk.md)). Shortening the interval does not
-help it; funding smaller channels does.
+([issuer-risk.md](../market/issuer-risk.md)). Shorter windows do not help it;
+funding smaller channels does.
 
 ---
 
@@ -223,12 +224,12 @@ During rollover, **two channels exist simultaneously** for the same direction:
 - Old channel: draining to 100%
 - New channel: funded and ready, accepting charges once old is exhausted
 
-The balance update at each metering interval uses whichever channel has remaining capacity. When the old channel has less remaining capacity than the interval cost, the remainder carries over to the new channel.
+A grant uses whichever channel has remaining capacity. When the old channel holds less than the grant, the remainder is signed onto the new one, and the provider adds the two into a single allowance.
 
 **Example:**
 - Old channel: 998 of 1000 vouchers spent (2 remaining)
-- Interval cost: 5 vouchers
-- Result: 2 charged to old channel (now exhausted), 3 charged to new channel
+- Grant: 5 vouchers
+- Result: 2 signed onto the old channel (now exhausted), 3 onto the new
 
 ### Rollover While Offline
 
@@ -246,9 +247,8 @@ If mint connectivity is lost during rollover:
 
 | Operation | Needs mint? | Notes |
 |-----------|-------------|-------|
-| Balance updates (signing) | No | Signed between peers, no mint involvement |
-| Metering reports | No | Local computation |
-| Balance updates (interval) | No | Just signatures between peers |
+| Grants (signing and verifying) | No | Signed between peers, no mint involvement |
+| Metering | No | Local computation, never exchanged |
 | Channel funding (open) | **Yes** | Must create 2-of-2 multisig token |
 | Channel settlement (close) | **Yes** | Receiver must submit swap to mint |
 | Channel rollover (new) | **Yes** | New channel needs funding |
@@ -257,8 +257,8 @@ If mint connectivity is lost during rollover:
 ### Offline Scenarios
 
 **Mint goes down during active session:**
-- Balance updates continue normally (no mint needed)
-- Metering interval signatures work fine
+- Grants continue normally (no mint needed)
+- TopUp signing and verification work fine
 - If a channel exhausts, rollover is blocked until mint returns
 - If channel approaches expiry, urgency increases
 
@@ -274,13 +274,13 @@ If mint connectivity is lost during rollover:
 
 ## Reboot / State Loss
 
-Nodes are not expected to persist runtime state between restarts. On reboot, a node loses metering counters, channel tracking, and any signed BalanceUpdates it was holding. The identity key survives (it's in the config file), so the rebooted node has the same pubkey and can be recognized by peers.
+Nodes are not expected to persist runtime state between restarts. On reboot, a node loses metering counters, grant state, channel tracking, and any signed TopUps it was holding. The identity key survives (it's in the config file), so the rebooted node has the same pubkey and can be recognized by peers.
 
 The remaining peer (still online) is the only party that holds the latest channel state. Two scenarios apply:
 
 ### Friendly recovery
 
-The online peer recognizes the reconnecting pubkey and shares back the channel state for both directions: channel IDs, cumulative balances, and signatures. The rebooted peer validates every signature before trusting any of it. If validation succeeds, both channels resume — the rebooted peer knows how much of its outgoing channel is spent, and holds the latest signed BalanceUpdate for its incoming channel.
+The online peer recognizes the reconnecting pubkey and shares back the channel state for both directions: channel IDs, cumulative balances, and signatures. The rebooted peer validates every signature before trusting any of it. If validation succeeds, both channels resume — the rebooted peer knows how much of its outgoing channel is spent, and holds the latest signed TopUp for its incoming channel. Grants themselves do not survive: the rebooted peer starts with no allowance for anyone, and each payer buys again.
 
 This requires a protocol message (proposed `ChannelSync`) that the online peer sends after Announce when it detects a reconnecting pubkey with live channels. Not yet specified in [tollgate-protocol.md](tollgate-protocol.md) — **future work**.
 
@@ -288,7 +288,7 @@ This requires a protocol message (proposed `ChannelSync`) that the online peer s
 
 The online peer stays silent about the old channels. The rebooted peer falls back to a fresh session with new channels.
 
-- **Outgoing channel** (rebooted peer was sender): the online peer holds the rebooted peer's last signed BalanceUpdate and can settle with the mint. The rebooted peer reclaims any remainder via Spilman's refund timelock after expiry. No loss beyond what was legitimately owed.
+- **Outgoing channel** (rebooted peer was sender): the online peer holds the rebooted peer's last signed TopUp and can settle with the mint. The rebooted peer reclaims any remainder via Spilman's refund timelock after expiry. No loss beyond what was legitimately owed.
 - **Incoming channel** (rebooted peer was receiver): the rebooted peer lost the only proof of earnings. The online peer waits for expiry and reclaims the full channel via the refund path. **The rebooted peer loses all earned income on that channel.**
 
 Exposure is bounded by channel capacity (the "start small, grow with relationship" model limits new-peer exposure), time since last mint settlement, and the channel TTL (1 hour default). Worst case: one channel's worth of earned income.
@@ -310,7 +310,7 @@ Default TTL: **1 hour**. Configurable.
 The sender initiates a **rollover** when a channel enters the safety margin before expiry — creating a new channel and allowing the old one to be settled before the refund timelock activates.
 
 ```
-safety_margin = max(60 seconds, 2 × metering_interval)
+safety_margin = max(60 seconds, 2 × max_window_ms)
 ```
 
 Within the safety margin:
@@ -333,72 +333,27 @@ Danger zone:      expiry - safety_margin (e.g., expiry - 60 seconds)
 
 ---
 
-## Netting
+## Why There Is Nothing To Net
 
-Each metering interval, both sides owe each other independently:
+Under metered settlement both sides owed each other at the same moment, so the
+two amounts could sometimes be subtracted. Prepaid grants remove the moment.
 
-```
-A owes B: B.delivered + B.received × B's received_multiplier
-B owes A: A.delivered + A.received × A's received_multiplier
+Each side buys its own grants, in its own mint, for windows it chose, at times
+it chose. A's purchase at `t=3` for the next 5 seconds and B's purchase at
+`t=1.4` for the next 800 milliseconds are not two halves of one settlement —
+they are unrelated transactions that happen to be between the same two nodes.
+There is no difference to take.
 
-Multipliers default to 0, so by default each simply pays for what it received.
-```
+That removes a rule rather than a feature. Netting saved one signature per
+interval, and grants need one signature per grant whether or not anything is
+netted, so nothing is lost. It also removes the awkward case it created: the
+two directions could only net when both settled in the *same* mint, since
+vouchers from different issuers are not commensurable, and that condition had
+to be checked and communicated. Both sides now simply fund and buy
+independently.
 
-**Whether these can be netted depends on whether they are denominated in the
-same mint.** They usually are not.
-
-A pays B in a mint B accepts; B pays A in a mint A accepts
-([tollgate-vouchers.md](tollgate-vouchers.md)). Those are claims on different
-issuers. 500 A-vouchers and 200 B-vouchers are not commensurable — one claims
-A's capacity, the other claims B's — so there is no difference to take, and
-subtracting them would silently assume the two issuers are worth the same.
-
-### Two Cases
-
-**Different mints — no netting.** Both channels drain at their full rate and
-both sides sign a BalanceUpdate each interval.
-
-```
-  A → B: BalanceUpdate on A→B channel   (200 B-vouchers)
-  B → A: BalanceUpdate on B→A channel   (500 A-vouchers)
-  each acks the other
-```
-
-**A mint both sides are paid in — netting applies.** If both sides settle in
-the same mint `M`, the amounts are commensurable and only the difference moves.
-
-```
-  A owes B 200 M,  B owes A 500 M   →   net: B owes A 300 M
-  B → A: BalanceUpdate on B→A channel (+300 M, signed)
-  A → B: BalanceAck
-```
-
-Both peers know both preferences from the Offer exchange, so which case applies
-is decided deterministically with no extra round-trip.
-
-### What Netting Is Worth
-
-| | Different mints | Shared mint |
-|---|---|---|
-| Signatures per interval | 2 | 1 |
-| Channels draining | Both, at full rate | One, at the difference rate |
-| Rollover frequency | Higher | Lower |
-| Spent-proof records | More — each rollover adds a set | Fewer |
-
-For peers with similar flow in both directions the shared-mint case
-dramatically extends channel life. Losing it costs signatures, rollovers,
-and — because each rollover writes a spent-proof set — some of the state
-compression channels exist to provide.
-
-**This is an incentive toward a common mint**, on top of the liquidity one in
-[voucher-price-signal.md](../market/voucher-price-signal.md). Two relays that
-both take payment in a shared hub mint get cheaper settlement than two that
-insist on their own. Nothing enforces convergence; it is simply cheaper.
-
-Both channels exist by default, so every peering has something to net or not
-net. Relays are the ones most likely to share a mint, since taking payment in
-an upstream's mint is the common case — which is also where netting is worth
-the most, because flow in both directions is comparable.
+**Channel life is unaffected.** Each channel drains at the rate its own funder
+buys, which is what it did in the different-mint case — the common one — before.
 
 ---
 
@@ -523,15 +478,19 @@ If settlement fails (mint swap rejected):
 
 ### Balance Verification Failure
 
-If a received BalanceUpdate fails signature verification:
-- Send Reject (reason: balance verification failed)
+If a received TopUp fails signature verification, or its cumulative total does not exceed the current one:
+- Send Reject (reason: grant signature invalid, or cumulative not increasing)
 - Do NOT close the channel — this could be a transient error
 - Log the failure for operator review
 - If repeated failures: close the channel
 
-### Transit Loss Tolerance Exceeded
+### Grant Rejected
 
-When metering reports diverge beyond the agreed tolerance, the channel layer's role is to act on the warning: if persistent (3+ consecutive intervals over tolerance) the channel is closed and renegotiated. The resolution rule itself (higher of the two counts, tolerances, billing per interval) is documented in [tollgate-metering.md](tollgate-metering.md).
+If a TopUp cannot be honored — the rate would oversubscribe committed capacity, the window falls outside the advertised range, or the grant exceeds what is left in the channel — the provider sends TopUpReject and does **not** ratchet its claim. The payer's money is untouched, because an unclaimed Spilman state is worth nothing. The payer re-purchases at the rate the reject offered, or stops.
+
+### Under-Delivery
+
+A payer that receives less than it bought has no protocol recourse: the grant was consumed and the provider holds the claim. This is deliberate — see [tollgate-metering.md](tollgate-metering.md). The channel layer's only role is to make the exit cheap: close the channel, settle at the current state, and take the remaining funding elsewhere.
 
 ---
 
@@ -544,11 +503,12 @@ When metering reports diverge beyond the agreed tolerance, the channel layer's r
 | Rollover threshold | 80% capacity (configurable, default 20% overlap) | New channel ready before old exhausts |
 | Rollover drain | Old channel drains to 100%, then new channel continues | No wasted capacity |
 | Stale session timeout | 60 seconds (configurable) | Close if rollover can't complete |
-| Netting | Only where both directions settle in the same mint | Vouchers from different issuers are not commensurable, so there is no difference to take. Shared-mint peers get one signature and difference-rate drain; others get two signatures and full-rate drain |
-| Metering interval | Kept, for batching, exposure bounding, reconciliation and rate control | It is no longer a price renegotiation point — there is no delivery price to renegotiate |
-| Transit loss resolution | Use the higher of the two counts | Favors the party that did the work. No sign to handle — every billable amount is a count and the multiplier is unsigned |
+| Netting | Removed | Prepaid grants are bought at unrelated moments, in different mints, for different windows. There is no shared settlement moment for the two directions to meet in |
+| Grant window | Payer chooses per grant, inside a provider-advertised range | It is the denominator of a rate, not a settlement clock. Nothing is negotiated and no boundary is shared |
+| Provider delivery exposure | None | Payment lands before the traffic it covers, so a peer that vanishes leaves nothing unpaid |
+| Under-delivery | No recourse in the channel layer | The grant is consumed whether or not packets arrive. The remedy is to stop buying, and the channel layer's job is only to make leaving cheap |
 | Channel capacity | Start small, grow with relationship | Don't over-commit to new peers |
 | Channel TTL | 1 hour default, configurable | Balance between overhead and capital lockup |
-| Safety margin | max(60s, 2×interval) before expiry — triggers rollover | Create new channel, settle old before expiry |
+| Safety margin | max(60s, 2×max_window_ms) before expiry — triggers rollover | Create new channel, settle old before expiry |
 | Settlement | Only receiver submits to mint | Receiver holds the signed proof |
-| Offline operation | Balance updates continue; funding/settlement queued | Mint only needed for channel lifecycle transitions |
+| Offline operation | Grants continue; funding/settlement queued | Mint only needed for channel lifecycle transitions |

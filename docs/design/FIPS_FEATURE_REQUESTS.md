@@ -42,7 +42,7 @@ This document consolidates all FIPS modifications required for tollgate-rs integ
 
 **Current state**: FIPS **already tracks per-peer link stats** via `LinkStats` on each peer (`peer.link_stats().bytes_sent`, `peer.link_stats().bytes_recv`). These count all link-layer bytes sent/received per peer, which is exactly what TollGate needs (all bytes are metered, including protocol overhead — negligible).
 
-**What's needed**: Add a control-socket subscription that pushes per-peer counter updates as they change (or at a reasonable rate, e.g., once per second). A consumer subscribes once per peer and receives a stream of `{node_addr, bytes_sent_total, bytes_recv_total}` updates. `tollgate-net` snapshots the latest received value at every metering interval — no polling needed.
+**What's needed**: Add a control-socket subscription that pushes per-peer counter updates as they change (or at a reasonable rate, e.g., once per second). A consumer subscribes once per peer and receives a stream of `{node_addr, bytes_sent_total, bytes_recv_total}` updates. `tollgate-net` draws each peer's grant down against the latest received value — no polling needed.
 
 **Complexity**: Low — the data already exists internally, just needs to be exposed as a streaming subscription on the socket.
 
@@ -78,9 +78,9 @@ This document consolidates all FIPS modifications required for tollgate-rs integ
 - `jitter` (latency variance)
 - Trend indicators (rising/falling/stable) for RTT, loss, goodput
 
-**Current state**: These metrics exist in FIPS and are queryable on-demand via the existing `show_mmp` control-socket command. For TollGate, an on-demand query at every metering interval would work but is wasteful when the values change continuously.
+**Current state**: These metrics exist in FIPS and are queryable on-demand via the existing `show_mmp` control-socket command. For TollGate, polling would work but is wasteful when the values change continuously.
 
-**What's needed**: A subscription mode on the existing socket — consumer subscribes once and receives pushed updates as MMP state changes (or at a coalesced rate). `tollgate-net` keeps the latest value cached and reads it when the pricing engine asks. The `show_mmp` query mode can stay alongside for tooling.
+**What's needed**: A subscription mode on the existing socket — consumer subscribes once and receives pushed updates as MMP state changes (or at a coalesced rate). `tollgate-net` keeps the latest value cached and reads it when the operator asks. The `show_mmp` query mode can stay alongside for tooling.
 
 **Referenced in**: [peering-fips.md](network-peering/peering-fips.md), [tollgate-metering.md](core/tollgate-metering.md)
 

@@ -13,7 +13,7 @@ FIPS provides everything TollGate needs from a network layer:
 
 `tollgate-net` and the FIPS daemon are independent binaries communicating over FIPS's control socket. FIPS exposes generic per-peer capabilities (forwarding policy, lifecycle events, livestreamed rx/tx counters, MMP metrics); `tollgate-net` consumes them.
 
-Per-peer counters are pushed as a livestream subscription, so `tollgate-net` always has fresh values at metering-interval snapshot time. At a 5-second metering interval, socket overhead is negligible.
+Per-peer counters are pushed as a livestream subscription, so `tollgate-net` always has a fresh value to draw each peer's grant down against. Socket overhead is negligible.
 
 ---
 
@@ -149,7 +149,7 @@ fn subscribe_meter(&self, peer: &Pubkey) -> Result<MeterStream, AdapterError> {
     let node_addr = NodeAddr::from_pubkey(peer);
 
     // Subscribe to FIPS's per-peer counter livestream over the control socket.
-    // Each push updates the watch channel; tollgate-core snapshots at metering interval.
+    // Each push updates the watch channel; tollgate-core draws the peer's grant down against it.
     let (delivered_tx, delivered) = watch::channel(0);
     let (received_tx, received) = watch::channel(0);
     self.subscribe_peer_counters(node_addr, delivered_tx, received_tx);
@@ -206,7 +206,7 @@ What the metrics remain good for:
 
 - **Operator visibility.** Which links are healthy, which are degrading.
 - **Capacity decisions.** How much to issue vouchers against, and how fast
-  to let a peer draw them via the rate auction
+  to let a peer draw them against a grant
   ([tollgate-vouchers.md](../core/tollgate-vouchers.md)).
 - **Deciding what to sell vouchers for.** An operator watching its own links
   degrade may choose to issue less or price higher on the market. That is a
@@ -243,7 +243,7 @@ The following FIPS modifications are required for TollGate integration. Full det
 | Peer discovery | Automatic (FIPS mesh protocol) | Dynamic probing / static |
 | Authentication | Noise IK (automatic) | Unauthenticated (default) |
 | Message transport | Raw TCP over IPv6 adapter (initially), FSP port (future) | Raw TCP, or HTTP/WS if a network requires it |
-| Control plane overhead | Negligible at 5s metering interval; livestreamed counters | Per-peer firewall rule installs/removes |
+| Control plane overhead | Negligible; livestreamed counters | Per-peer firewall rule installs/removes |
 
 ---
 
@@ -256,7 +256,7 @@ The following FIPS modifications are required for TollGate integration. Full det
 | Forwarding policy | Per-peer `local_only` or `full`, enforced by FIPS | Simple data-plane policy, not a control-plane hook |
 | Default new-peer policy | `local_only` | Closes race window between FIPS auth and TollGate detection |
 | Bloom filter control | Inferred from forwarding policy, with 30s removal delay | Prevents flapping on temporary balance exhaustion |
-| Metering counters | Per-peer watch channels from FIPS | Continuous push, snapshot at metering interval |
+| Metering counters | Per-peer watch channels from FIPS | Continuous push, drawn against the peer's grant |
 | Metrics | Streaming subscription on the control socket | Pricing engine reads cached values; no per-call IPC |
 | Message transport (initial) | Raw TCP over the FIPS IPv6 adapter | Works today with no FIPS session-layer changes, and needs no TLS — Noise IK already encrypts the link |
 | Message transport (future) | Native FSP port | Optimization; removes the TCP handshake per session |

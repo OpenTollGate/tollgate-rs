@@ -4,7 +4,7 @@ This document specifies the wire protocol for communication between TollGate pee
 
 ## Overview
 
-The TollGate protocol is a set of messages exchanged between authenticated peers to negotiate pricing, establish payment channels, meter resource delivery, and settle balances. It is **transport-agnostic** — messages can travel over any bidirectional channel between peers (FIPS session, TCP socket, HTTP, custom transport). The implementation provides the transport; the protocol defines the messages.
+The TollGate protocol is a set of messages exchanged between authenticated peers to agree what is accepted, establish payment channels, and buy capacity in advance. It is **transport-agnostic** — messages can travel over any bidirectional channel between peers (FIPS session, TCP socket, HTTP, custom transport). The implementation provides the transport; the protocol defines the messages.
 
 **No handshake.** Peers are already authenticated out-of-band (by FIPS Noise IK, WireGuard, etc.). The TollGate protocol begins with an Announce message.
 
@@ -25,7 +25,7 @@ All messages use **CBOR** ([RFC 8949](https://www.rfc-editor.org/rfc/rfc8949)) e
 
 **Why not FIPS-style binary?**
 - TollGate messages contain variable-length strings (mint URLs, units). Binary encoding for these is complex and fragile.
-- FIPS binary encoding is optimized for fixed-structure, high-frequency, low-latency packets (TreeAnnounce, MMP reports). TollGate messages are infrequent (every 5s) and don't need that level of optimization.
+- FIPS binary encoding is optimized for fixed-structure, high-frequency, low-latency packets (TreeAnnounce, MMP reports). TollGate messages are infrequent — a handful at setup, then one per grant — and don't need that level of optimization.
 
 ### Message Structure
 
@@ -120,12 +120,12 @@ it. No TollGate message comes close to the cap.
 **Identity:** each side sends Announce as its first message. Per-peer state is
 keyed by the pubkey it carries.
 
-**Failure detection:** no separate keepalive. MeteringReport is already sent
-every metering interval, so it *is* the heartbeat — a peer that sends nothing
-for `3 × metering_interval` is considered gone. Before channels are up there is
-no such traffic, so during setup a peer that sends nothing for
-`stale_timeout_seconds` (default 60) is dropped instead. Both knobs already
-exist in [tollgate-configuration.md](tollgate-configuration.md).
+**Failure detection:** no keepalive, because nothing needs to detect a peer
+that stops paying — its grant expires, it drops to the minimum flow allowance,
+and the link is left in a state that costs nothing to hold open. A peer that
+sends nothing at all for `stale_timeout_seconds` (default 60) is dropped, which
+covers both setup and a peer content to sit on the free allowance. The knob
+already exists in [tollgate-configuration.md](tollgate-configuration.md).
 
 **Orderly teardown:** send Disconnect, then close. A bare FIN is treated as an
 unclean disconnect and triggers the same cleanup as a timeout — see
@@ -146,8 +146,8 @@ The shape, if it is added: `POST /tollgate/v1/exchange`, `application/cbor`,
 request and response bodies each carrying zero or more messages with the same
 2-byte length framing. Every POST is a full exchange: the request carries
 client-to-server messages, the response carries whatever the server has
-queued. Client polls at the metering interval; the server marks a peer gone
-after `3 × metering_interval` with no poll.
+queued. Client polls when it has something to send or is waiting on a
+TopUpReject; the server marks a peer gone after `stale_timeout_seconds`.
 
 Being stateless on the wire, it also suits a client that cannot hold a
 connection open.
@@ -157,7 +157,7 @@ connection open.
 For clients that must look like a browser, or reach through something that
 only passes HTTP. `GET /tollgate/v1/ws` with an HTTP Upgrade, one CBOR message
 per binary frame — the frame boundary replaces the length prefix. Liveness via
-ping/pong rather than the MeteringReport heartbeat.
+ping/pong rather than the transport's own idle timeout.
 
 This is the only option that a browser can originate, since JavaScript cannot
 open a raw socket. Whether that matters depends on whether a browser is ever a
@@ -171,12 +171,12 @@ TollGate peer; human-facing UI is currently a non-goal
 | Type | Name | Direction | Purpose |
 |------|------|-----------|---------|
 | 0x00 | Announce | Bidirectional | "I am a TollGate node" — protocol version, pubkey |
-| 0x01 | Offer | Bidirectional | Preferred mint, accepted mints, unit, interval range, received multiplier |
+| 0x01 | Offer | Bidirectional | Accepted mints, unit, window range, received multiplier |
 | 0x02 | Accept | Bidirectional | Accept the offer, provide Spilman funding |
 | 0x03 | ChannelReady | Bidirectional | Confirm Spilman channel funded and active |
-| 0x04 | MeteringReport | Bidirectional | Unsigned resource stats for this interval |
-| 0x05 | BalanceUpdate | Net debtor → creditor | Signed Spilman update for the net amount owed |
-| 0x06 | BalanceAck | Net creditor → debtor | Confirm balance update accepted |
+| 0x04 | TopUp | Payer → provider | Signed Spilman update buying a rate for a bounded window |
+| 0x05 | TopUpReject | Provider → payer | Refuse a grant, with the rate that would be accepted |
+| 0x06 | *reserved* | — | Was BalanceAck; there is nothing to acknowledge |
 | 0x07 | *reserved* | — | Was BootstrapToken; bootstrap is removed |
 | 0x08 | *reserved* | — | Was BootstrapAck; bootstrap is removed |
 | 0x09 | RolloverInit | Sender → Receiver | New channel alongside exhausting one |
@@ -225,7 +225,7 @@ payment in, and how welcome the peer's outgoing traffic is.
   1: [<mint_url>, ...],            // text array — mints accepted, most preferred
                                    //   first; at least one entry
   2: <unit>,                       // text — "byte", "wh", "ml"
-  3: [<min_interval_ms>, <max_interval_ms>],  // [u32, u32] — metering interval range
+  3: [<min_window_ms>, <max_window_ms>],  // [u32, u32] — grant window bounds
   4: <received_multiplier>,        // u16 — surcharge on units I receive from you,
                                    //   on top of you paying for what I deliver.
                                    //   Default 0 = no surcharge
@@ -248,15 +248,28 @@ funds its channel in one of the mints this node listed, and this node pays the
 peer in one of the mints the *peer* listed. A pure pass-through relay can
 therefore name its upstream's mint alone and never issue vouchers of its own.
 
+**Field 3 bounds what the payer may ask for.** Every payment is a grant of
+units to be spent inside a window the payer chooses, and the rate it buys is
+the one divided by the other ([tollgate-vouchers.md](tollgate-vouchers.md)).
+The payer picks any window in this range, per grant, without negotiating.
+
+- `max_window_ms` caps how far ahead capacity can be bought, which is what
+  stops a buyer accumulating off-peak claims to spend at peak.
+- `min_window_ms` caps how often a grant can arrive, and therefore how many
+  signature verifications per second a payer can impose. On a constrained
+  provider that is the binding limit, not bandwidth.
+
 The base rule is symmetric and needs no field: **each side pays for what it
-received**, which is what the other delivered. Both owe, both fund a channel.
+received**, which is what the other delivered. Both owe, both fund a channel,
+and each buys its own grants.
 
 `received_multiplier` is a surcharge on top of that, for the case where a node
-would rather not carry what a peer pushes at it. It defaults to `0`. Because
-the peer is still paid for delivering, the **net** rate on its upload is
-`m − 1`: `1` makes the upload free, `2` charges it at the same rate as a
-download, `k + 1` charges it at `k` times
-([tollgate-vouchers.md](tollgate-vouchers.md)).
+would rather not carry what a peer pushes at it. It defaults to `0`. It is
+applied as a **consumption weight**: a unit the peer uploads draws `m` units
+from that peer's grant, where a unit it downloads draws one. Because the peer
+is still paid for delivering, the **net** rate on its upload is `m − 1`: `1`
+makes the upload free, `2` charges it at the same rate as a download, `k + 1`
+charges it at `k` times ([tollgate-vouchers.md](tollgate-vouchers.md)).
 
 It is **unsigned**. A negative surcharge would mean paying a peer on top of
 already paying for its delivery, compounding into the sink hazard
@@ -266,9 +279,11 @@ than merely forbidden.
 Keysets are fetched from each mint by ordinary Cashu means (NUT-01/02). The
 protocol does not restate them.
 
-The multiplier is the only field that can change mid-session, via
-MeteringReport. The accepted-mint set is fixed for the session, because a peer's
-channel is funded in a specific mint and dropping it would strand the channel.
+The multiplier is the only field that can change mid-session, by sending a
+revised Offer. It takes effect on the payer's **next** grant — a grant already
+bought is priced at the multiplier that was in force when it was bought. The
+accepted-mint set is fixed for the session, because a peer's channel is funded
+in a specific mint and dropping it would strand the channel.
 
 ### 0x02 Accept
 
@@ -277,21 +292,16 @@ Sent by the peer to accept the offer and fund its outgoing channel.
 ```cbor
 {
   0: 0x02,                         // type: Accept
-  1: [<min_interval_ms>, <max_interval_ms>],  // [u32, u32] — peer's interval range
-  2: <channel_funding>,            // bytes — Spilman funding proofs (CBOR-encoded)
+  1: <channel_funding>,            // bytes — Spilman funding proofs (CBOR-encoded)
 }
 ```
 
-There is nothing to echo back: the payer picks a mint from the list the offer
-already carried, and the unit and multiplier admit no choice.
+There is nothing to echo back. The payer picks a mint from the list the offer
+already carried; the unit and multiplier admit no choice; and the window is
+chosen per grant rather than agreed once, so there is no range to reconcile.
 
-The metering interval is resolved deterministically by both sides:
-```
-overlap = max(A.min, B.min) .. min(A.max, B.max)
-interval = (overlap.start + overlap.end) / 2
-```
-
-If ranges don't overlap, the Accept is implicitly rejected.
+Funding the channel buys nothing on its own. It opens the channel the grants
+will be signed against.
 
 ### 0x03 ChannelReady
 
@@ -307,85 +317,124 @@ Sent after the receiver verifies funding proofs and the channel is active.
 
 Both peers send ChannelReady for their respective channel directions. Resource metering begins when both channels are ready.
 
-### Metering Baseline
+### Grant State
 
-When a session starts (both ChannelReady messages exchanged), both sides reset their metering counters to zero. This establishes a shared baseline — if either node restarted, its counters were already at zero; if neither restarted, both agree to start fresh from this point.
+When a session starts (both ChannelReady messages exchanged), each side zeroes
+the grant state it keeps for the peer paying it:
 
-All MeteringReport values are **cumulative since session start** (the ChannelReady baseline). Each side computes the interval delta as `current_cumulative - previous_cumulative`. This makes the protocol self-healing: if a MeteringReport is lost, duplicated, or delivered out of order, the next report still carries the correct totals — no data is lost and no sequence numbers are needed. The Spilman channel's cumulative balance is the authoritative payment record, and metering counters only need to be consistent within the current session.
+```
+authorized   0        cumulative units the payer has signed for, ever
+consumed     0        cumulative units drawn against them
+deadline     —        when the current grant stops being spendable
+```
 
-### 0x04 MeteringReport
+`authorized − consumed` is what the peer may still spend, and it is never
+negative. Nothing here is exchanged: the payer knows what it signed, the
+provider knows what it delivered, and neither has to tell the other.
 
-Sent by both peers at each metering interval. **Unsigned** resource stats only
-— no balance signature.
+### 0x04 TopUp
+
+Sent by the payer whenever it wants capacity. It is the Spilman balance update
+and the purchase of a rate in one message, and it is the **only** payment
+message in the protocol.
 
 ```cbor
 {
-  0: 0x04,                         // type: MeteringReport
-  1: <elapsed_ms>,                 // u64 — since session start (cumulative)
-  2: <delivered>,                  // u64 — cumulative units delivered TO this peer
-  3: <received>,                   // u64 — cumulative units received FROM this peer
-  4: <new_received_multiplier>,    // u16 | null — revised multiplier
+  0: 0x04,                         // type: TopUp
+  1: <channel_id>,                 // bytes(32) — the payer's Spilman channel
+  2: <cumulative>,                 // u64 — total units authorized on this channel, ever
+  3: <window_ms>,                  // u32 — spend the grant within this long, from receipt
+  4: <signature>,                  // bytes(64) — Schnorr over (channel_id, cumulative)
 }
 ```
 
-Counts are **raw**, cumulative since session start, with no multiplier applied.
-That keeps the bill checkable: each side's `delivered` pairs with the other's
-`received`, exactly as it always has.
-
-Each side then computes what it owes from the **other side's** counts and the
-multiplier that side quoted:
+On receipt:
 
 ```
-A owes B = B.delivered + B.received × B.received_multiplier
-B owes A = A.delivered + A.received × A.received_multiplier
+verify signature
+require cumulative > authorized
+require min_window_ms <= window_ms <= max_window_ms
+
+grant      = cumulative - authorized     // this purchase alone
+consumed   = authorized                  // the old grant's remainder burns now
+authorized = cumulative
+deadline   = now + window_ms
+rate       = grant / window_ms           // fixed for the life of the grant
 ```
 
-With both multipliers at `0` this reduces to each side paying for what it
-received, which is the default and gives two channels. A surcharge above `1`
-is what makes a peer pay net for both directions of its own traffic.
+**A grant replaces the previous one, it does not add to it.** Buying again
+before the old window runs out forfeits whatever was left of it. That is the
+payer's risk and it is what makes the product bandwidth rather than a stored
+quantity of bytes: capacity that was not used is gone, exactly as it is for the
+provider, who cannot sell a second twice either.
 
-**Whether the two directions net depends on the mint.** If each side is paid in
-a different mint the amounts are claims on different issuers and cannot be
-subtracted: both sides send a BalanceUpdate. If both are paid in the same mint,
-only the net debtor sends one. Both peers know both preferences from the Offer
-exchange, so the choice is deterministic. See
-[Netting](tollgate-payment-channels.md#netting).
+The forfeit is bounded by the window the payer chose, so **window length is the
+payer's risk dial.** Short windows keep the loss from raising the rate mid-flight
+small and reaction quick, at the cost of more signature verifications. Long
+windows cut message count and punish misjudgment.
 
-**Field 4** is the only renegotiation left. A node raising what it charges for
-traffic a peer pushes at it includes the new value; the peer accepts by
-continuing, or rejects with ChannelClose. Delivery itself cannot be repriced —
-the peer already holds the vouchers and their claim is fixed.
+**`cumulative` is monotonic**, which is what the Spilman ratchet requires — the
+provider always holds the highest-value state and can settle it at any time.
+Monotonicity also makes TopUp idempotent: a lost message costs nothing because
+the next one carries the correct total, and a reordered one is discarded by the
+`cumulative > authorized` check. **So no acknowledgment is needed**, and a payer
+may raise its rate and start using it without waiting a round trip.
 
-### 0x05 BalanceUpdate
+`window_ms` is measured **from receipt**, not against a timestamp, so the two
+sides need no clock agreement. Flight time makes the payer's usable window
+marginally shorter than the number it asked for, which errs in the provider's
+favor.
 
-Sent after both MeteringReports have been exchanged. Where the two directions settle in different mints, each side sends one on its own channel. Where they share a mint, only the net debtor sends one, for the net amount.
+**Consumption is weighted by the multiplier.** The provider draws down a single
+grant for both directions of the link:
+
+```
+consumed += delivered + received × received_multiplier
+```
+
+At `m = 0` the peer's uploads draw nothing and the provider pays for them out of
+its own grant on the other channel. At `m = 2` an uploaded unit draws the same
+as a downloaded one. A peer that wants to upload heavily therefore has to buy a
+larger grant, which is enforced by the shaper as the traffic happens instead of
+appearing on a bill afterward.
+
+**At the deadline** the provider sets `consumed = authorized`. Unspent capacity
+expires and the payment is kept. Traffic does not stop dead — it falls back to
+the minimum flow allowance ([tollgate-vouchers.md](tollgate-vouchers.md)), which
+is what keeps a link alive between grants.
+
+### 0x05 TopUpReject
+
+Sent when the provider will not honor a grant — most often because the rate
+would oversubscribe capacity it has already committed to other peers.
 
 ```cbor
 {
-  0: 0x05,                         // type: BalanceUpdate
-  1: <channel_id>,                 // bytes(32) — the debtor's Spilman channel
-  2: <cumulative_balance>,         // u64 — new cumulative balance on this channel
-  3: <balance_signature>,          // bytes(64) — Schnorr signature over balance update
-  4: <net_amount>,                 // u64 — the net amount being charged this interval
-}
-```
-
-### 0x06 BalanceAck
-
-Sent by the creditor to confirm the balance update.
-
-```cbor
-{
-  0: 0x06,                         // type: BalanceAck
+  0: 0x05,                         // type: TopUpReject
   1: <channel_id>,                 // bytes(32)
-  2: <accepted_balance>,           // u64 — the cumulative balance we acknowledge
+  2: <cumulative_rejected>,        // u64 — the state we are not ratcheting to
+  3: <max_rate_available>,         // u64 — units per second we would accept
+  4: <reason>,                     // u8 — see Reject reason codes
 }
 ```
 
-### 0x07, 0x08 — reserved
+Declining to ratchet is already enough to leave the payer's money untouched —
+an unclaimed Spilman state is worth nothing to the provider. The message exists
+so the payer learns in one round trip instead of inferring it from throughput
+that never arrived, and `max_rate_available` lets it re-purchase immediately at
+a rate that will be taken.
 
-These carried BootstrapToken and BootstrapAck. Bootstrap is removed: the
-mint a peer needs is the peer it is already talking to, so mint reachability
+This is admission control, and it is only possible because the payer states the
+rate it wants up front for a bounded horizon. The provider can sum committed
+rates across peers and refuse before taking the money.
+
+### 0x06, 0x07, 0x08 — reserved
+
+`0x06` carried BalanceAck. Nothing acknowledges a TopUp: cumulative state is
+self-correcting, so an ack would carry no information the next TopUp does not.
+
+`0x07` and `0x08` carried BootstrapToken and BootstrapAck. Bootstrap is removed:
+the mint a peer needs is the peer it is already talking to, so mint reachability
 is never the obstacle the mechanism existed for. How a peer acquires
 vouchers is outside the protocol — see
 [voucher-acquisition.md](../market/voucher-acquisition.md).
@@ -461,10 +510,11 @@ General-purpose rejection for any proposal.
 | 0x01 | Received multiplier unacceptable |
 | 0x02 | Mint not in the accepted set |
 | 0x03 | Unit not accepted |
-| 0x04 | Metering interval out of range |
+| 0x04 | Grant window out of range |
 | 0x05 | Channel funding invalid |
-| 0x06 | Balance verification failed |
-| 0x07 | Transit loss tolerance exceeded |
+| 0x06 | Grant signature invalid, or cumulative not increasing |
+| 0x07 | Rate exceeds available capacity |
+| 0x08 | Grant exceeds remaining channel capacity |
 | 0x09 | Protocol version unsupported |
 | 0x0A | Message type retired (bootstrap) |
 | 0xFF | Other (see reason_text) |
@@ -484,7 +534,9 @@ Orderly teardown of the entire TollGate relationship.
 
 ## Message Sequences
 
-Both sides send Offer and Accept because each delivers independently. The interval flow is deterministic: delivery is one voucher per unit, so both sides compute the same amounts from the same metering data.
+Both sides send Offer and Accept because each delivers independently. After
+that the two payment streams are unsynchronized — each side tops up on its own
+schedule, for its own windows, and neither waits for the other.
 
 ### Connection
 
@@ -497,8 +549,8 @@ Both sides send Offer and Accept because each delivers independently. The interv
      B → A: Announce (v1, pubkey_B, capabilities)
 
   2. Offer
-     A → B: Offer (accepted mints, unit, interval, multiplier)
-     B → A: Offer (accepted mints, unit, interval, multiplier)
+     A → B: Offer (accepted mints, unit, window range, multiplier)
+     B → A: Offer (accepted mints, unit, window range, multiplier)
 
   3. Channels
      B → A: Accept + funding (B→A channel)
@@ -506,37 +558,55 @@ Both sides send Offer and Accept because each delivers independently. The interv
      B → A: ChannelReady (B→A)
      A → B: ChannelReady (A→B)
 
-  4. Settle (repeat every metering interval)
-     A → B: MeteringReport (cumulative delivered, received)
-     B → A: MeteringReport (cumulative delivered, received)
-     [both compute net]
-     debtor → creditor: BalanceUpdate (signed)
-     creditor → debtor: BalanceAck
+  4. Buy (each side, whenever it wants, no acknowledgment)
+     A → B: TopUp (cumulative, window)    A buys a rate from B
+     B → A: TopUp (cumulative, window)    B buys a rate from A
+     ... each repeats before its own deadline, on its own schedule
 ```
 </details>
 
 A peer arrives already holding the other side's vouchers, or it gets no
 service. There is no pre-channel phase.
 
-### Multiplier Change at Metering Interval
+### Raising the Rate Mid-Window
 
-![Price Change](diagrams/price-change.svg)
+```
+  B holds a grant from A: 6.25 M units over a 5 s window, 1.25 M/s.
+
+  t=0    A → B: TopUp (cumulative 6.25M, window 5000)
+                B shapes A to 1.25 M/s, deadline t=5
+
+  t=3    A's traffic spikes. A does not wait for t=5.
+         A → B: TopUp (cumulative 106.25M, window 5000)
+                grant     = 106.25M - 6.25M = 100M
+                rate      = 100M / 5 s = 20 M/s
+                deadline  = t=8
+                the 2.5 M A had left from the first grant burn at t=3
+
+  No acknowledgment, no boundary to wait for. A may start pushing
+  at the new rate immediately; the worst case is one RTT of shaping
+  at the old rate while the message lands.
+```
+
+### Multiplier Change
+
+![Multiplier Change](diagrams/price-change.svg)
 <details><summary>Text version</summary>
 
 ```
   A wants to change what it charges for traffic B pushes at it:
 
-  A → B: MeteringReport (field 4: revised received multiplier)
+  A → B: Offer (revised received multiplier, same mints and unit)
 
   alt: ACCEPT (continue)
-       B → A: MeteringReport (continues normally)
-       [next interval uses the new price]
+       B → A: TopUp (next grant, priced at the new multiplier)
 
   alt: REJECT (close)
        B → A: ChannelClose (reason=price_rejected)
        A → B: CloseAck
        [channel settles, B may renegotiate or disconnect]
 
+  A grant already bought keeps the multiplier it was bought under.
   Delivery is never repriced — B already holds A's vouchers.
 ```
 </details>
@@ -572,7 +642,7 @@ service. There is no pre-channel phase.
   B → A: Accept (no Spilman funding — neither charges)
   A → B: Accept (no Spilman funding — neither charges)
 
-  [delivery active, no metering, no balance update messages]
+  [delivery active, no grants, no TopUp messages]
 ```
 </details>
 
@@ -597,14 +667,13 @@ Typical message sizes (CBOR encoded):
 | Offer (3 accepted mints) | ~180 bytes |
 | Accept | ~180 bytes (dominated by Spilman funding) |
 | ChannelReady | ~40 bytes |
-| MeteringReport | ~60 bytes |
-| BalanceUpdate | ~110 bytes |
-| BalanceAck | ~40 bytes |
+| TopUp | ~120 bytes (dominated by the signature) |
+| TopUpReject | ~50 bytes |
 | RolloverInit | ~200 bytes (Spilman funding) |
 | ChannelClose | ~110 bytes |
 | Disconnect | ~10 bytes |
 
-Plus 2 bytes of length prefix per message. These are infrequent (every 5 s at the metering interval, one-time for setup), so both the CBOR and the framing overhead are negligible compared to the resource being metered.
+Plus 2 bytes of length prefix per message. Setup messages are one-time. TopUp is the only one that repeats, at whatever rate the payer chooses within `min_window_ms`, and at ~120 bytes against a grant measured in megabytes the framing overhead is negligible. What is not negligible is the signature verification each one costs the provider, which is why `min_window_ms` exists.
 
 ---
 
@@ -616,17 +685,22 @@ Plus 2 bytes of length prefix per message. These are infrequent (every 5 s at th
 | Transport | Raw TCP for v1; HTTP polling and WebSocket recorded as future alternatives | Peerings are adjacent, so nothing sits between the peers to require HTTP dressing. Saves HTTP parsing, an upgrade handshake, a frame parser, masking and ping/pong on constrained devices |
 | Framing | 2-byte little-endian length prefix per message | Also caps a message at 65535 bytes, so a peer cannot make the receiver allocate for a claimed huge length |
 | Transport security | None at this layer | FIPS Noise IK authenticates and encrypts before TollGate sees the peer; on plain IP the operator wraps the connection as it sees fit |
-| Keepalive | None — MeteringReport is the heartbeat | It already runs every interval, so a separate ping would be redundant. Setup uses `stale_timeout_seconds` instead, since no metering traffic exists yet |
+| Keepalive | None | Non-payment is self-enforcing: the grant expires, the peer drops to the minimum flow allowance, and nothing has to detect anything. Setup uses `stale_timeout_seconds`, since no grant exists yet |
 | Field keys | Small integers, not strings | Compact, avoids string overhead in CBOR |
 | Message discrimination | Integer `type` field (key 0) | Simple, extensible |
 | First message | Announce (protocol version + pubkey) | Identifies TollGate capability before negotiation |
-| Metering counters | Cumulative since session start, not deltas | Self-healing: lost/duplicated reports don't corrupt accounting |
-| Interval flow | MeteringReport (both) → BalanceUpdate | One update per direction when the mints differ; one net update when both sides settle in the same mint. Decided deterministically from the Offers |
+| Payment timing | Prepaid: the grant is bought before the traffic it covers | Holding a voucher is already a claim on the issuer, so prepaying adds no trust that was not already there. Postpaying would add provider credit risk on top of it for nothing |
+| Payment message | One — TopUp, which is the Spilman update and the purchase at once | Settlement, metering exchange and balance acknowledgment all collapse into it |
+| Grant semantics | A grant replaces the previous one; the remainder burns | Selling a rate rather than a stored quantity. Without forfeiture a buyer could accumulate off-peak claims and spend them at peak |
+| Grant state | Cumulative authorized, never decreasing | Satisfies the Spilman ratchet and makes TopUp idempotent, so lost and reordered messages are harmless and no acknowledgment is needed |
+| Reaction latency | One message, no round trip | Fire-and-forget is safe because the state is cumulative, so a payer can raise its rate and use it immediately |
+| Window bounds | `[min_window_ms, max_window_ms]`, provider-set, payer chooses per grant | `max` bounds buying off-peak for peak; `min` bounds signature verifications per second, which is the binding constraint on a constrained provider |
+| Admission control | TopUpReject carries the rate that would be accepted | The payer states its rate up front for a bounded horizon, so the provider can refuse before taking the money instead of shaping afterward |
 | Delivery pricing | None in the protocol — one voucher per unit, both directions | A voucher is a claim on one unit, so redemption is delivery |
 | Accepted mints | One ordered list, at least one entry, no prices | Accept or refuse is binary. What an issuer's paper is worth is expressed in what you pay for it on the market, not in a settlement discount |
-| Who pays | Whoever the traffic is for, for both directions | One rule covers upload and download, so no reverse payment and no negative amount anywhere |
-| Received multiplier | Unsigned u16 per peer, piggybacked for renegotiation | Prices scarce uplink and signals how welcome a peer's traffic is. Unsigned makes paying a peer to send traffic unrepresentable rather than merely forbidden |
-| Metering counts | Unchanged: delivered and received, raw | Billing changed, measurement did not — both counters already existed and already mean the peer's download and upload |
+| Who pays | Each side pays for what it received, and buys its own grants | Both directions are funded independently, so there is nothing to net and no reverse payment anywhere |
+| Received multiplier | Unsigned u16 per peer, applied as a consumption weight | Prices scarce uplink and signals how welcome a peer's traffic is. As a weight it is enforced by the shaper as traffic happens rather than appearing on a bill. Unsigned makes paying a peer to send traffic unrepresentable rather than merely forbidden |
+| Metering counts | Unchanged: delivered and received, raw — but local | Measurement never changed. What changed is that it stopped being an input to payment, so the counters are no longer exchanged |
 | Market operations | Separate endpoints and a separate protocol; never TollGate messages | Buying and swapping vouchers is not part of paying for delivery, and a node that offers neither is fully functional |
 | Money in the protocol | Never appears | Sats are a market concern; the payment protocol only ever counts units and vouchers |
 | Bootstrap messages | Removed, type codes 0x07/0x08 left reserved | The mint a peer needs is the peer it is talking to; a retired code should Reject cleanly rather than misparse |

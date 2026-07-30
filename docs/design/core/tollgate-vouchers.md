@@ -42,13 +42,13 @@ continuously updated measure of what the network expects it to deliver.
 
 ## Delivery Costs One Voucher Per Unit
 
-A node meters units delivered to a peer and collects the same number of
-vouchers. The exchange is one-to-one by construction: a voucher *is* a claim
-on one unit of capacity, so redeeming `n` of them is delivering `n` units.
+A node collects vouchers from a peer and delivers the same number of units.
+The exchange is one-to-one by construction: a voucher *is* a claim on one unit
+of capacity, so redeeming `n` of them is delivering `n` units.
 
 ```
-units delivered this interval = n
-vouchers collected            = n
+units delivered = n
+vouchers collected = n
 ```
 
 **There is no price for delivery anywhere in the protocol** — no rate to
@@ -83,30 +83,64 @@ for water. The existing keyset machinery covers all of them unchanged.
 
 ### Buying a Rate
 
-The buyer thinks in rates. The metering interval is fixed for the peering
-before any payment happens (both peers send an acceptable range and the
-interval is the average of the overlap — see the Accept message in
-[tollgate-protocol.md](tollgate-protocol.md)), so the amount to hand over
-each interval is the product:
+A proof holds a quantity and nothing else. What the buyer wants is a rate, so
+the rate is expressed by pairing a quantity with a **window** — a span of time
+the buyer names, inside which that quantity may be drawn:
 
 ```
-voucher_amount = desired_rate × interval
+rate = grant / window
 
-5 s interval, 1 KiB/s     1024 × 5       =   5,120 bytes   (2 proofs)
-5 s interval, 100 KiB/s   1024 × 100 × 5 = 512,000 bytes   (6 proofs)
+  5,120 bytes over 5 s      1 KiB/s      (2 proofs)
+512,000 bytes over 5 s    100 KiB/s      (6 proofs)
+512,000 bytes over 1 s    500 KiB/s      (same 6 proofs, shorter window)
 ```
 
-One voucher settles each interval in both cases. What changes is the amount
-it carries and how many proofs that amount decomposes into:
-`5,120 = 4096 + 1024`, and `512,000 = 125 × 4096` where 125 has six bits
-set. Both are ordinary Cashu amounts needing no special handling.
+The window lives in the signed channel state, not in the money. That matters:
+a proof denominated in bytes-per-second would only be meaningful against some
+particular window, so proofs from different windows would stop being
+interchangeable and the accepted-mint set would collapse. Keeping time out of
+the instrument is what lets a byte be a byte wherever it is spent, and what
+lets vouchers trade at a single price on a market.
 
-**Paying more in one interval buys a higher rate for the next.** That is the
-whole rate-auction mechanism — see Rate Auction and Token Bucket below.
+Amounts are ordinary Cashu amounts needing no special handling:
+`5,120 = 4096 + 1024`, and `512,000 = 125 × 4096` where 125 has six bits set.
 
-A byte is a byte wherever it is spent, so two vouchers for the same amount
-are interchangeable. That is what lets them trade at a single price on a
-market.
+### Grants Replace Each Other
+
+A payment is a **grant**: this many units, spendable within this window,
+starting when the provider receives it. Buying again **replaces** the grant in
+force. Whatever was left of the old one is forfeit at that moment, and the
+provider keeps the payment.
+
+```
+t=0   buy 6.25 M units, window 5 s      1.25 M/s, expires t=5
+t=3   buy   100 M units, window 5 s     20 M/s,   expires t=8
+      the 2.5 M left from the first grant burn at t=3
+```
+
+This is what makes the product bandwidth rather than a stored quantity of
+bytes. Capacity is perishable — a second of it that goes unsold is gone whether
+or not anyone paid, and the buyer carries that risk on the seconds it bought.
+Without forfeiture, a buyer could accumulate claims off-peak and present them
+all at peak, which is selling volume, not bandwidth.
+
+**Raising the rate costs the remainder**, so the exchange rate between
+responsiveness and waste is set by window length:
+
+| Situation | Forfeit | As a share of the new grant |
+|---|---|---|
+| 1.25 M/s, 2 s left, jump to 20 M/s | 2.5 M | 2.5% |
+| 20 M/s, 4 s left, jump to 24 M/s | 80 M | 67% |
+
+Large jumps are cheap and small adjustments are punitive, which discourages
+fiddling and holds down the provider's verification load. A buyer that wants
+fine control uses short windows, where the forfeit can never exceed one
+window's worth. That costs more messages, and `min_window_ms` is where the
+provider says how many it will take.
+
+**The rate is fixed for the life of the grant** at `grant / window`. Capacity
+left unused early is not banked for later — otherwise a buyer that waited would
+be entitled to an unbounded burst just before the deadline.
 
 ### One Unit Per Resource, Many Issuers
 
@@ -142,15 +176,17 @@ below has to absorb.
 
 The base rule is unchanged and symmetric: **a node pays for what it received
 from a peer**, which is what that peer delivered. Both sides owe each other,
-both fund a channel, and both settle every interval.
+both fund a channel, and each buys its own grants on its own schedule.
 
 ```
-A owes B = B.delivered      (what B handed to A — A's download)
-B owes A = A.delivered      (what A handed to B — A's upload)
+A buys from B      the right to receive        (A's download)
+B buys from A      the right to receive        (A's upload)
 ```
 
 For an ordinary peering that is the whole story, and it is why **two channels
-is the default**, not an exception.
+is the default**, not an exception. The two streams are independent — different
+mints, different windows, different moments — so there is nothing to net and no
+settlement round for them to meet in.
 
 ### The Received Multiplier
 
@@ -159,18 +195,23 @@ the base rule the relay pays the leaf for it — which is backwards when the
 relay would rather not carry it at all.
 
 A node closes the gap by adding a **surcharge on what it receives** from a
-given peer:
+given peer. It is applied as a weight on how fast that peer's grant is drawn
+down:
 
 ```
-A owes B = B.delivered + B.received × m_B
-B owes A = A.delivered + A.received × m_A
+B draws down A's grant as:   delivered + received × m_B
+A draws down B's grant as:   delivered + received × m_A
 ```
 
 > **`received_multiplier`** — a surcharge on units I receive from you.
 > Default `0`: no surcharge, the base rule stands.
 
-Netted out on the leg where A delivered `X` to B, the base payment and the
-surcharge partly cancel — B still owes A `X` for delivering it:
+A unit A downloads draws one unit from A's grant. A unit A uploads draws `m_B`.
+So a peer that wants to push a lot has to buy a bigger grant, and the shaper
+enforces it as the traffic happens rather than a bill arriving afterward.
+
+Netted out on the leg where A uploads `X` to B, the two grants partly cancel —
+B is still buying that upload from A at one unit each:
 
 | `m_B` | B pays A | A pays B | **Net per unit A uploads** |
 |---|---|---|---|
@@ -198,12 +239,12 @@ and `0` is simply the base rule with no surcharge at all.
 
 ```
 Ordinary peering, both multipliers 0:
-  A owes B = B.delivered        both pay, two channels
-  B owes A = A.delivered
+  A's grant drains on A's downloads      both buy, two channels
+  B's grant drains on B's downloads
 
 Relay charging upload at the same rate as download, m_B = 2:
-  A owes B = B.delivered + 2 × A's upload
-  B owes A = A's upload
+  A's grant drains on A's downloads + 2 × A's uploads
+  B's grant drains on A's uploads
   net: A pays 1× for each, in both directions
 
 Relay on a 10:1 backhaul, m_B = 11:
@@ -212,9 +253,8 @@ Relay on a 10:1 backhaul, m_B = 11:
 </details>
 
 It is **per peer**, so a node can welcome one peer's traffic and discourage
-another's. Metering reports carry raw counts, so reconciliation is untouched
-and the surcharge is applied afterwards, from the multiplier the other side
-quoted.
+another's. A grant already bought keeps the multiplier it was bought under; a
+revised Offer takes effect on the next one.
 
 **The field is unsigned, and that is load-bearing.** A negative surcharge would
 mean paying a peer *on top of* already paying for its delivery — compounding
@@ -297,12 +337,11 @@ many of its vouchers the node holds at once.
 
 ## Normal Operation
 
-One Cashu token settles one metering interval. Which node's keyset it was
-minted against says who owes the delivery; the amount says how much. There
-is no extra structure — a wallet that can hold sat-denominated proofs can
-hold these.
+One Cashu token buys one grant. Which node's keyset it was minted against
+says who owes the delivery; the amount says how much. There is no extra
+structure — a wallet that can hold sat-denominated proofs can hold these.
 
-Each direction of a peering is settled on its own. **You pay in the vouchers
+Each direction of a peering is bought on its own. **You pay in the vouchers
 of whoever is delivering**, one voucher per unit.
 
 ![Voucher Lifecycle](diagrams/voucher-lifecycle.svg)
@@ -319,9 +358,10 @@ of whoever is delivering**, one voucher per unit.
 </details>
 
 The same thing happens in the other direction, in the other node's vouchers,
-settled separately. A leaf is no exception: it delivers its uploads, so its
-relay owes it for those, and both channels exist. What makes the leaf a net
-payer is the relay's received multiplier, not a missing channel.
+bought separately and on a different schedule. A leaf is no exception: it
+delivers its uploads, so its relay buys those from it, and both channels exist.
+What makes the leaf a net payer is the relay's received multiplier, not a
+missing channel.
 
 That is the whole mechanism for the large majority of peerings. Vouchers can
 be acquired **on a market or directly from the issuer**, and the rest of
@@ -352,9 +392,10 @@ funding, rollover, and settlement even though the link itself is fine
 the Mint"). When the provider is the mint, the two fail together — if you
 can be served, you can pay.
 
-**A fixed amount for the consumer.** You buy 1 GiB and you get 1 GiB. No
-exposure to the sat price mid-session, and no price sheet changing under you
-at the next interval.
+**A fixed amount for the consumer.** A voucher's claim is a quantity, fixed
+when it is acquired. No exposure to the sat price mid-session and no price
+sheet changing underneath. What is *not* fixed is when it must be used: a grant
+carries a deadline, and capacity left unspent behind it is gone.
 
 **Selling capacity ahead of time.** Issuing vouchers is selling capacity
 before delivering it, which is a way to raise funds. A rooftop antenna can
@@ -381,8 +422,8 @@ refuse.
 No cryptography fixes this. Two things limit it instead:
 
 - **Policy** — the loss is however many vouchers are held or committed at
-  once. Hold one interval's worth, risk one interval's worth. This is the
-  same bound already accepted for a receiver who settles and vanishes.
+  once. Hold one grant's worth, risk one grant's worth, and the window is
+  the payer's own choice.
 - **Reputation** — an issuer that stops redeeming sees its vouchers sell for
   less, which makes everything it issues later worth less too.
 
@@ -429,15 +470,15 @@ Checking for double spends locally is cheap, but every spent proof has to be
 recorded in the issuer's spent-proof set permanently. That is one record per
 **proof**, not per payment — and because amounts are powers of two, a
 payment is a set of proofs, roughly one per set bit. Byte denomination makes
-those numbers large: 1 MB/s over a 5 s interval is 5,242,880 bytes, a 23-bit
-number, so about 11–12 proofs per payment.
+those numbers large: a grant of 1 MB/s over a 5 s window is 5,242,880 bytes, a
+23-bit number, so about 11–12 proofs per payment.
 
 ![Spilman as State Compression](diagrams/voucher-state-compression.svg)
 <details><summary>Text version</summary>
 
 ```
-10 peers, 5 s interval, 1 MB/s each:
-  86400 / 5 × 10              = 172,800 payments/day
+10 peers, 5 s windows, 1 MB/s each:
+  86400 / 5 × 10              = 172,800 grants/day
   × ~11.5 proofs per payment  ≈ 2.0M proof records/day
   × ~80 bytes per record      ≈ 160 MB/day
 
@@ -488,35 +529,42 @@ counterparty **over the peering link alone**, because the mint it needs is the
 peer it is already talking to. Mint reachability is never the obstacle.
 
 Paying per token for a whole session instead of opening channels still
-works, but the cost falls on the provider. Every interval's payment lands in
+works, but the cost falls on the provider. Every grant's payment lands in
 its spent-proof set, which is the growth channels exist to avoid.
 
 ---
 
-## Rate Auction and Token Bucket
+## Paying Before Delivery
 
-The payment sets the allowance: what a peer pays during one interval
-determines the capacity it gets in the next. Each interval becomes a small
-auction for the link.
+A grant is bought **before** the traffic it covers, not billed afterward. Three
+things follow.
 
-This is the arithmetic from Buying a Rate, read backwards. The peer hands
-over `rate × interval` worth of vouchers, and that quantity is what sets its
-allowance for the next interval.
+**It adds no trust.** Holding an unredeemed voucher is already a claim on the
+issuer — that exposure exists the moment a peer acquires vouchers at all.
+Prepaying converts a claim into a claim of the same size against the same
+party. Billing afterward would instead have the provider extend credit *on top*
+of the payer already holding its paper: two exposures where one will do.
 
-Build it as a **token bucket filled by payment**, not as a hard per-interval
-rate cap:
+**Non-payment enforces itself.** A peer that stops buying simply runs out of
+grant and drops to the minimum flow allowance. Nothing has to detect it, no
+message announces it, and there is no delivered-but-unpaid balance to chase.
+The provider's exposure is not one interval of traffic — it is nothing.
 
-- paid units fill the bucket
-- bucket depth sets how much burst is allowed
-- drain rate sets sustained throughput
+**Reaction is one message, not one interval.** Under postpaid settlement a
+rate could only change at a settlement boundary, so a traffic spike waited out
+the remainder of the interval. A grant takes effect when it arrives. Because
+the signed state is cumulative, a TopUp needs no acknowledgment, so a payer can
+send one and immediately start using the rate it just bought; the worst case is
+a single round trip of shaping at the old rate. On an adjacent link that is
+sub-millisecond.
 
-A hard cap recomputed every interval adjusts the rate on the interval
-timescale, while TCP adjusts on the round-trip timescale, and the two fight
-each other and produce sawtooth throughput. A bucket smooths the same
-allocation, allows bursts, and lets the 5 s default metering interval stand
-instead of forcing per-second payments and five times the signing load.
-
-The cap comes from payment history rather than from static configuration.
+What the payer gives up is the ability to pay only for what actually arrived.
+A grant is consumed whether or not packets land, so transit loss is the buyer's
+cost. It remains **measurable one-sided** — the payer knows what it bought and
+what arrived, both locally — so the correction needs no protocol and no
+cooperation: buy a smaller grant, or buy somewhere else. Delivered against
+purchased is a per-provider score that informs which peerings are worth keeping
+([tollgate-metering.md](tollgate-metering.md)).
 
 ---
 
@@ -530,13 +578,20 @@ purposes:
   circle.
 - **Basic access.** An operator may want any peer to be able to do the small
   things — resolve a name, fetch a message — whether or not it is paying.
+- **Keeping a link alive between grants.** A grant expires and the next one
+  has not arrived yet. Without an allowance the link would go silent, and the
+  peer would have no way to send the TopUp that revives it.
 
 ```yaml
 access:
   minimum_flow:
     enabled: false
-    bytes_per_interval: 0
+    bytes_per_second: 0
 ```
+
+It is a rate, not a stored quantity, and it is what a peer falls back to
+whenever its grant is exhausted or expired. That makes it the floor of the
+shaper rather than a separate mechanism.
 
 ### Abuse
 
@@ -557,7 +612,7 @@ mint software or a scheme not yet designed. **Future work**, and out of
 scope here.
 
 Until then the allowance is unlocked and resale is bounded by economics
-rather than cryptography. At a realistic size — a few KB per interval — what
+rather than cryptography. At a realistic size — a few KB per second — what
 an attacker can farm is worth very little, thinly traded, and issued by one
 obscure router, so the effort likely exceeds the return. That argues for
 keeping the allowance small; it is not a guarantee.
@@ -566,9 +621,10 @@ Consumption is unaffected either way, and still needs an aggregate cap
 across all unpaid peers plus a cost to holding an identity — proof-of-work,
 a deposit, or an operator allowlist.
 
-Open: whether the allowance accumulates or expires each interval.
-Accumulating lets a peer save up for a burst, which is also how an attacker
-gathers a large grant before spending it.
+The allowance does not accumulate. It is a floor on the shaping rate, so an
+unused second of it is gone the same way an unsold second of capacity is —
+there is nothing to save up and nothing for an attacker to gather before
+spending.
 
 ---
 
@@ -586,7 +642,9 @@ here is protocol-side.
 | Relays holding two kinds of vouchers | A relay that does not accept its upstream's mint sits between two issuers and must keep rebalancing. Accepting it removes the problem; not every relay can. |
 | Minimum-flow abuse | N free identities draw N allowances of real bandwidth, and one machine can run all N over the same link. Needs an aggregate cap across unpaid peers plus a cost to holding an identity. |
 | Locking the allowance | Issuing it P2PK-locked would close the resale route, but a lock only holds if it survives every swap including change, which standard Cashu mints do not do. Needs modified mint software or a scheme not yet designed. |
-| Allowance accumulation | Whether an unspent allowance carries into the next interval. Accumulating helps a peer that needs a burst, and equally helps an attacker gather a large grant before spending it. |
+| Choosing a window | The payer trades responsiveness against forfeiture and message count, with no obvious default. A provider's `[min_window_ms, max_window_ms]` bounds it but does not choose it. |
+| Under-delivery has no public evidence | A payer measures delivered against purchased from its own counters and can act on it, but cannot show it to anyone else. A provider skimming a few percent from every peer stays invisible outside those peerings. Revisitable as a reporting path if it proves common. |
+| Admission control policy | A provider can refuse a grant that would oversubscribe, but nothing says how it should divide capacity between peers that all want more, or whether an existing grant may be honored at a reduced rate rather than run to its deadline. |
 | Atomic spent-proof check | The local double-spend check needs check-and-set if the provider runs as more than one process. Straightforward on a router, but unspecified. |
 
 ---
@@ -598,19 +656,25 @@ here is protocol-side.
 | Terminology | "Voucher" is an explanatory name, not a protocol term | The protocol object is a Cashu token holding byte-denominated proofs. Nothing new is defined; the word only names what such a token means |
 | Denomination | The byte for network forwarding; each resource's own quantity unit otherwise | A proof carries an integer amount in its keyset's unit, so this is what the existing wallet already handles |
 | Proof amounts | Powers of two, as in any Cashu keyset | Nothing about the existing wallet or keyset machinery changes; a payment is a set of proofs that split and combine normally |
-| Token vs proof | One token settles one interval; the proofs inside it are the power-of-two pieces its amount decomposes into | Only the proof count changes with amount, and the spent-proof set records proofs — which is what makes channels necessary |
+| Token vs proof | One token buys one grant; the proofs inside it are the power-of-two pieces its amount decomposes into | Only the proof count changes with amount, and the spent-proof set records proofs — which is what makes channels necessary |
 | Unit | Fixed by the resource, one per resource, and always a quantity — watt-hours, not watts | Every node selling the same resource denominates the same way, which is what makes one issuer's vouchers comparable to another's |
-| Network unit | The byte | Metering is exact and no payment rounds. The cost is proof count: a 23-bit interval amount takes ~11–12 proofs, which the spent-proof set has to absorb |
-| Buying a rate | `voucher_amount = desired_rate × interval` | The interval is fixed for the peering before payment starts, so a desired rate converts to an amount by multiplication. Paying more in one interval buys a higher rate for the next |
-| Who pays | Each side pays for what it received, in the vouchers of whoever delivered it | Symmetric and unchanged. Both owe by default, so both fund a channel |
+| Network unit | The byte | Metering is exact and no payment rounds. The cost is proof count: a 23-bit grant amount takes ~11–12 proofs, which the spent-proof set has to absorb |
+| Buying a rate | A grant: a quantity paired with a window the payer names. `rate = grant / window` | A proof holds a quantity and nothing else, so time belongs in the signed state. A bytes-per-second keyset would make proofs from different windows non-interchangeable and break the accepted-mint set |
+| Payment timing | Prepaid — the grant is bought before the traffic it covers | Holding a voucher is already a claim on the issuer, so prepaying adds no new exposure. Postpaying would add provider credit risk on top of it. Non-payment then enforces itself: the grant runs out |
+| Grant semantics | A new grant replaces the one in force; the remainder is forfeit | This is what makes the product bandwidth rather than stored volume. Without forfeiture a buyer accumulates claims off-peak and presents them at peak |
+| Rate within a grant | Fixed at `grant / window`, not banked | Otherwise a buyer that waited would be owed an unbounded burst just before the deadline |
+| Reaction latency | One message, no acknowledgment | Cumulative signed state makes TopUp idempotent, so fire-and-forget is safe and a payer can use a rate the moment it buys it |
+| Netting | Removed | Prepaid grants are bought at different moments in different mints for different windows. There is no settlement round for the two directions to meet in, so there is nothing to subtract |
+| Who pays | Each side pays for what it received, in the vouchers of whoever delivered it | Symmetric and unchanged. Both owe by default, so both fund a channel and buy their own grants |
 | Acquiring vouchers | Not a protocol concern — see the market documents | The direct route from the issuer is enough to operate, and checking a voucher takes one hop |
 | Bootstrap tokens | Removed | Provider-as-mint dissolves the mint-reachability problem the mechanism existed for. The state machine, messages, verification path and config block all come out |
-| Received multiplier | An unsigned surcharge per peer on what that peer pushes at us, default `0` | Net rate is `m − 1`, so `1` makes a peer's upload free, `2` charges it like a download, `k + 1` charges it `k` times. Unsigned, so a node can never pay a bonus on top of what it already owes for delivery |
+| Received multiplier | An unsigned surcharge per peer on what that peer pushes at us, applied as a consumption weight on its grant, default `0` | Net rate is `m − 1`, so `1` makes a peer's upload free, `2` charges it like a download, `k + 1` charges it `k` times. Unsigned, so a node can never pay a bonus on top of what it already owes for delivery |
 | Accepted mints | One ordered list, at least one entry, no prices | One unit of account network-wide makes any mint's vouchers usable. A relay accepting its upstream's mint can spend what it receives without converting |
 | Accepted-mint haircuts | None — accept or refuse | What an issuer's paper is worth belongs on the market, not in a settlement discount |
 | Foreign voucher cost | Gives up free settlement, local double-spend checks, and payment-liveness-equals-service-liveness | Those three properties hold only for own vouchers, so the accepted set should lean toward neighbors and upstreams |
 | Market operations | Separate endpoints and protocol; never TollGate messages | Buying and swapping is not paying for delivery. A node offering neither is fully functional — see [market-protocol.md](../market/market-protocol.md) |
-| Minimum flow allowance | Ordinary unlocked vouchers; keep it small | Locking it would need a mint that preserves locks through swaps and change, which standard Cashu does not do. Small size bounds the resale value economically instead |
+| Minimum flow allowance | A floor on the shaping rate, not a stored quantity | It is what a peer falls back to when its grant expires, which is what keeps a link alive long enough to send the next TopUp. Being a rate, it cannot be accumulated |
+| Allowance vouchers | Ordinary unlocked vouchers; keep it small | Locking it would need a mint that preserves locks through swaps and change, which standard Cashu does not do. Small size bounds the resale value economically instead |
 | Spilman channels | Kept, to bound the issuer's database rather than to prevent theft | The spent-proof set is ~700× larger without channels |
 | Cryptographic effort | Concentrate on the exchange step | The only step with a real adversary once the issuer redeems its own vouchers |
 | Trust model | Reputation and exposure limits, not cryptography | When the provider is the mint, the only party who can cheat is the one who would honor the refund. Accepted deliberately |

@@ -63,10 +63,41 @@ peer can degrade its own link to move its own price. With a positive price
 that is self-limiting — the customer leaves. With a negative one it pays the
 peer more for being worse, and the incentive runs the wrong way with no bound.
 
-There is no formula to attack today, because delivery has no price. Keep it
-that way: `peer_metrics()` exists for operator visibility and capacity
-decisions ([tollgate-metering.md](tollgate-metering.md)), never as a price
-input.
+There is no formula to attack today, because delivery has no price. Prepaid
+grants harden this further: counters are local, never exchanged, and decide no
+payment at all ([tollgate-metering.md](tollgate-metering.md)). A peer cannot
+move money by reporting anything, because it reports nothing.
+
+Keep it that way. `peer_metrics()` exists for operator visibility and capacity
+decisions, never as a price input, and nothing measured should acquire the
+power to move a payment.
+
+---
+
+## Unspent Capacity Must Expire
+
+A grant is a quantity paired with a window, and what is not drawn inside that
+window is forfeit — both when the window ends and when a new grant replaces it
+([tollgate-vouchers.md](tollgate-vouchers.md)). That looks harsh, and the
+temptation is to soften it: credit the remainder into the next grant, let a
+small allowance accumulate, extend the deadline instead of replacing it.
+
+Each of those turns a rate back into a stored quantity. Capacity is
+perishable — an unsold second is gone whether or not anyone paid for it — so a
+claim that never expires lets a buyer accumulate cheaply off-peak and present
+the whole position at peak, which is when the capacity is scarce. The seller
+sold bandwidth and delivered volume.
+
+Two bounds hold it, and both are needed:
+
+- **Forfeiture** on replacement and at the deadline, so a claim cannot outlive
+  its window.
+- **`max_window_ms`**, so a window cannot be made long enough to span from
+  off-peak to peak. Without it a payer defeats forfeiture by never letting a
+  window end.
+
+The same reasoning is why the minimum flow allowance is a rate rather than a
+per-interval quantity. A quantity accumulates; a rate cannot.
 
 ---
 
@@ -110,6 +141,7 @@ deposit, or an operator allowlist. None is specified.
 | Never pay a peer to send or accept traffic | Peers profiting from traffic nobody wants |
 | No price-aware routing | Cheapest route being a blackhole |
 | Metrics never price inputs | A peer degrading its link to move its own price |
+| Unspent capacity expires, and windows are capped | Buying capacity off-peak to present at peak |
 | Free peering not transitive | Laundered free transit |
 | Locks survive every swap | Locks removed by swapping through change |
 | Aggregate caps on anything granted per peer | Free identities multiplying anything given away |

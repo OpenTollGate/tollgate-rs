@@ -87,7 +87,7 @@ party holds at once.**
 
 | Holder | Typical exposure | Notes |
 |---|---|---|
-| A peer buying service | One metering interval's worth | The same bound the design already accepts for a receiver who settles and vanishes |
+| A peer buying service | One grant's worth | The payer chooses the window, so it chooses this bound directly |
 | A peer that bought in bulk | The whole bag | Forced by expensive cross-mint swaps — see [voucher-acquisition.md](voucher-acquisition.md) |
 | A market maker | Inventory across many issuers | The business that makes the price signal possible is also the one carrying this risk |
 | A node accepting foreign mints | However much of that issuer's paper it holds | Directly controlled by which mints it accepts at all |

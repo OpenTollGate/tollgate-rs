@@ -69,7 +69,7 @@ This means:
 
 ### Active
 
-Spilman channels are funded. Delivery is allowed and metered, with cost deducted via signed BalanceUpdates.
+Spilman channels are funded. Delivery is allowed up to what each side has bought, and each peer's grant is drawn down as traffic passes.
 
 ### Free
 
@@ -168,7 +168,7 @@ Counting units delivered, transit-loss reconciliation, and peer metrics are docu
 2. Both verify funding proofs
 3. Both send ChannelReady
 4. Set access to Active (bloom visible in FIPS)
-5. Metering begins; balance updates flow on the Spilman channels
+5. Each side buys grants on its own channel; delivery is shaped to what each has bought
 ```
 
 ### Balance Exhausted (Suspended)

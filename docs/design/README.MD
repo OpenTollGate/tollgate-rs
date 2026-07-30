@@ -26,11 +26,11 @@ can be read independently.
 | Document | Description |
 | -------- | ----------- |
 | [tollgate-intro.md](core/tollgate-intro.md) | Introduction: goals, architecture, payment model, security |
-| [tollgate-vouchers.md](core/tollgate-vouchers.md) | Vouchers: denomination, normal operation, paid acceptance, channels as state compression |
+| [tollgate-vouchers.md](core/tollgate-vouchers.md) | Vouchers: denomination, grants and windows, who pays, channels as state compression |
 | [tollgate-protocol.md](core/tollgate-protocol.md) | Wire protocol: CBOR messages, interval flow, offers |
-| [tollgate-payment-channels.md](core/tollgate-payment-channels.md) | Spilman channels: lifecycle, rollover, netting, wallet trait |
+| [tollgate-payment-channels.md](core/tollgate-payment-channels.md) | Spilman channels: lifecycle, rollover, wallet trait |
 | [tollgate-access-control.md](core/tollgate-access-control.md) | Access control: delivery gates, access levels, FIPS bloom filter visibility |
-| [tollgate-metering.md](core/tollgate-metering.md) | Metering: counters, direction classes, transit loss resolution, peer metrics |
+| [tollgate-metering.md](core/tollgate-metering.md) | Metering: local counters, what they are and are not used for, peer metrics |
 | [tollgate-hazards.md](core/tollgate-hazards.md) | Constraints that exist because removing them reintroduces a known abuse |
 
 ### Configuration

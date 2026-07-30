@@ -47,7 +47,7 @@ vouchers:    # Which mints this node takes payment in, and per-peer traffic term
 market:      # Optional: buying and swapping services (separate protocol)
 access:      # Minimum flow allowance
 channels:    # Spilman channel parameters
-metering:    # Metering interval and drift tolerance
+grants:      # Bounds on what a payer may buy in one purchase
 peers:       # Static peer overrides
 ```
 
@@ -191,17 +191,19 @@ market maker, and a market maker can operate without forwarding a byte.
 access:
   minimum_flow:
     enabled: false
-    bytes_per_interval: 0
+    bytes_per_second: 0
 ```
 
 A small amount of traffic every peer gets free, so a new peer can acquire vouchers before it can pay for anything, and so basic things work regardless. It is given away, so it can be farmed — see Minimum Flow Allowance in [tollgate-vouchers.md](tollgate-vouchers.md) for what bounds it and what does not.
+
+It is a **rate**, and it is the floor of the shaper. A peer whose grant has expired falls back to it rather than to silence, which is what leaves it able to send the TopUp that buys the next grant.
 
 ### Defaults
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `minimum_flow.enabled` | `false` | Off by default; it is traffic given away |
-| `minimum_flow.bytes_per_interval` | `0` | Keep small — resale value is bounded economically, not cryptographically |
+| `minimum_flow.bytes_per_second` | `0` | Keep small — resale value is bounded economically, not cryptographically. Being a rate, it cannot be accumulated |
 
 ---
 
@@ -236,26 +238,31 @@ channels:
 
 ---
 
-## Metering
+## Grants
+
+What this node will accept when a peer buys capacity. A grant is a quantity of units paired with a window to spend it in, and the rate it buys is one divided by the other ([tollgate-vouchers.md](tollgate-vouchers.md)).
 
 ```yaml
-metering:
-  interval_range: [3000, 10000]           # acceptable metering interval range [min_ms, max_ms]
-  default_interval_ms: 5000               # preferred interval (used if peer accepts)
-  transit_loss_tolerance: 0.05                   # 5% transit loss tolerance
-  transit_loss_max_consecutive: 3                # close after this many consecutive over-tolerance intervals (transit loss)
-  transit_loss_unacceptable: 0.50               # immediately close if transit loss exceeds this (50%)
+grants:
+  window_range_ms: [200, 30000]      # payer picks any window in this range, per grant
+  max_rate: null                     # units/second this node will commit to one peer; null = link capacity
 ```
+
+`window_range_ms` is advertised in the Offer, and the two ends do different jobs:
+
+- **Upper bound** caps how far ahead capacity can be bought, which is what stops a buyer accumulating off-peak claims and presenting them at peak. Long windows also mean a large forfeit when a payer raises its rate early, so a high ceiling is not a favor to the payer.
+- **Lower bound** caps how many grants can arrive per second, and therefore how many signature verifications a peer can impose. On an ESP32 that is the binding constraint, not bandwidth. Raise it on constrained hardware.
+
+There is no minimum grant size. A short window already bounds message rate, and a small grant is cheap to serve.
 
 ### Defaults
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `interval_range` | `[3000, 10000]` | Acceptable interval in ms |
-| `default_interval_ms` | `5000` | Preferred metering interval |
-| `transit_loss_tolerance` | `0.05` | 5% transit loss tolerance |
-| `transit_loss_max_consecutive` | `3` | Close after 3 consecutive over-tolerance intervals (transit loss) |
-| `transit_loss_unacceptable` | `0.50` | Immediately close if transit loss exceeds 50% |
+| `window_range_ms` | `[200, 30000]` | Payer chooses per grant. Five verifications per second worst case, and no claim held longer than 30 s |
+| `max_rate` | `null` | Rate this node will commit to a single peer. Reached by a TopUp, it is refused with the available rate attached |
+
+There is no transit-loss tolerance. Counters are not exchanged, so there is no second number to disagree with — see [tollgate-metering.md](tollgate-metering.md).
 
 ---
 
@@ -313,7 +320,7 @@ vouchers:
 access:
   minimum_flow:
     enabled: true
-    bytes_per_interval: 4096
+    bytes_per_second: 4096
 
 channels:
   initial_capacity: 10
@@ -321,10 +328,8 @@ channels:
   ttl_seconds: 3600
   rollover_threshold: 0.80
 
-metering:
-  interval_range: [3000, 10000]
-  default_interval_ms: 5000
-  transit_loss_tolerance: 0.05
+grants:
+  window_range_ms: [200, 30000]
 
 peers:
   "02abc...":
@@ -339,12 +344,13 @@ Some parameters can be changed at runtime without restarting the node:
 
 | Parameter | Runtime changeable? | Notes |
 |-----------|-------------------|-------|
-| Accepted mints and their prices | Yes | Changes take effect at the next metering interval |
-| Minimum flow allowance | Yes | Applies to the next interval |
-| Subsidy limits | Yes | Lowering a cap applies immediately; already-spent budget is not refunded |
+| Received multiplier | Yes | Sent as a revised Offer; takes effect on the peer's next grant, never on one already bought |
+| Minimum flow allowance | Yes | Applies immediately — it is a shaping rate, not a budget |
+| Grant window range | Yes | Sent as a revised Offer; applies to the next grant |
+| Max rate | Yes | Lowering it does not revoke a grant already sold; it refuses the next one |
 | Peer overrides | Yes | Add/remove/modify peer policies |
+| Accepted mints | No | A channel is funded in a specific mint, so dropping one would strand it. New sessions only |
 | Channel parameters | No | Applies to new channels only |
-| Metering interval | No | Applies to new sessions only |
 | Own mint URL and unit | No | Requires restart; changing them invalidates outstanding vouchers |
 | Identity | No | Requires restart |
 
@@ -360,10 +366,14 @@ The implementation watches the config file for changes and applies runtime-chang
 | Loading | Cascading multi-file with priority | System defaults + user overrides + deployment specifics |
 | Defaults | Every parameter has a sensible default | Minimal config for simple deployments |
 | Mint block | Added — every node issues its own vouchers | The node is the mint for its own capacity |
+| Grants block | Replaces the metering block | There is no interval to negotiate and no drift tolerance to set. What is left is a bound on what a payer may buy in one purchase |
+| Window range | Advertised in the Offer; payer picks per grant | Upper end bounds buying off-peak for peak, lower end bounds signature verifications per second |
+| Minimum flow allowance | A rate, not a per-interval quantity | It is the floor of the shaper and what a peer falls back to when its grant expires. A rate cannot be accumulated |
+| Transit-loss settings | Removed | Counters are no longer exchanged, so there is no second number to disagree with |
 | Accepted mints | One ordered list, at least one entry, no prices | Accept or refuse is binary; what an issuer's paper is worth belongs on the market |
 | Received multiplier | Unsigned, per peer | Prices scarce uplink and signals how welcome a peer's traffic is, without any signed number in the protocol |
 | Market services | Own config section, own endpoints, own protocol, disabled by default | Buying and swapping is not part of paying for delivery. `market.path` may point at a third party, so a node can offer swaps without running a market |
 | Per-peer favoritism | Sell that peer vouchers cheaper, outside the protocol | Same capability, no multiplier machinery |
 | Free peering | Per-peer `no_charge` flag, one-sided, not transitive | It is a decision about a relationship rather than a price; transitivity would launder free transit for others |
-| Negative delivery prices | Absolute caps, per peer and aggregate, conserved resources only | No counterparty bounds outbound spend; per-peer caps alone are defeated by free identities |
+
 | Capacity growth | Applies to every channel | Every channel is funded by the party that owes, so growth always tracks a paying relationship |
