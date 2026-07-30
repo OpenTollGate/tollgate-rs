@@ -580,11 +580,9 @@ Rather than a fixed bandwidth cap, the payment sets the allowance: what a
 peer pays during one interval determines the capacity it gets in the next.
 Each interval becomes a small auction for the link.
 
-Under vouchers this is the arithmetic from Buying a Rate, read backwards.
-The peer hands over `rate × interval` worth, and
-that quantity is what sets its allowance for the next interval. Against the
-adopted sat-denominated model the same thing works with `cost / price` in
-place of the voucher count.
+This is the arithmetic from Buying a Rate, read backwards. The peer hands
+over `rate × interval` worth of vouchers, and that quantity is what sets its
+allowance for the next interval.
 
 Build it as a **token bucket filled by payment**, not as a hard per-interval
 rate cap:

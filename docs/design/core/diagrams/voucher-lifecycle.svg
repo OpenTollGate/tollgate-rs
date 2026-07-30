@@ -48,7 +48,7 @@
   <text x="645" y="115" text-anchor="middle" class="nlabel">Client A</text>
   <text x="645" y="133" text-anchor="middle" class="nrole">holder</text>
 
-  <text x="400" y="108" text-anchor="middle" class="annot" fill="#d0a040">&#9312; A pays sats</text>
+  <text x="400" y="108" text-anchor="middle" class="annot" fill="#d0a040">&#9312; A buys B-vouchers (market)</text>
   <line x1="545" y1="118" x2="258" y2="118" stroke="#d0a040" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#vlSat)"/>
 
   <text x="400" y="140" text-anchor="middle" class="annot" fill="#5080c0">B issues vouchers against its capacity</text>

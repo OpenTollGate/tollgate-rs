@@ -92,21 +92,24 @@ What does *not* survive an outage is acquiring vouchers for a node you have neve
 ## Specific Design Goals
 
 - **Resource-agnostic core, network-specific implementation** — `tollgate-core` knows nothing about what is being sold. This repo ships it as a reusable library and `tollgate-net` as a network-forwarding binary built on top. Other resource types (electricity, fluids, compute) get their own implementations on the same core.
-- **Hop-by-hop payment** — Each peer pays its direct neighbor. No knowledge of the full path is needed. Payment relationships are strictly between adjacent peers.
+- **Hop-by-hop payment** — Each peer pays its direct neighbor, in vouchers that neighbor accepts. No knowledge of the full path is needed. Payment relationships are strictly between adjacent peers.
 
 ![Hop-by-Hop Payment](diagrams/hop-by-hop.svg)
 <details><summary>Text version</summary>
 
 ```
-                 10 sat/MB            3 sat/MB
+              Relay-vouchers        Gateway-vouchers
   Client ──────────────→ Relay ──────────────→ Gateway ──→ internet
     │    ←══ download ══   │   ←══ download ══   │
     │    ── upload ───────→│   ── upload ───────→│
-    │    ╌╌ pays 10/MB ──→ │   ╌╌ pays 3/MB ──→ │
+    │    ╌╌ 1 voucher/unit→│   ╌╌ 1 voucher/unit→│
     │                      │                     │
     └── independent ───────┘── independent ──────┘
 
-  Relay margin: 10 - 3 = 7 sat/MB profit
+  Every hop is 1 voucher per unit. The Relay's margin is not a rate
+  difference — it is what its own vouchers fetch minus what the
+  Gateway's cost it. That spread lives on the market, not in the protocol.
+
   Client doesn't know about Gateway. Gateway doesn't know about Client.
 ```
 </details>

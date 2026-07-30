@@ -85,9 +85,9 @@
 
   <rect x="175" y="255" width="370" height="72" class="compute"/>
   <text x="360" y="274" text-anchor="middle" class="clabel" fill="#d0a040">Both sides compute independently (deterministic):</text>
-  <text x="360" y="292" text-anchor="middle" class="clabel">A owes B: 200 units x B's price = 2 sats</text>
-  <text x="360" y="306" text-anchor="middle" class="clabel">B owes A: 500 units x A's price = 5 sats</text>
-  <text x="360" y="321" text-anchor="middle" class="alabel" fill="#d0a040" font-weight="bold">Net: B owes A 3 sats</text>
+  <text x="360" y="292" text-anchor="middle" class="clabel">A owes B: 200 units = 200 B-vouchers</text>
+  <text x="360" y="306" text-anchor="middle" class="clabel">B owes A: 500 units = 500 A-vouchers</text>
+  <text x="360" y="321" text-anchor="middle" class="alabel" fill="#d0a040" font-weight="bold">Same mint both ways? net 300. Different mints? no netting.</text>
 
   <!-- Phase separator -->
   <line x1="70" y1="345" x2="660" y2="345" class="sep"/>
@@ -100,7 +100,7 @@
   <line x1="540" y1="390" x2="182" y2="390" class="balance"/>
   <polygon points="184,385 174,390 184,395" class="balance"/>
   <text x="360" y="383" text-anchor="middle" class="alabel" fill="#d0a040">BalanceUpdate</text>
-  <text x="360" y="407" text-anchor="middle" class="annot">channel B&#8594;A, +3 sats (signed)</text>
+  <text x="360" y="407" text-anchor="middle" class="annot">channel B&#8594;A, +300 (signed)</text>
 
   <!-- A → B BalanceAck -->
   <line x1="180" y1="435" x2="538" y2="435" class="ack"/>
@@ -112,7 +112,7 @@
 
   <!-- Result -->
   <rect x="175" y="475" width="370" height="42" class="result"/>
-  <text x="360" y="493" text-anchor="middle" class="clabel" fill="#40a060">Channel B&#8594;A drained by 3 sats</text>
+  <text x="360" y="493" text-anchor="middle" class="clabel" fill="#40a060">Channel B&#8594;A drained by 300</text>
   <text x="360" y="509" text-anchor="middle" class="clabel" fill="#40a060">Channel A&#8594;B unchanged this interval</text>
 
   <!-- Caption -->
