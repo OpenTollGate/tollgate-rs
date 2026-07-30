@@ -229,7 +229,7 @@ The wire-level transport spec — framing, failure detection, reconnection — i
 
 ### Future: Tunnel-Based Transport
 
-For authenticated deployments, the same HTTP / WebSocket transports can run inside an encrypted tunnel (WireGuard, TLS). The transport spec is unchanged — the tunnel is invisible to TollGate.
+For authenticated deployments, raw TCP runs inside an encrypted tunnel (WireGuard, IPsec) exactly as it does bare. The transport spec is unchanged — the tunnel is invisible to TollGate. On FIPS this is what Noise IK already provides, which is why nothing needs wrapping there.
 
 ---
 
