@@ -176,15 +176,12 @@ TollGate peer; human-facing UI is currently a non-goal
 | 0x03 | ChannelReady | Bidirectional | Confirm Spilman channel funded and active |
 | 0x04 | TopUp | Payer → provider | Signed Spilman update buying a rate for a bounded window |
 | 0x05 | TopUpReject | Provider → payer | Refuse a grant, with the rate that would be accepted |
-| 0x06 | *reserved* | — | Was BalanceAck; there is nothing to acknowledge |
-| 0x07 | *reserved* | — | Was BootstrapToken; bootstrap is removed |
-| 0x08 | *reserved* | — | Was BootstrapAck; bootstrap is removed |
-| 0x09 | RolloverInit | Sender → Receiver | New channel alongside exhausting one |
-| 0x0A | RolloverReady | Receiver → Sender | New channel funded, ready |
-| 0x0B | ChannelClose | Either → Either | Request cooperative close |
-| 0x0C | CloseAck | Either → Either | Acknowledge close |
-| 0x0D | Reject | Either → Either | Reject proposal (with reason) |
-| 0x0E | Disconnect | Either → Either | Orderly teardown |
+| 0x06 | RolloverInit | Sender → Receiver | New channel alongside exhausting one |
+| 0x07 | RolloverReady | Receiver → Sender | New channel funded, ready |
+| 0x08 | ChannelClose | Either → Either | Request cooperative close |
+| 0x09 | CloseAck | Either → Either | Acknowledge close |
+| 0x0A | Reject | Either → Either | Reject proposal (with reason) |
+| 0x0B | Disconnect | Either → Either | Orderly teardown |
 
 ---
 
@@ -311,11 +308,13 @@ Sent after the receiver verifies funding proofs and the channel is active.
 {
   0: 0x03,                         // type: ChannelReady
   1: <channel_id>,                 // bytes(32) — Spilman channel ID
-  2: <direction>,                  // u8 — 0 = A→B, 1 = B→A
 }
 ```
 
-Both peers send ChannelReady for their respective channel directions. Resource metering begins when both channels are ready.
+Sent by the party that verified the funding, which is the party that will be
+paid on that channel — so the direction is implied by who sent it and needs no
+field. Both peers send one, for the channel each will receive on. Delivery may
+begin as soon as a channel's first grant arrives.
 
 ### Grant State
 
@@ -428,37 +427,23 @@ This is admission control, and it is only possible because the payer states the
 rate it wants up front for a bounded horizon. The provider can sum committed
 rates across peers and refuse before taking the money.
 
-### 0x06, 0x07, 0x08 — reserved
-
-`0x06` carried BalanceAck. Nothing acknowledges a TopUp: cumulative state is
-self-correcting, so an ack would carry no information the next TopUp does not.
-
-`0x07` and `0x08` carried BootstrapToken and BootstrapAck. Bootstrap is removed:
-the mint a peer needs is the peer it is already talking to, so mint reachability
-is never the obstacle the mechanism existed for. How a peer acquires
-vouchers is outside the protocol — see
-[voucher-acquisition.md](../market/voucher-acquisition.md).
-
-The type codes stay reserved rather than reused, so an old implementation
-sending one gets a clean Reject instead of a misparse.
-
-### 0x09 RolloverInit
+### 0x06 RolloverInit
 
 Sent by the channel sender (the funder) when its outgoing channel approaches exhaustion (default: 80% capacity used). Each channel does carry shared state (cumulative balance, signatures), but rollover is initiated by the funder alone — only the party putting up new funds needs to decide when to do it. There is no leader/follower coordination across the two channels in a peer pair.
 
 ```cbor
 {
-  0: 0x09,                         // type: RolloverInit
+  0: 0x06,                         // type: RolloverInit
   1: <old_channel_id>,             // bytes(32) — current exhausting channel
   2: <new_channel_funding>,        // bytes — Spilman funding proofs for new channel
 }
 ```
 
-### 0x0A RolloverReady
+### 0x07 RolloverReady
 
 ```cbor
 {
-  0: 0x0A,                         // type: RolloverReady
+  0: 0x07,                         // type: RolloverReady
   1: <old_channel_id>,             // bytes(32)
   2: <new_channel_id>,             // bytes(32) — new Spilman channel ID
 }
@@ -466,13 +451,13 @@ Sent by the channel sender (the funder) when its outgoing channel approaches exh
 
 After RolloverReady, the old channel continues draining to 100%. Once exhausted, charges continue on the new channel seamlessly.
 
-### 0x0B ChannelClose
+### 0x08 ChannelClose
 
 Request cooperative close of a channel.
 
 ```cbor
 {
-  0: 0x0B,                         // type: ChannelClose
+  0: 0x08,                         // type: ChannelClose
   1: <channel_id>,                 // bytes(32)
   2: <final_balance>,              // u64 — proposed final balance
   3: <final_signature>,            // bytes(64) — signature over final balance
@@ -480,23 +465,23 @@ Request cooperative close of a channel.
 }
 ```
 
-### 0x0C CloseAck
+### 0x09 CloseAck
 
 ```cbor
 {
-  0: 0x0C,                         // type: CloseAck
+  0: 0x09,                         // type: CloseAck
   1: <channel_id>,                 // bytes(32)
   2: <accepted_balance>,           // u64 — agreed final balance
 }
 ```
 
-### 0x0D Reject
+### 0x0A Reject
 
 General-purpose rejection for any proposal.
 
 ```cbor
 {
-  0: 0x0D,                         // type: Reject
+  0: 0x0A,                         // type: Reject
   1: <rejected_type>,              // u8 — type of message being rejected
   2: <reason_code>,                // u8 — machine-readable reason
   3: <reason_text>,                // text | null — human-readable reason
@@ -516,16 +501,15 @@ General-purpose rejection for any proposal.
 | 0x07 | Rate exceeds available capacity |
 | 0x08 | Grant exceeds remaining channel capacity |
 | 0x09 | Protocol version unsupported |
-| 0x0A | Message type retired (bootstrap) |
 | 0xFF | Other (see reason_text) |
 
-### 0x0E Disconnect
+### 0x0B Disconnect
 
 Orderly teardown of the entire TollGate relationship.
 
 ```cbor
 {
-  0: 0x0E,                         // type: Disconnect
+  0: 0x0B,                         // type: Disconnect
   1: <reason_code>,                // u8 — same codes as Reject
 }
 ```
@@ -555,8 +539,8 @@ schedule, for its own windows, and neither waits for the other.
   3. Channels
      B → A: Accept + funding (B→A channel)
      A → B: Accept + funding (A→B channel)
-     B → A: ChannelReady (B→A)
-     A → B: ChannelReady (A→B)
+     A → B: ChannelReady   (A verified B's funding)
+     B → A: ChannelReady   (B verified A's funding)
 
   4. Buy (each side, whenever it wants, no acknowledgment)
      A → B: TopUp (cumulative, window)    A buys a rate from B
@@ -698,12 +682,13 @@ Plus 2 bytes of length prefix per message. Setup messages are one-time. TopUp is
 | Admission control | TopUpReject carries the rate that would be accepted | The payer states its rate up front for a bounded horizon, so the provider can refuse before taking the money instead of shaping afterward |
 | Delivery pricing | None in the protocol — one voucher per unit, both directions | A voucher is a claim on one unit, so redemption is delivery |
 | Accepted mints | One ordered list, at least one entry, no prices | Accept or refuse is binary. What an issuer's paper is worth is expressed in what you pay for it on the market, not in a settlement discount |
-| Who pays | Each side pays for what it received, and buys its own grants | Both directions are funded independently, so there is nothing to net and no reverse payment anywhere |
+| Who pays | Each side pays for what it received, and buys its own grants | Both directions are funded independently, so there is no reverse payment anywhere |
 | Received multiplier | Unsigned u16 per peer, applied as a consumption weight | Prices scarce uplink and signals how welcome a peer's traffic is. As a weight it is enforced by the shaper as traffic happens rather than appearing on a bill. Unsigned makes paying a peer to send traffic unrepresentable rather than merely forbidden |
 | Metering counts | Unchanged: delivered and received, raw — but local | Measurement never changed. What changed is that it stopped being an input to payment, so the counters are no longer exchanged |
 | Market operations | Separate endpoints and a separate protocol; never TollGate messages | Buying and swapping vouchers is not part of paying for delivery, and a node that offers neither is fully functional |
 | Money in the protocol | Never appears | Sats are a market concern; the payment protocol only ever counts units and vouchers |
-| Bootstrap messages | Removed, type codes 0x07/0x08 left reserved | The mint a peer needs is the peer it is talking to; a retired code should Reject cleanly rather than misparse |
+| Message numbering | Contiguous, 0x00–0x0B | No reserved gaps. v1 is unreleased, so the codes describe the protocol as designed rather than its history |
+| ChannelReady direction | Implied by the sender | The party that verified the funding is the party that will be paid on that channel, so a direction field would restate what the sender already says |
 | Free mode | Accept without funding, skip metering | Simplest path for free peering |
 | Channel ownership | Each peer manages its own outgoing channel | Channels carry shared state, but rollover is initiated by the funder alone — only the party putting up new funds decides when to do it |
 | Capability signaling | u32 bitfield in Announce (field 4), all bits reserved in v1 | Spilman is universal now that per-token payment is gone; the field stays for future use |

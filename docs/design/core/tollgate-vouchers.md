@@ -184,9 +184,8 @@ B buys from A      the right to receive        (A's upload)
 ```
 
 For an ordinary peering that is the whole story, and it is why **two channels
-is the default**, not an exception. The two streams are independent — different
-mints, different windows, different moments — so there is nothing to net and no
-settlement round for them to meet in.
+is the default**, not an exception. The two streams are independent: different
+mints, different windows, bought at different moments.
 
 ### The Received Multiplier
 
@@ -521,8 +520,8 @@ it wants service from, or it does not get service.
 
 The routes — Lightning mint quotes, direct purchase from the issuer, local
 swaps of sat tokens, cross-mint swaps — are covered in
-[voucher-acquisition.md](../market/voucher-acquisition.md), along with why no
-bootstrap mechanism is needed and what its absence costs.
+[voucher-acquisition.md](../market/voucher-acquisition.md), along with why the
+protocol needs no mechanism for handing a peer its first vouchers.
 
 The one thing worth noting here: a peer can mint, swap and fund against its
 counterparty **over the peering link alone**, because the mint it needs is the
@@ -667,7 +666,6 @@ here is protocol-side.
 | Netting | Removed | Prepaid grants are bought at different moments in different mints for different windows. There is no settlement round for the two directions to meet in, so there is nothing to subtract |
 | Who pays | Each side pays for what it received, in the vouchers of whoever delivered it | Symmetric and unchanged. Both owe by default, so both fund a channel and buy their own grants |
 | Acquiring vouchers | Not a protocol concern — see the market documents | The direct route from the issuer is enough to operate, and checking a voucher takes one hop |
-| Bootstrap tokens | Removed | Provider-as-mint dissolves the mint-reachability problem the mechanism existed for. The state machine, messages, verification path and config block all come out |
 | Received multiplier | An unsigned surcharge per peer on what that peer pushes at us, applied as a consumption weight on its grant, default `0` | Net rate is `m − 1`, so `1` makes a peer's upload free, `2` charges it like a download, `k + 1` charges it `k` times. Unsigned, so a node can never pay a bonus on top of what it already owes for delivery |
 | Accepted mints | One ordered list, at least one entry, no prices | One unit of account network-wide makes any mint's vouchers usable. A relay accepting its upstream's mint can spend what it receives without converting |
 | Accepted-mint haircuts | None — accept or refuse | What an issuer's paper is worth belongs on the market, not in a settlement discount |

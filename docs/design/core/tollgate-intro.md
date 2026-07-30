@@ -124,9 +124,9 @@ What does *not* survive an outage is acquiring vouchers for a node you have neve
 
 - **Per-peer pricing without per-peer machinery** — A node favors a peer by selling it vouchers cheaply. Nothing in the protocol has to know.
 - **Pricing outside the protocol** — What a unit costs in money is decided where vouchers are sold, so the wire format carries no rates.
-- **Metering that decides nothing** — Counters are local and never exchanged. Payment lands before the traffic it covers, so no shared number decides how much money moves and there is nothing to reconcile.
+- **Metering that decides nothing** — Payment lands before the traffic it covers, so counters stay local and no shared number decides how much money moves.
 - **Operator control** — The operator decides what its vouchers sell for, which peers' vouchers it will hold and at what price, and which peerings exist. The protocol executes; the operator decides.
-- **Cashu-native** — All payment uses Cashu ecash. No Lightning invoices, no on-chain transactions in the critical path. Spilman channels batch the per-interval payments.
+- **Cashu-native** — All payment uses Cashu ecash. No Lightning invoices, no on-chain transactions in the critical path. Spilman channels batch the grants.
 
 Non-goals:
 
@@ -202,7 +202,7 @@ tollgate-core (lib)              ← Pure logic, no platform code
 
 - **Access Control**: Gates delivery per peer based on payment status. Unpaid peers can only send data addressed to the local node (for payment negotiation). Free peers bypass payment entirely.
 
-- **Metering**: Tracks units delivered and received per peer, link-local. Draws each peer's grant down as traffic passes and shapes when it is spent. Counters stay local — they are not reported to the peer and decide no payment.
+- **Metering**: Tracks units delivered and received per peer, link-local. Draws each peer's grant down as traffic passes and shapes when it is spent.
 
 - **Protocol Messages**: Wire format for offers, channel negotiation, and grants. Designed for minimal back-and-forth between peers — a grant needs no reply.
 
@@ -222,11 +222,7 @@ Covered in depth in [tollgate-vouchers.md](tollgate-vouchers.md).
 
 ## Two Independent Payment Streams
 
-Each peer pair maintains two Spilman channels, and each side buys its own grants on its own — different mints, different windows, different moments. They never meet.
-
-There is therefore **nothing to net**. Under metered settlement both sides owed each other at the same instant and the two amounts could sometimes be subtracted, but only when both settled in the same mint, since claims on different issuers are not commensurable. Prepaid grants remove the shared instant, so the condition and the rule both go.
-
-Nothing is lost by it: netting saved one signature per interval, and a grant costs one signature whether or not anything is netted.
+Each peer pair maintains two Spilman channels, and each side buys its own grants on its own — different mints, different windows, different moments. A payer tops up when it wants a rate, and the provider shapes to what has been bought.
 
 Details are in [tollgate-payment-channels.md](tollgate-payment-channels.md).
 

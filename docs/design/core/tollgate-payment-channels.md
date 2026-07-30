@@ -1,6 +1,6 @@
 # TollGate Payment Channels
 
-This document specifies how TollGate manages Cashu Spilman payment channels between peers — the channel lifecycle, rollover mechanics, offline resilience, netting, and the Wallet trait.
+This document specifies how TollGate manages Cashu Spilman payment channels between peers — the channel lifecycle, rollover mechanics, offline resilience, and the Wallet trait.
 
 What peers pay each other with is documented in [tollgate-vouchers.md](tollgate-vouchers.md). Under vouchers, channels exist to keep the issuer's spent-proof set bounded rather than to prevent theft.
 
@@ -330,30 +330,6 @@ Danger zone:      expiry - safety_margin (e.g., expiry - 60 seconds)
 1. **Normal**: Well before expiry, channels rollover naturally as they exhaust
 2. **Warning**: If a channel enters the danger zone without having been settled, the sender initiates rollover — even if the channel isn't near capacity
 3. **Expiry**: If the receiver fails to settle before expiry, the sender reclaims funds via the refund path. The receiver loses any unsettled balance.
-
----
-
-## Why There Is Nothing To Net
-
-Under metered settlement both sides owed each other at the same moment, so the
-two amounts could sometimes be subtracted. Prepaid grants remove the moment.
-
-Each side buys its own grants, in its own mint, for windows it chose, at times
-it chose. A's purchase at `t=3` for the next 5 seconds and B's purchase at
-`t=1.4` for the next 800 milliseconds are not two halves of one settlement —
-they are unrelated transactions that happen to be between the same two nodes.
-There is no difference to take.
-
-That removes a rule rather than a feature. Netting saved one signature per
-interval, and grants need one signature per grant whether or not anything is
-netted, so nothing is lost. It also removes the awkward case it created: the
-two directions could only net when both settled in the *same* mint, since
-vouchers from different issuers are not commensurable, and that condition had
-to be checked and communicated. Both sides now simply fund and buy
-independently.
-
-**Channel life is unaffected.** Each channel drains at the rate its own funder
-buys, which is what it did in the different-mint case — the common one — before.
 
 ---
 
