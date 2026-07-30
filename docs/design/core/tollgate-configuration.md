@@ -43,7 +43,8 @@ On OpenWrt, the primary config path is `/etc/tollgate/tollgate.yaml`. UCI integr
 ```yaml
 identity:    # Node identity (keypair)
 mint:        # This node's own mint — what it issues vouchers against
-vouchers:    # How this node treats other nodes' vouchers
+vouchers:    # Which mints' vouchers this node takes as payment
+market:      # Optional: buying and swapping services (separate protocol)
 access:      # Minimum flow allowance
 channels:    # Spilman channel parameters
 metering:    # Metering interval and drift tolerance
@@ -94,12 +95,11 @@ The unit is fixed by the resource and must match across every node selling it. C
 
 ## Vouchers
 
-How this node treats vouchers issued by *other* nodes. This is the only price in the protocol — see Paid Acceptance in [tollgate-vouchers.md](tollgate-vouchers.md).
+Which mints' vouchers this node takes as payment, and at what settlement ratio. These are the only prices in the protocol — see Accepted Mints in [tollgate-vouchers.md](tollgate-vouchers.md). Selling or swapping vouchers is configured separately; see [market-protocol.md](../market/market-protocol.md).
 
 ```yaml
 vouchers:
   price_scale: 1000            # divisor for the prices below
-  sat_swap: false              # sell accepted vouchers for sats on request
 
   accept:                      # mints whose vouchers this node takes
     - url: "https://upstream.example.com/mint"
@@ -132,8 +132,53 @@ Each `price` is signed and crosses zero:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `price_scale` | `1000` | Sub-unit precision divisor |
-| `sat_swap` | `false` | Whether to sell accepted vouchers for sats on request |
 | `accept` | `[]` | Own vouchers only; a foreign mint costs local verification and free settlement |
+
+---
+
+## Market
+
+**Independent of everything above.** These settings configure the market
+endpoints, which are a separate protocol served under a separate path — see
+[market-protocol.md](../market/market-protocol.md). Disabling the whole
+section changes nothing about paying for delivery.
+
+```yaml
+market:
+  enabled: false                        # serve the market endpoints at all
+  path: "/tollgate/market/v1"           # local prefix, or an external URL to
+                                        #   delegate to a third-party market
+
+  sat_swap: false                       # trade vouchers against sat tokens
+  cross_mint_swap: false                # trade one mint's vouchers for another's
+  quote_ttl_seconds: 30                 # how long a quote stays honorable
+
+  sells:                                # mints whose vouchers we will sell
+    - "https://gateway.example.com/mint"      # our own
+  buys:                                 # mints whose vouchers we will buy
+    - "https://neighbor.example.com/mint"
+```
+
+Selling this node's **own** vouchers for sats needs none of this — that is a
+plain Cashu mint operation (NUT-04) against `mint.url`. The endpoints here
+exist for what Cashu has no answer to: quoting and exchanging vouchers across
+mints.
+
+`path` may be an external URL, in which case this node advertises somebody
+else's market rather than running one. A node can offer swaps without being a
+market maker, and a market maker can operate without forwarding a byte.
+
+### Defaults
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `enabled` | `false` | Off by default; a node without a market is fully functional |
+| `path` | `"/tollgate/market/v1"` | Local prefix, or an external URL to delegate to |
+| `sat_swap` | `false` | Trade vouchers against sat-denominated tokens |
+| `cross_mint_swap` | `false` | Trade one mint's vouchers for another's — no atomic implementation exists yet |
+| `quote_ttl_seconds` | `30` | Quote validity window |
+| `sells` | `[]` | Empty means own mint only, via plain Cashu |
+| `buys` | `[]` | Empty means we buy nothing |
 
 ---
 
@@ -295,7 +340,6 @@ mint:
 
 vouchers:
   price_scale: 1000
-  sat_swap: true
   accept:
     - url: "https://upstream.example.com/mint"
       price: 1000               # our upstream — we spend these onward
@@ -353,7 +397,7 @@ The implementation watches the config file for changes and applies runtime-chang
 | Bootstrap block | Removed | The mechanism is gone — see [voucher-acquisition.md](../market/voucher-acquisition.md) |
 | Mint block | Added — every node issues its own vouchers | The node is the mint for its own capacity |
 | Accepted mints | A set per node, own mint implicitly at par, empty by default | One unit of account network-wide makes any mint's vouchers usable; accepting an upstream's mint lets a relay spend what it receives without converting |
-| Sat swap | Optional, advertised in Offer | Lets a peer arrive with only sats without adding a protocol phase |
+| Market services | Own config section, own endpoints, own protocol, disabled by default | Buying and swapping is not part of paying for delivery. `market.path` may point at a third party, so a node can offer swaps without running a market |
 | Per-peer favoritism | Sell that peer vouchers cheaper, outside the protocol | Same capability, no multiplier machinery |
 | Zero-price peering | Per-peer flag, not transitive | Transitivity would launder free transit for others |
 | Negative delivery prices | Absolute caps, per peer and aggregate, conserved resources only | No counterparty bounds outbound spend; per-peer caps alone are defeated by free identities |

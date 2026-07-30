@@ -49,6 +49,29 @@ How messages are framed on the wire depends on the transport — see [Transports
 
 ---
 
+## Protocol Boundary
+
+The payment protocol and the market are deliberately separate, and the
+separation is structural rather than a convention:
+
+- **No amount in any TollGate message is denominated in money.** Messages
+  count units and vouchers. Sats appear nowhere.
+- **No TollGate message buys, sells or swaps a voucher.** Acquiring vouchers
+  happens before a session and outside it.
+- **Market operations use their own endpoints and their own protocol** — see
+  [market-protocol.md](../market/market-protocol.md). They may be served by a
+  different process, a different host, or a third party entirely.
+- **A node that offers no market services is fully functional.** It sells its
+  own vouchers through its Cashu mint, or does not sell them at all, and
+  peers arrive holding what they need.
+
+The per-mint prices in Offer are the one place this could be misread. They
+are settlement ratios — how many units of delivery a voucher from a given
+mint is credited as — not exchange rates against money. Both peers need them
+to agree on a balance.
+
+---
+
 ## Transports
 
 The protocol is transport-agnostic, but each transport has a concrete spec for how CBOR messages are framed, exchanged, and how peers detect failure. v1 defines two transports: **HTTP polling** and **WebSocket**. Both run on default port **4747**.
@@ -173,7 +196,6 @@ mint, or charge to take it.
     ...
   ],
   6: <price_scale>,                // u32 — divisor for prices; default 1000
-  7: <sat_swap>,                   // bool — will swap sats for accepted vouchers on request
 }
 ```
 
@@ -189,10 +211,10 @@ per-mint price expresses. See Accepted Mints in
 Keysets, and therefore per-class amounts, are fetched from each `mint_url` by
 ordinary Cashu means (NUT-01/02). The protocol does not restate them.
 
-Field 7 signals the node will sell its accepted vouchers for sats on request,
-so a peer arriving with only sats need not go elsewhere first — see
-[voucher-acquisition.md](../market/voucher-acquisition.md). The swap itself is
-a Cashu operation against the node's mint, not a TollGate message.
+The per-mint price is a **settlement ratio**, not a money price: it says how
+many units of delivery a voucher from that mint is credited as. Both sides
+need it to agree on a balance, which is why it belongs here. No amount in
+this message is denominated in money.
 
 The accepted-mint prices are the only fields that can change mid-session, and
 only via MeteringReport.
@@ -533,7 +555,8 @@ These are infrequent messages (every 5s at the metering interval, one-time for s
 | Delivery pricing | None in the protocol — one voucher per unit | A voucher is a claim on one unit, so redemption is delivery |
 | Accepted mints | A set per node, own mint implicitly at par, each foreign mint carrying a signed price | One unit of account network-wide means any mint's vouchers are usable; the price is where issuer risk is expressed |
 | Accepted-mint price changes | Piggybacked on MeteringReport (field 4) | No extra round-trips; the only prices that can change mid-session |
-| Sat swap | A boolean in Offer; the swap itself is a plain Cashu operation | Lets a peer arrive with only sats without adding a protocol phase |
+| Market operations | Separate endpoints and a separate protocol; never TollGate messages | Buying and swapping vouchers is not part of paying for delivery, and a node that offers neither is fully functional |
+| Money in the protocol | Never appears | Sats are a market concern; the payment protocol only ever counts units and vouchers |
 | Bootstrap messages | Removed, type codes 0x07/0x08 left reserved | The mint a peer needs is the peer it is talking to; a retired code should Reject cleanly rather than misparse |
 | Zero-price mode | Accept without funding, skip metering | Simplest path for free peering |
 | Channel ownership | Each peer manages its own outgoing channel | Channels carry shared state, but rollover is initiated by the funder alone — only the party putting up new funds decides when to do it |

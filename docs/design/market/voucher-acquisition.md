@@ -60,9 +60,10 @@ tokens and the node returns vouchers — **for any mint in its accepted set**,
 not only its own ([tollgate-vouchers.md](../core/tollgate-vouchers.md)). The
 node has upstream connectivity and can verify the sats with their mint.
 
-A node signals willingness with the `sat_swap` flag in its Offer. The swap
-itself is a plain Cashu operation against the node's mint, so it adds no
-protocol message and no state machine.
+A node advertises willingness at its **market endpoint**, not in the payment
+protocol — see [market-protocol.md](market-protocol.md). Swapping for the
+node's own vouchers is a plain Cashu mint operation (NUT-04); only
+cross-mint trades need the market endpoints at all.
 
 This recovers the walk-up case the old bootstrap token existed for: a peer
 arriving with only sats gets served without reaching anywhere else. The

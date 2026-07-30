@@ -46,6 +46,7 @@ a node can sell its own vouchers and redeem them without any of this.
 | Document | Description |
 | -------- | ----------- |
 | [market/README.md](market/README.md) | Index and relationship to the core protocol |
+| [market-protocol.md](market/market-protocol.md) | Separate endpoints for buying and swapping, and why they stay out of the payment protocol |
 | [voucher-acquisition.md](market/voucher-acquisition.md) | Lightning mint quotes, direct purchase, local swaps, cross-mint swaps |
 | [voucher-price-signal.md](market/voucher-price-signal.md) | Selling price against face value as a reliability signal; liquidity |
 | [issuer-risk.md](market/issuer-risk.md) | Overissuance, selling without redeeming, redemption congestion, shutdown |

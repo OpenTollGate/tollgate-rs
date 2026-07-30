@@ -296,6 +296,7 @@ TollGate uses the [Cashu Spilman channel](../../../reference/cashu_spilman_chann
 | Document | Description |
 | -------- | ----------- |
 | [market/README.md](../market/README.md) | Index: where vouchers get their money price |
+| [market-protocol.md](../market/market-protocol.md) | Separate endpoints for buying and swapping |
 | [voucher-acquisition.md](../market/voucher-acquisition.md) | Lightning mint quotes, direct purchase, local swaps, cross-mint swaps |
 | [voucher-price-signal.md](../market/voucher-price-signal.md) | Selling price against face value as a reliability signal; liquidity |
 | [issuer-risk.md](../market/issuer-risk.md) | Overissuance, selling without redeeming, redemption congestion, shutdown |

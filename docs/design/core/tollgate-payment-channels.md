@@ -22,7 +22,7 @@ Each pair of TollGate peers maintains **two unidirectional Spilman channels** �
   └──────────┘                              └──────────┘
 
   ── resource   ╌╌ payment (Spilman channel)
-  The provider charges — the peer receiving the service pays.
+  The provider is paid in its own vouchers by whoever received the service.
 ```
 </details>
 
@@ -42,15 +42,16 @@ At each metering interval, both sides exchange metering reports. The net debtor 
     Both compute interval deltas from previous cumulative values.
 
   Phase 2 — Compute (both sides, deterministic)
-    A owes B: units B delivered to A × B's price = 2 sats
-    B owes A: units A delivered to B × A's price = 5 sats
-    Net: B owes A 3 sats
+    A owes B: 200 units B delivered to A  = 200 B-vouchers
+    B owes A: 500 units A delivered to B  = 500 A-vouchers
+    (one voucher per unit — nothing to multiply)
 
   Phase 3 — Settle
-    B → A: BalanceUpdate (channel B→A, +3 sats, signed)
+    B → A: BalanceUpdate (channel B→A, +500, signed)
     A → B: BalanceAck
 
-  Result: Channel B→A drained by 3 sats. Channel A→B unchanged.
+  Result: Channel B→A drained by 500. Channel A→B drained by 200.
+          Netting applies only where both sides accept the same mint.
 ```
 </details>
 
@@ -122,7 +123,7 @@ Both the old (draining) and new channel are active simultaneously during the ove
   │                    │                      │
   │                    ├──── overlap period ───┤
   │                                           │
-  │                    e.g. 2 sats remain + 5 sat interval cost
+  │                    e.g. 2 vouchers remain + 5 voucher interval cost
   │                        = 2 to old, 3 to new
   ├──────────────────── time ─────────────────────────────→
 ```
@@ -164,13 +165,13 @@ Each peer independently monitors their own outbound channel and initiates rollov
 Rollover triggers when a channel reaches the **rollover threshold** — a configurable percentage of channel capacity (default: 80%).
 
 ```
-Channel capacity: 1000 sats
-Rollover threshold: 80% (800 sats spent)
+Channel capacity: 1000 vouchers
+Rollover threshold: 80% (800 spent)
 
-At 800 sats spent: Sender initiates RolloverInit
+At 800 spent: Sender initiates RolloverInit
 New channel funded alongside old channel
-Old channel continues draining: 801, 802, ... 1000 sats
-At 1000 sats: old channel exhausted, charges continue on new channel
+Old channel continues draining: 801, 802, ... 1000
+At 1000: old channel exhausted, charges continue on new channel
 ```
 
 ### Overlap Period
@@ -182,9 +183,9 @@ During rollover, **two channels exist simultaneously** for the same direction:
 The balance update at each metering interval uses whichever channel has remaining capacity. When the old channel has less remaining capacity than the interval cost, the remainder carries over to the new channel.
 
 **Example:**
-- Old channel: 998 of 1000 sats spent (2 remaining)
-- Interval cost: 5 sats
-- Result: 2 sats charged to old channel (now exhausted), 3 sats charged to new channel
+- Old channel: 998 of 1000 vouchers spent (2 remaining)
+- Interval cost: 5 vouchers
+- Result: 2 charged to old channel (now exhausted), 3 charged to new channel
 
 ### Rollover While Offline
 
@@ -342,10 +343,10 @@ Factors:
 As a peer relationship proves stable (multiple successful rollovers), the node can increase channel capacity for new channels. This reduces rollover frequency and overhead.
 
 ```
-First channel:    100 sats (minimum viable)
-After 1 rollover: 200 sats
-After 3 rollovers: 500 sats
-After 10 rollovers: 1000 sats (configurable cap)
+First channel:    100 vouchers (minimum viable)
+After 1 rollover: 200
+After 3 rollovers: 500
+After 10 rollovers: 1000 (configurable cap)
 ```
 
 The exact growth curve is operator-configurable.
