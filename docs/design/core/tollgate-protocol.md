@@ -74,17 +74,36 @@ to agree on a balance.
 
 ## Transports
 
-The protocol is transport-agnostic, but each transport has a concrete spec for how CBOR messages are framed, exchanged, and how peers detect failure. v1 defines two transports: **HTTP polling** and **WebSocket**. Both run on default port **4747**.
+The protocol is transport-agnostic, but each transport needs a concrete spec
+for how CBOR messages are framed, how peers detect failure, and how sessions
+resume. **v1 defines one: raw TCP.** HTTP polling and WebSocket are recorded
+below as future alternatives for the cases raw TCP cannot reach.
 
-### HTTP polling
+**The transport carries no security burden.** The end goal is FIPS, where a
+Noise IK handshake mutually authenticates and encrypts every link before
+TollGate sees the peer ([peering-fips.md](../network-peering/peering-fips.md)).
+On plain IP without FIPS the operator chooses what to wrap the connection in —
+nothing, TLS, WireGuard, mTLS — and accepts the trade-off; see Transport Layer
+Security in [peering-ip.md](../network-peering/peering-ip.md).
 
-Suitable for open access (public hotspots) and constrained clients. Stateless on the wire — each request is a complete bidirectional exchange.
+### Raw TCP
 
-**Endpoint:** `POST /tollgate/v1/exchange`
+Default port **4747**.
 
-**Content type:** `application/cbor` for both request and response.
+**Why this one first.** Peerings are adjacent by construction — hop-by-hop
+payment means the counterparty is one link away, usually the LAN or WiFi the
+peer just associated with. There are no proxies, TLS terminators or corporate
+middleboxes in between, which is the usual argument for dressing a protocol up
+as HTTP. Skipping that costs nothing here and saves a great deal on
+constrained devices: no HTTP parsing, no SHA-1 or base64 for a WebSocket
+upgrade, no frame parser with three payload-length encodings, no masking, no
+ping/pong, no close handshake. Read two bytes, read the body, hand it to the
+CBOR decoder.
 
-**Framing:** request and response bodies each contain zero or more CBOR messages, each prefixed with a 2-byte little-endian length:
+The wire saving is incidental — a few bytes per message. The code saving is
+the point.
+
+**Framing:** each CBOR message is prefixed with a 2-byte little-endian length.
 
 ```
 +------------+-----------------+------------+-----------------+----
@@ -93,33 +112,58 @@ Suitable for open access (public hotspots) and constrained clients. Stateless on
    2 bytes      <len> bytes       2 bytes      <len> bytes
 ```
 
-An empty body is valid (no messages queued / nothing to send).
+The 2-byte prefix caps a message at 65535 bytes, which is a useful bound in
+itself: a peer cannot announce a huge length and make the receiver allocate for
+it. No TollGate message comes close to the cap.
 
-**Bidirectionality:** every POST is a full exchange. The request body carries messages from the client to the server; the response body carries messages the server has queued for the client since the last poll. There is no separate inbox endpoint.
+**Bidirectionality:** native. Either side may send at any time.
 
-**Identity:** the sender's pubkey is established by the Announce message (always the first message of a new session). The server tracks per-pubkey state keyed by that pubkey. There is no separate authentication header — TollGate runs on top of whatever transport-layer authentication the deployment uses (none, by default, in IP peering).
+**Identity:** each side sends Announce as its first message. Per-peer state is
+keyed by the pubkey it carries.
 
-**Polling cadence:** the client polls at the negotiated metering interval (default: 5 seconds). When the client knows it is expecting an immediate response (e.g., during initial channel setup), it may poll more aggressively until the response arrives.
+**Failure detection:** no separate keepalive. MeteringReport is already sent
+every metering interval, so it *is* the heartbeat — a peer that sends nothing
+for `3 × metering_interval` is considered gone. Before channels are up there is
+no such traffic, so during setup a peer that sends nothing for
+`stale_timeout_seconds` (default 60) is dropped instead. Both knobs already
+exist in [tollgate-configuration.md](tollgate-configuration.md).
 
-**Failure detection:** the server marks a peer disconnected if no poll is received within `3 × metering_interval`. The client detects server failure when an HTTP request fails (network error, 5xx). On either case, both sides clean up channel state per [Reboot / State Loss](tollgate-payment-channels.md#reboot--state-loss).
+**Orderly teardown:** send Disconnect, then close. A bare FIN is treated as an
+unclean disconnect and triggers the same cleanup as a timeout — see
+[Reboot / State Loss](tollgate-payment-channels.md#reboot--state-loss).
 
-**Reconnection:** a new Announce starts a fresh session. If the server receives a duplicate-pubkey reconnection while it still holds state for that pubkey, the friendly path (sharing back channel state) applies — see the reboot section above.
+**Reconnection:** a new connection starts a fresh session with a new Announce.
+If the listener still holds state for that pubkey, the friendly path applies
+and it shares the channel state back.
 
-### WebSocket
+### Future: HTTP polling
 
-Suitable for higher-frequency exchanges, infrastructure peering, and lower-latency operation.
+Raw TCP fails where something between the peers blocks an unusual port. That is
+not the common case for adjacent peerings, but it is real for
+internet-traversing infrastructure peering — a relay paying a known upstream
+across the public internet — and for any deployment behind a hostile network.
 
-**Endpoint:** `GET /tollgate/v1/ws` (HTTP Upgrade to WebSocket)
+The shape, if it is added: `POST /tollgate/v1/exchange`, `application/cbor`,
+request and response bodies each carrying zero or more messages with the same
+2-byte length framing. Every POST is a full exchange: the request carries
+client-to-server messages, the response carries whatever the server has
+queued. Client polls at the metering interval; the server marks a peer gone
+after `3 × metering_interval` with no poll.
 
-**Framing:** each WebSocket binary frame contains exactly one CBOR message. No length prefix — the frame boundary delimits the message. Text frames are not used.
+Being stateless on the wire, it also suits a client that cannot hold a
+connection open.
 
-**Bidirectionality:** native. Either side may send a message at any time.
+### Future: WebSocket
 
-**Identity:** the client sends Announce as the first frame after connection open. The server replies with its own Announce.
+For clients that must look like a browser, or reach through something that
+only passes HTTP. `GET /tollgate/v1/ws` with an HTTP Upgrade, one CBOR message
+per binary frame — the frame boundary replaces the length prefix. Liveness via
+ping/pong rather than the MeteringReport heartbeat.
 
-**Failure detection:** WebSocket close frame, missing ping/pong (default: 30s ping interval, 90s timeout), or TCP-level disconnect. Both sides should send Disconnect (CBOR) before closing the WebSocket where possible, so the peer knows it was orderly.
-
-**Reconnection:** opening a new WebSocket starts a fresh session. Same duplicate-pubkey reconnection path as HTTP polling.
+This is the only option that a browser can originate, since JavaScript cannot
+open a raw socket. Whether that matters depends on whether a browser is ever a
+TollGate peer; human-facing UI is currently a non-goal
+([tollgate-intro.md](tollgate-intro.md)).
 
 ---
 
@@ -545,7 +589,7 @@ Typical message sizes (CBOR encoded):
 | ChannelClose | ~110 bytes |
 | Disconnect | ~10 bytes |
 
-These are infrequent messages (every 5s at the metering interval, one-time for setup). CBOR overhead is negligible compared to the resource being metered.
+Plus 2 bytes of length prefix per message. These are infrequent (every 5 s at the metering interval, one-time for setup), so both the CBOR and the framing overhead are negligible compared to the resource being metered.
 
 ---
 
@@ -554,7 +598,10 @@ These are infrequent messages (every 5s at the metering interval, one-time for s
 | Decision | Resolution | Rationale |
 |----------|-----------|-----------|
 | Encoding | CBOR (RFC 8949) | Compact, self-describing, handles variable strings/arrays, cross-platform |
-| Framing | Per-transport — HTTP polling uses 2-byte LE length prefix; WebSocket uses frame boundaries | Each transport already has a natural boundary mechanism; reuse it |
+| Transport | Raw TCP for v1; HTTP polling and WebSocket recorded as future alternatives | Peerings are adjacent, so nothing sits between the peers to require HTTP dressing. Saves HTTP parsing, an upgrade handshake, a frame parser, masking and ping/pong on constrained devices |
+| Framing | 2-byte little-endian length prefix per message | Also caps a message at 65535 bytes, so a peer cannot make the receiver allocate for a claimed huge length |
+| Transport security | None at this layer | FIPS Noise IK authenticates and encrypts before TollGate sees the peer; on plain IP the operator wraps the connection as it sees fit |
+| Keepalive | None — MeteringReport is the heartbeat | It already runs every interval, so a separate ping would be redundant. Setup uses `stale_timeout_seconds` instead, since no metering traffic exists yet |
 | Field keys | Small integers, not strings | Compact, avoids string overhead in CBOR |
 | Message discrimination | Integer `type` field (key 0) | Simple, extensible |
 | First message | Announce (protocol version + pubkey) | Identifies TollGate capability before negotiation |

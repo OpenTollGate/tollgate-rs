@@ -46,7 +46,7 @@ TollGate hooks into FIPS at five points:
   ② Bloom filter exclusion (inferred from policy)
   ③ MMP metrics for operator visibility
   ④ Peer connect/disconnect callbacks
-  ⑤ TollGate message transport (HTTP over IPv6)
+  ⑤ TollGate message transport (raw TCP over IPv6)
 ```
 </details>
 
@@ -102,7 +102,9 @@ FIPS notifies TollGate when peers connect and disconnect:
 
 ### 5. TollGate Protocol Transport
 
-Initially, TollGate protocol messages travel over **HTTP through the FIPS IPv6 adapter**. FIPS provides an IPv6 TUN interface (`fips0`) that maps each peer's npub to an `fd00::/8` address. TollGate uses HTTP polling or WebSocket over this IPv6 interface — the same transport options as IP peering, but riding on the FIPS mesh.
+Initially, TollGate protocol messages travel over **raw TCP through the FIPS IPv6 adapter**. FIPS provides an IPv6 TUN interface (`fips0`) that maps each peer's npub to an `fd00::/8` address, and TollGate opens a TCP connection to port 4747 on it — the same transport as IP peering, riding on the FIPS mesh.
+
+Nothing needs to be wrapped in TLS: the Noise IK handshake has already authenticated and encrypted the link before TollGate sees the peer. This is what lets the transport stay as thin as it is.
 
 This approach works today without any FIPS modifications to the session layer.
 
@@ -240,7 +242,7 @@ The following FIPS modifications are required for TollGate integration. Full det
 | Metrics | MMP (SRTT, loss, ETX, goodput, jitter) — control-socket subscription | None / coarse |
 | Peer discovery | Automatic (FIPS mesh protocol) | Dynamic probing / static |
 | Authentication | Noise IK (automatic) | Unauthenticated (default) |
-| Message transport | HTTP over IPv6 adapter (initially), FSP port (future) | HTTP polling / WebSocket |
+| Message transport | Raw TCP over IPv6 adapter (initially), FSP port (future) | Raw TCP, or HTTP/WS if a network requires it |
 | Control plane overhead | Negligible at 5s metering interval; livestreamed counters | Per-peer firewall rule installs/removes |
 
 ---
@@ -256,7 +258,7 @@ The following FIPS modifications are required for TollGate integration. Full det
 | Bloom filter control | Inferred from forwarding policy, with 30s removal delay | Prevents flapping on temporary balance exhaustion |
 | Metering counters | Per-peer watch channels from FIPS | Continuous push, snapshot at metering interval |
 | Metrics | Streaming subscription on the control socket | Pricing engine reads cached values; no per-call IPC |
-| Message transport (initial) | HTTP over FIPS IPv6 adapter | Works today, no FIPS session layer changes needed |
-| Message transport (future) | Native FSP port | Optimization, eliminates HTTP overhead |
+| Message transport (initial) | Raw TCP over the FIPS IPv6 adapter | Works today with no FIPS session-layer changes, and needs no TLS — Noise IK already encrypts the link |
+| Message transport (future) | Native FSP port | Optimization; removes the TCP handshake per session |
 | MMP metrics | Exposed for visibility, never an input to price | The peer influences its own metrics, so pricing from them lets it price itself |
 | Peer identification | pubkey <-> node_addr mapping | Deterministic, same keypair serves both |

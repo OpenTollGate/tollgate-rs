@@ -83,7 +83,7 @@
   <!-- IPv6 Adapter -->
   <rect x="410" y="280" width="220" height="55" rx="5" class="callout" stroke="#404060" stroke-width="1.5"/>
   <text x="520" y="303" text-anchor="middle" class="mlabel" fill="#b0b0b0">IPv6 Adapter</text>
-  <text x="520" y="318" text-anchor="middle" class="mdesc">HTTP / WebSocket transport</text>
+  <text x="520" y="318" text-anchor="middle" class="mdesc">raw TCP transport</text>
 
   <!-- Legend -->
   <text x="100" y="372" class="caption">1 Per-peer delivery policy</text>

@@ -212,7 +212,7 @@ These are coarse approximations, and they are not inputs to any price — delive
 
 ## Transport for TollGate Messages
 
-The wire-level transport spec — endpoints, framing, polling cadence, failure detection — is defined in [tollgate-protocol.md](../core/tollgate-protocol.md#transports). v1 supports **HTTP polling** and **WebSocket**, both on default port **4747**. This section covers IP-specific deployment notes only.
+The wire-level transport spec — framing, failure detection, reconnection — is defined in [tollgate-protocol.md](../core/tollgate-protocol.md#transports). v1 uses **raw TCP** on default port **4747**; HTTP polling and WebSocket are recorded there as future alternatives for networks that block unusual ports. This section covers IP-specific deployment notes only.
 
 ### HTTP polling (`POST /tollgate/v1/exchange`)
 
