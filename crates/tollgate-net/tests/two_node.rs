@@ -66,7 +66,10 @@ fn spawn_node(port: u16, mint: &str, peers: Vec<PeerConfig>) -> (PubKey, Arc<Ada
         peers,
     };
 
-    let node = Node::new(&config, Arc::new(LocalChannels::new()));
+    let node = Node::new(
+        &config,
+        Arc::new(LocalChannels::new(config.identity.clone())),
+    );
     let adapter = node.adapter();
     tokio::spawn(async move {
         if let Err(e) = node.run(config).await {
@@ -267,7 +270,10 @@ async fn a_channel_that_fills_up_rolls_over_and_buying_continues() {
             .expect("address"),
         peers: vec![],
     };
-    let node = Node::new(&config, Arc::new(LocalChannels::new()));
+    let node = Node::new(
+        &config,
+        Arc::new(LocalChannels::new(config.identity.clone())),
+    );
     let provider_adapter = node.adapter();
     tokio::spawn(async move {
         let _ = node.run(config).await;

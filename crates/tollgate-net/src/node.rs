@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 use crate::adapter::Adapter;
 use crate::channel::ChannelBackend;
 use crate::dataplane;
-use crate::identity::{Identity, verify_update};
+use crate::identity::Identity;
 use crate::wire::{self, Wire};
 
 /// How often the node samples its meters and ticks core.
@@ -194,10 +194,10 @@ impl Node {
                 // as a whole and one bad signature makes the whole thing
                 // unauthentic.
                 if let Message::TopUp(ref t) = msg
-                    && !t
-                        .updates
-                        .iter()
-                        .all(|u| verify_update(peer, u.channel_id, u.cumulative, u.signature))
+                    && !t.updates.iter().all(|u| {
+                        self.channels
+                            .verify_update(peer, u.channel_id, u.cumulative, u.signature)
+                    })
                 {
                     warn!(%peer, "discarding a TopUp whose signatures do not verify");
                     return;
@@ -248,14 +248,20 @@ impl Node {
             } => {
                 // One signature per channel, one message for the purchase: the
                 // grant is their combined increase.
-                let updates = ratchets
-                    .into_iter()
-                    .map(|(channel_id, cumulative)| ChannelUpdate {
-                        channel_id,
-                        cumulative,
-                        signature: self.identity.sign_update(channel_id, cumulative),
-                    })
-                    .collect();
+                let mut updates = Vec::with_capacity(ratchets.len());
+                for (channel_id, cumulative) in ratchets {
+                    match self.channels.sign_update(channel_id, cumulative) {
+                        Ok(signature) => updates.push(ChannelUpdate {
+                            channel_id,
+                            cumulative,
+                            signature,
+                        }),
+                        Err(e) => {
+                            warn!(%peer, error = %e, "could not sign a channel update");
+                            return;
+                        }
+                    }
+                }
                 self.send(peer, Message::TopUp(TopUp { updates, window_ms }))
                     .await;
             }

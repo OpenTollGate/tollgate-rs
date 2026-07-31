@@ -81,7 +81,10 @@ async fn main() -> Result<()> {
         "starting"
     );
 
-    let node = Node::new(&config, Arc::new(LocalChannels::new()));
+    let node = Node::new(
+        &config,
+        Arc::new(LocalChannels::new(config.identity.clone())),
+    );
     let adapter = node.adapter();
 
     // The traffic generator. Demand is what we want to pull from a peer, which

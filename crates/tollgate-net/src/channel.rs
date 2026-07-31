@@ -20,7 +20,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Result, bail};
 use sha2::{Digest, Sha256};
-use tollgate_protocol::{ChannelId, PubKey};
+use tollgate_protocol::{ChannelId, PubKey, Signature};
+
+use crate::identity::{Identity, verify_update};
 
 /// A channel we funded, ready to tell the peer about.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,12 +46,32 @@ pub struct VerifiedChannel {
 }
 
 /// What a payment-channel implementation has to provide.
+///
+/// Signing lives here rather than beside the node's identity because **what a
+/// channel update commits to is the channel scheme's business**. An ad-hoc
+/// Schnorr over `(channel_id, cumulative)` and a Cashu Spilman balance-update
+/// signature cover different preimages entirely, and core treats the bytes as
+/// opaque precisely so that either can be dropped in.
 pub trait ChannelBackend: Send + Sync + std::fmt::Debug {
     /// Fund a channel to pay `peer` on, against `mint_url`.
     fn fund(&self, peer: PubKey, mint_url: &str, capacity: u64) -> Result<FundedChannel>;
 
     /// Check funding a peer sent us and return the channel it opens.
     fn verify(&self, peer: PubKey, funding: &[u8]) -> Result<VerifiedChannel>;
+
+    /// Sign a ratchet turn on a channel we fund.
+    fn sign_update(&self, channel_id: ChannelId, cumulative: u64) -> Result<Signature>;
+
+    /// Check a peer's ratchet turn on a channel it funds.
+    ///
+    /// Called before the message reaches core, which trusts what it is handed.
+    fn verify_update(
+        &self,
+        peer: PubKey,
+        channel_id: ChannelId,
+        cumulative: u64,
+        signature: Signature,
+    ) -> bool;
 
     /// Settle a channel: submit the latest signed state, reclaim the change.
     fn settle(&self, channel_id: ChannelId) -> Result<()>;
@@ -65,8 +87,11 @@ pub trait ChannelBackend: Send + Sync + std::fmt::Debug {
 /// That makes it right for tests and for demonstrating the protocol, and wrong
 /// for anything holding value. A Cashu Spilman backend implementing the same
 /// trait replaces it without the layers above noticing.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct LocalChannels {
+    /// Signs and checks ratchet turns. A real Cashu backend would use the
+    /// channel's own key material instead.
+    identity: Identity,
     /// Distinguishes channels opened between the same pair against the same
     /// mint, so a rollover gets a genuinely new id rather than reopening the
     /// one it is replacing.
@@ -78,8 +103,12 @@ pub struct LocalChannels {
 
 impl LocalChannels {
     /// A backend with no channels open.
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(identity: Identity) -> Self {
+        Self {
+            identity,
+            nonce: AtomicU64::new(0),
+            known: Mutex::new(Vec::new()),
+        }
     }
 }
 
@@ -155,6 +184,20 @@ impl ChannelBackend for LocalChannels {
         })
     }
 
+    fn sign_update(&self, channel_id: ChannelId, cumulative: u64) -> Result<Signature> {
+        Ok(self.identity.sign_update(channel_id, cumulative))
+    }
+
+    fn verify_update(
+        &self,
+        peer: PubKey,
+        channel_id: ChannelId,
+        cumulative: u64,
+        signature: Signature,
+    ) -> bool {
+        verify_update(peer, channel_id, cumulative, signature)
+    }
+
     fn settle(&self, channel_id: ChannelId) -> Result<()> {
         // Settling our own vouchers costs nothing but the service we already
         // sold: it cancels our own claim. There is no mint round-trip to make.
@@ -180,12 +223,16 @@ mod tests {
         PubKey(b)
     }
 
+    fn backend() -> LocalChannels {
+        LocalChannels::new(Identity::generate())
+    }
+
     #[test]
     fn both_sides_derive_the_same_channel_id() {
         // The funder and the verifier compute it independently from the same
         // bytes, so there is nothing to agree on and nothing to get wrong.
-        let funder = LocalChannels::new();
-        let verifier = LocalChannels::new();
+        let funder = backend();
+        let verifier = backend();
 
         let funded = funder
             .fund(peer(2), "https://b.example/mint", 1_000_000)
@@ -198,7 +245,7 @@ mod tests {
 
     #[test]
     fn a_rollover_opens_a_genuinely_new_channel() {
-        let backend = LocalChannels::new();
+        let backend = backend();
         let first = backend
             .fund(peer(2), "https://b.example/mint", 1_000)
             .expect("fund");
@@ -213,7 +260,7 @@ mod tests {
 
     #[test]
     fn a_truncated_funding_blob_is_rejected() {
-        let backend = LocalChannels::new();
+        let backend = backend();
         let funded = backend
             .fund(peer(2), "https://b.example/mint", 1_000)
             .expect("fund");
@@ -227,7 +274,7 @@ mod tests {
 
     #[test]
     fn a_zero_capacity_channel_is_rejected() {
-        let backend = LocalChannels::new();
+        let backend = backend();
         let funded = backend
             .fund(peer(2), "https://b.example/mint", 0)
             .expect("fund");
@@ -236,7 +283,7 @@ mod tests {
 
     #[test]
     fn settling_a_channel_we_never_saw_is_an_error() {
-        let backend = LocalChannels::new();
+        let backend = backend();
         assert!(backend.settle(ChannelId([9; 32])).is_err());
     }
 }
