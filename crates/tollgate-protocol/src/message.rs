@@ -58,24 +58,47 @@ pub struct ChannelReady {
     pub channel_id: ChannelId,
 }
 
-/// `0x04` — the Spilman balance update and the purchase of a rate in one
-/// message, and the only payment message in the protocol.
+/// One channel's ratchet turn.
 ///
-/// `cumulative` is monotonic, which makes this idempotent: a lost message costs
-/// nothing because the next one carries the correct total, and a reordered one
-/// is discarded. So it needs no acknowledgment, and a payer may raise its rate
-/// and start using it without waiting a round trip.
+/// Signed on its own, over `(channel_id, cumulative)` and nothing else — the
+/// window is deliberately outside the signature, since it is measured from
+/// receipt and the two sides need no clock agreement.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TopUp {
+pub struct ChannelUpdate {
     /// The payer's channel this update ratchets.
     pub channel_id: ChannelId,
-    /// Total units authorized on this channel, ever. Strictly increasing.
+    /// Total units authorized on that channel, ever. Strictly increasing.
     pub cumulative: u64,
+    /// Schnorr signature over `(channel_id, cumulative)`.
+    pub signature: Signature,
+}
+
+/// `0x04` — the balance updates and the purchase of a rate in one message, and
+/// the only payment message in the protocol.
+///
+/// **The grant is the combined increase across every update.** One message
+/// carries as many channels as the payer wants to draw from, which is what lets
+/// a purchase span a channel that is filling up and its replacement, and what
+/// lets a payer holding vouchers from several accepted mints spend from more
+/// than one at a time. The unit is the same whoever issued it; only the issuer
+/// differs.
+///
+/// **Applied atomically.** If any update fails to increase, the whole message
+/// is refused — a partial application would leave the grant size ambiguous.
+///
+/// Each `cumulative` is monotonic on its own channel, which makes this
+/// idempotent: a lost message costs nothing because the next one carries the
+/// correct totals, and a reordered one is discarded. So it needs no
+/// acknowledgment, and a payer may raise its rate and start using it without
+/// waiting a round trip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopUp {
+    /// The channels being ratcheted. At least one, at most
+    /// [`MAX_CHANNEL_UPDATES`](crate::MAX_CHANNEL_UPDATES).
+    pub updates: Vec<ChannelUpdate>,
     /// Spend the grant within this long, measured from receipt — so the two
     /// sides need no clock agreement.
     pub window_ms: u32,
-    /// Schnorr signature over `(channel_id, cumulative)`.
-    pub signature: Signature,
 }
 
 /// `0x05` — the provider will not honor a grant, most often because the rate
@@ -86,14 +109,24 @@ pub struct TopUp {
 /// throughput that never arrived.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopUpReject {
-    /// The channel whose update was refused.
-    pub channel_id: ChannelId,
-    /// The cumulative state we are declining to ratchet to.
-    pub cumulative_rejected: u64,
+    /// The states we are declining to ratchet to, echoed back so the payer can
+    /// tell which purchase was refused. A single channel no longer identifies
+    /// one, since a purchase may span several. Signatures are not echoed —
+    /// the payer already holds them and this message is rare.
+    pub refused: Vec<RefusedUpdate>,
     /// Units per second we would accept, so the payer can re-purchase at once.
     pub max_rate_available: u64,
     /// Why it was refused.
     pub reason: ReasonCode,
+}
+
+/// One entry of a refused purchase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefusedUpdate {
+    /// The channel.
+    pub channel_id: ChannelId,
+    /// The cumulative total we did not ratchet to.
+    pub cumulative: u64,
 }
 
 /// `0x06` — open a new channel alongside one approaching exhaustion. Initiated

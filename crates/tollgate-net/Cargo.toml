@@ -1,6 +1,6 @@
 [package]
 name = "tollgate-net"
-description = "TollGate node: TCP transport, in-process mint, resource adapter"
+description = "TollGate node: raw-TCP transport, payment channels, and a network-forwarding resource adapter"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -8,11 +8,28 @@ version.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[[bin]]
+name = "tollgated"
+path = "src/bin/tollgated.rs"
+
 [dependencies]
 tollgate-core.workspace = true
 tollgate-protocol.workspace = true
+
 tokio.workspace = true
+secp256k1.workspace = true
+sha2.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
 
 [lints]
 workspace = true

@@ -8,7 +8,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tollgate_protocol::{ChannelId, PubKey};
+use tollgate_protocol::PubKey;
 
 use crate::access::AccessLevel;
 use crate::buyer::{Buyer, WindowBounds};
@@ -31,17 +31,6 @@ pub enum Phase {
     Established,
     /// A Disconnect has been sent or received; the host is tearing down.
     Closing,
-}
-
-/// One direction's channel, once it exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChannelSlot {
-    /// The channel.
-    pub id: ChannelId,
-    /// Units it can carry before it must roll over.
-    pub capacity: u64,
-    /// Whether a rollover has already been started for it.
-    pub rolling_over: bool,
 }
 
 /// What the peer advertised in its Offer.
@@ -74,17 +63,20 @@ pub struct PeerSession {
     pub offer: Option<PeerOffer>,
 
     // --- the stream where they pay us -------------------------------------
-    /// The channel they pay us on.
-    pub incoming: Option<ChannelSlot>,
-    /// What they have bought and drawn.
+    /// What they have bought and drawn, and the channels they pay us on. The
+    /// channels live here because a purchase may ratchet several at once and
+    /// the grant is their combined increase.
     pub grant: GrantState,
     /// Cumulative counters, raw. The multiplier is applied when drawing down.
     pub meter: Meter,
 
     // --- the stream where we pay them --------------------------------------
-    /// The channel we pay them on.
-    pub outgoing: Option<ChannelSlot>,
-    /// Our side of it.
+    /// Our side of the stream where we pay them.
+    ///
+    /// The channels for this direction live here rather than beside `incoming`,
+    /// because the payer has to track up to three at once — the one in use, a
+    /// confirmed replacement, and one awaiting confirmation — and each carries
+    /// its own cumulative total.
     pub buyer: Buyer,
     /// Units per second we last observed ourselves wanting over this link.
     pub demand: u64,
@@ -106,10 +98,8 @@ impl PeerSession {
             access: AccessLevel::None,
             policy,
             offer: None,
-            incoming: None,
             grant: GrantState::new(),
             meter: Meter::new(),
-            outgoing: None,
             buyer: Buyer::new(),
             demand: 0,
             applied_rate: None,
@@ -120,26 +110,5 @@ impl PeerSession {
     /// Whether the peer has a live grant with us right now.
     pub fn paying(&self, now: Millis) -> bool {
         self.grant.is_live(now)
-    }
-
-    /// Whether the channel they pay us on is close enough to exhaustion to
-    /// warrant rolling over.
-    ///
-    /// Rollover is initiated by the funder alone — only the party putting up
-    /// new funds decides when — so this is only ever consulted for the
-    /// direction we fund.
-    pub fn needs_rollover(
-        &self,
-        slot: Option<ChannelSlot>,
-        cumulative: u64,
-        threshold_pct: u8,
-    ) -> bool {
-        let Some(slot) = slot else { return false };
-        if slot.rolling_over || slot.capacity == 0 {
-            return false;
-        }
-        // Widened to u128 rather than saturated: saturating either side would
-        // make a large channel look permanently past its threshold.
-        (cumulative as u128) * 100 >= (slot.capacity as u128) * (threshold_pct as u128)
     }
 }

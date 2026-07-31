@@ -1,4 +1,20 @@
 //! What this node has bought from one peer, and the policy it buys under.
+//!
+//! The Spilman ratchet is **per channel** — a cumulative total only means
+//! anything against the channel it was signed on — so the payer tracks up to
+//! three at once:
+//!
+//! ```text
+//! active    being drained now
+//! next      funded and confirmed, waiting for `active` to fill
+//! pending   funded by us, not yet confirmed by the peer
+//! ```
+//!
+//! A channel is opened well before it is needed (default: at 80% of the one in
+//! use) precisely so that `next` is ready by the time a purchase overflows
+//! `active`, and the overflow can be signed across both rather than stalling.
+
+use tollgate_protocol::ChannelId;
 
 use crate::time::Millis;
 
@@ -63,17 +79,64 @@ impl WindowBounds {
     }
 }
 
+/// One channel, from the payer's side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChannelBuyer {
+    /// The channel.
+    pub id: ChannelId,
+    /// Units it can carry in total.
+    pub capacity: u64,
+    /// Cumulative units signed **on this channel**. Monotonic, and meaningless
+    /// against any other channel.
+    pub cumulative: u64,
+}
+
+impl ChannelBuyer {
+    /// A freshly funded channel, nothing signed on it yet.
+    pub fn new(id: ChannelId, capacity: u64) -> Self {
+        Self {
+            id,
+            capacity,
+            cumulative: 0,
+        }
+    }
+
+    /// Units that can still be signed onto this channel.
+    pub fn headroom(&self) -> u64 {
+        self.capacity.saturating_sub(self.cumulative)
+    }
+
+    /// Whether the channel has been drained to its capacity.
+    pub fn exhausted(&self) -> bool {
+        self.cumulative >= self.capacity
+    }
+}
+
+/// One channel update a purchase requires.
+///
+/// A purchase that overflows the channel in use takes two, because a cumulative
+/// total is only meaningful against the channel it was signed on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Leg {
+    /// The channel to ratchet.
+    pub channel_id: ChannelId,
+    /// New cumulative total on that channel.
+    pub cumulative: u64,
+}
+
 /// A purchase decided but not yet sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Purchase {
-    /// The new cumulative total to sign. Monotonic, which is what the ratchet
-    /// requires and what makes the message idempotent.
-    pub cumulative: u64,
+    /// The update on the channel currently in use.
+    pub first: Leg,
+    /// The update on the replacement channel, when the purchase overflowed the
+    /// first. Present only when a rollover is already funded and confirmed.
+    pub second: Option<Leg>,
     /// Window to spend it in, already clamped to the provider's range.
     pub window_ms: u32,
     /// Rate this buys.
     pub rate: u64,
-    /// Units bought by this purchase alone.
+    /// Units bought by this purchase alone, across both legs.
     pub grant: u64,
     /// Units of the previous grant given up to make this one. Zero on a
     /// renewal that waited for the deadline; the price of reacting early
@@ -96,11 +159,28 @@ pub enum Trigger {
     Rebuy,
 }
 
-/// The payer's side of one channel.
+/// The buyer's channel and grant state before a purchase, kept so a rejection
+/// can be undone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Prior {
+    pub(super) active: Option<ChannelBuyer>,
+    pub(super) next: Option<ChannelBuyer>,
+    pub(super) rate: u64,
+    pub(super) deadline: Millis,
+    pub(super) started: bool,
+}
+
+/// The payer's side of one peering.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Buyer {
-    /// Cumulative units signed for on this channel, ever.
-    pub(super) cumulative: u64,
+    /// The channel being drained.
+    pub(super) active: Option<ChannelBuyer>,
+    /// A confirmed replacement, waiting for `active` to fill.
+    pub(super) next: Option<ChannelBuyer>,
+    /// Funded by us, not yet confirmed by the peer. Nothing is signed on it —
+    /// the peer has not said it verified the funding, so a grant signed here
+    /// might be against a channel that never opens.
+    pub(super) pending: Option<ChannelBuyer>,
     /// Rate the grant in force bought.
     pub(super) rate: u64,
     /// When it lapses.
@@ -121,21 +201,13 @@ pub struct Buyer {
     pub(super) prior: Option<Prior>,
 }
 
-/// The buyer's state immediately before a purchase, kept so a rejection can be
-/// undone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Prior {
-    pub(super) cumulative: u64,
-    pub(super) rate: u64,
-    pub(super) deadline: Millis,
-    pub(super) started: bool,
-}
-
 impl Buyer {
-    /// A buyer that has not yet purchased anything.
+    /// A buyer with no channel yet.
     pub const fn new() -> Self {
         Self {
-            cumulative: 0,
+            active: None,
+            next: None,
+            pending: None,
             rate: 0,
             deadline: Millis::ZERO,
             started: false,
@@ -144,9 +216,26 @@ impl Buyer {
         }
     }
 
-    /// Cumulative units signed for.
+    /// The channel being drained.
+    pub fn active(&self) -> Option<ChannelBuyer> {
+        self.active
+    }
+
+    /// The confirmed replacement, if one is ready.
+    pub fn next_channel(&self) -> Option<ChannelBuyer> {
+        self.next
+    }
+
+    /// Whether a channel has been funded and is awaiting the peer's
+    /// confirmation. While this is set, no further rollover is started.
+    pub fn awaiting_confirmation(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Cumulative units signed on the channel in use. Only meaningful against
+    /// that channel.
     pub fn cumulative(&self) -> u64 {
-        self.cumulative
+        self.active.map(|c| c.cumulative).unwrap_or(0)
     }
 
     /// The rate currently bought.
@@ -159,8 +248,54 @@ impl Buyer {
         self.deadline
     }
 
-    /// Units of the grant in force that are still unspent from our side's point
-    /// of view — an upper bound, since we cannot see the provider's counters.
+    /// Record a channel we have funded but the peer has not yet confirmed.
+    pub fn funded(&mut self, id: ChannelId, capacity: u64) {
+        self.pending = Some(ChannelBuyer::new(id, capacity));
+    }
+
+    /// The peer confirmed the channel we funded.
+    ///
+    /// It becomes the one in use if there is none, and otherwise the
+    /// replacement waiting behind it.
+    pub fn confirmed(&mut self, id: ChannelId) {
+        let Some(mut channel) = self.pending.take() else {
+            return;
+        };
+        // The peer names the channel it verified, which is what the funding
+        // determined; trust it over what we derived locally.
+        channel.id = id;
+
+        if self.active.is_none() {
+            self.active = Some(channel);
+        } else {
+            self.next = Some(channel);
+        }
+    }
+
+    /// Whether the channel in use is far enough through its capacity to open a
+    /// replacement.
+    ///
+    /// Rollover is started by the funder alone — only the party putting up new
+    /// funds decides when — so this is only ever asked about our own channel.
+    /// It stays false while one is already on the way, or the threshold would
+    /// re-trigger on every check and fund a channel each time.
+    pub fn needs_rollover(&self, threshold_pct: u8) -> bool {
+        if self.next.is_some() || self.pending.is_some() {
+            return false;
+        }
+        let Some(active) = self.active else {
+            return false;
+        };
+        if active.capacity == 0 {
+            return false;
+        }
+        // Widened rather than saturated: saturating either side would make a
+        // large channel look permanently past its threshold.
+        (active.cumulative as u128) * 100 >= (active.capacity as u128) * (threshold_pct as u128)
+    }
+
+    /// Units of the grant in force still unspent from our side's point of view
+    /// — an upper bound, since we cannot see the provider's counters.
     pub fn unspent_at(&self, now: Millis) -> u64 {
         if !self.started || now >= self.deadline {
             return 0;
@@ -169,18 +304,51 @@ impl Buyer {
     }
 
     /// Commit to a purchase we have decided to send.
-    pub fn record(&mut self, purchase: Purchase, now: Millis) {
+    ///
+    /// Returns the channel that this purchase exhausted, if any. That channel
+    /// has been drained to its capacity and can be settled — its replacement is
+    /// already carrying the overflow.
+    pub fn record(&mut self, purchase: Purchase, now: Millis) -> Option<ChannelId> {
         self.prior = Some(Prior {
-            cumulative: self.cumulative,
+            active: self.active,
+            next: self.next,
             rate: self.rate,
             deadline: self.deadline,
             started: self.started,
         });
-        self.cumulative = purchase.cumulative;
+
+        if let Some(active) = self.active.as_mut() {
+            debug_assert_eq!(active.id, purchase.first.channel_id);
+            active.cumulative = purchase.first.cumulative;
+        }
+        if let Some(leg) = purchase.second
+            && let Some(next) = self.next.as_mut()
+        {
+            debug_assert_eq!(next.id, leg.channel_id);
+            next.cumulative = leg.cumulative;
+        }
+
         self.rate = purchase.rate;
         self.deadline = now + purchase.window_ms as u64;
         self.started = true;
         self.capped_at = None;
+
+        self.retire_exhausted()
+    }
+
+    /// Move on from a channel drained to its capacity.
+    fn retire_exhausted(&mut self) -> Option<ChannelId> {
+        let active = self.active?;
+        if !active.exhausted() {
+            return None;
+        }
+        // Only step forward once the replacement is actually there. Without one
+        // there is nothing to step to, and the buyer stops buying until the
+        // rollover completes — which is the correct outcome, not a stall: the
+        // channel really is full.
+        let replacement = self.next.take()?;
+        self.active = Some(replacement);
+        Some(active.id)
     }
 
     /// Record that the provider refused a purchase, and at what rate it said it
@@ -193,17 +361,27 @@ impl Buyer {
     /// Because the provider did not turn its ratchet, we undo ours: the next
     /// purchase has to be built on the last total the provider actually
     /// accepted, or it would be refused for exactly the same reason.
-    /// `cumulative_rejected` identifies which purchase was refused, so a stale
-    /// rejection for a purchase we have already moved past only records the
-    /// cap and does not rewind anything.
-    pub fn record_reject(&mut self, cumulative_rejected: u64, max_rate_available: u64) {
-        self.capped_at = Some(max_rate_available);
+    /// `refused` identifies which purchase was refused, so a stale rejection
+    /// for one we have already moved past only records the cap and does not
+    /// rewind anything.
+    pub fn record_reject(&mut self, refused: &[(ChannelId, u64)], max_rate: u64) {
+        self.capped_at = Some(max_rate);
 
-        if cumulative_rejected != self.cumulative {
+        // A purchase is refused in full, so it is enough that any of the totals
+        // named is one we currently hold — they were all sent together.
+        let holds = |c: Option<ChannelBuyer>| {
+            c.is_some_and(|c| {
+                refused
+                    .iter()
+                    .any(|(id, cum)| *id == c.id && *cum == c.cumulative)
+            })
+        };
+        if !holds(self.active) && !holds(self.next) {
             return;
         }
         if let Some(prior) = self.prior.take() {
-            self.cumulative = prior.cumulative;
+            self.active = prior.active;
+            self.next = prior.next;
             self.rate = prior.rate;
             self.deadline = prior.deadline;
             self.started = prior.started;

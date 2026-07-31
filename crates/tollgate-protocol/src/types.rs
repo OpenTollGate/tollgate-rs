@@ -159,6 +159,25 @@ pub enum ReasonCode {
 }
 
 impl ReasonCode {
+    /// Whether a well-behaved peer could have avoided this by reading the Offer
+    /// it was sent.
+    ///
+    /// Almost every refusal means the peer ignored something we advertised, or
+    /// that a revised Offer crossed its message in flight — either way it is
+    /// worth an operator's attention.
+    ///
+    /// [`Self::RateExceedsCapacity`] is the exception, and it is not a
+    /// borderline one. **The Offer carries no rate ceiling**, deliberately:
+    /// what a node can commit to one peer depends on what it has already
+    /// committed to every other, and changes continuously. There is no static
+    /// number it could honestly advertise. A payer discovers the limit by being
+    /// refused and told what would be taken instead, which is the mechanism
+    /// working rather than failing — so logging it as a fault would train an
+    /// operator to ignore the ones that are.
+    pub fn avoidable_from_offer(self) -> bool {
+        !matches!(self, Self::RateExceedsCapacity)
+    }
+
     /// Map a wire code onto a reason. Unknown codes decode as [`Self::Other`]
     /// rather than failing — a peer running a later version may have reasons we
     /// have never heard of, and the message is still actionable without them.

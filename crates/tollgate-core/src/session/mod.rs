@@ -11,4 +11,4 @@ mod state;
 mod tests;
 
 pub use core::Sessions;
-pub use state::{ChannelSlot, PeerOffer, PeerSession, Phase};
+pub use state::{PeerOffer, PeerSession, Phase};

@@ -22,18 +22,21 @@ pub enum Action {
         msg: Message,
     },
 
-    /// Sign a channel update and send it as a TopUp.
+    /// Sign each channel update and send them as one TopUp.
     ///
     /// Split out from [`Self::Send`] because core holds no keys: it decides
-    /// *what* to sign — the cumulative total and the window — and the host's
-    /// wallet produces the signature over `(channel_id, cumulative)`.
+    /// *what* to sign, and the host's wallet produces a signature over each
+    /// `(channel_id, cumulative)`.
+    ///
+    /// One action, one message: the grant is the combined increase across every
+    /// ratchet here, and splitting it over several messages would leave the
+    /// provider unable to tell one purchase from two.
     SignAndSendTopUp {
         /// The peer we are paying.
         peer: PubKey,
-        /// The channel to ratchet.
-        channel_id: ChannelId,
-        /// New cumulative total. Strictly greater than the last.
-        cumulative: u64,
+        /// Each channel to ratchet, and its new cumulative total. Strictly
+        /// greater than that channel's last.
+        ratchets: Vec<(ChannelId, u64)>,
         /// Window to spend it in, already clamped to the provider's range.
         window_ms: u32,
     },
