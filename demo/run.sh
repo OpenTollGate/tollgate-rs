@@ -29,6 +29,10 @@ DEMAND_START=$((512 * 1024))
 DEMAND_STEP=$((2 * 1024 * 1024))
 DEMAND_STEP_SECONDS=4
 
+# Traffic every peer gets without paying. Keep it small — it is given away, and
+# it is what a peer falls back to whenever its grant lapses.
+MINIMUM_FLOW=4096
+
 cleanup() {
   [[ -n "${GATEWAY_PID:-}" ]] && kill "$GATEWAY_PID" 2>/dev/null || true
   [[ -n "${CLIENT_PID:-}" ]] && kill "$CLIENT_PID" 2>/dev/null || true
@@ -65,7 +69,7 @@ vouchers:
 access:
   minimum_flow:
     enabled: true
-    bytes_per_second: 4096
+    bytes_per_second: $MINIMUM_FLOW
 grants:
   # The payer picks any window in this range, per grant, without negotiating.
   window_range_ms: [200, 30000]
@@ -86,7 +90,7 @@ vouchers:
 access:
   minimum_flow:
     enabled: true
-    bytes_per_second: 4096
+    bytes_per_second: $MINIMUM_FLOW
 buying:
   # A short window keeps the forfeit small when the rate is raised early.
   window_ms: 1000
@@ -140,15 +144,26 @@ cat <<BANNER
   gateway  127.0.0.1:4747   sells access, max_rate $(rate "$GATEWAY_MAX_RATE") to one peer
   client   127.0.0.1:4749   demand starts at $(rate "$DEMAND_START"), +$(rate "$DEMAND_STEP") every ${DEMAND_STEP_SECONDS}s
 
-  shaped = what the gateway will let the client draw, which is what it bought
-  down   = what is actually arriving
+  demand   what the client's traffic generator wants. The only input; everything
+           else below is a consequence of it.
+  shaped   what the gateway will let the client draw. Not negotiated — it is
+           what the client bought, and the gateway derives it from the payment
+           alone. Measured on the gateway.
+  down     bytes actually arriving, counted off the socket. Measured on the
+           client.
+
+  Neither node is ever told the other's number. The client knows what it signed
+  for, the gateway knows what it delivered, and nothing reconciles them —
+  the money moved before the traffic did.
 
 BANNER
 
-printf '%7s  %12s  %12s  %14s\n' "time" "demand" "shaped" "measured down"
-printf '%7s  %12s  %12s  %14s\n' "-------" "------------" "------------" "--------------"
+printf '%7s  %12s  %12s  %14s   %s\n' "time" "demand" "shaped" "down" "note"
+printf '%7s  %12s  %12s  %14s   %s\n' "-------" "------------" "------------" "--------------" "----"
 
 START=$SECONDS
+prev_shaped=""
+
 while (( SECONDS - START < DURATION )); do
   sleep 1
   # The gateway knows what it is shaping the client to; the client knows what
@@ -156,12 +171,31 @@ while (( SECONDS - START < DURATION )); do
   shaped=$(grep -o 'shaped=[0-9]*' "$WORK/gateway.log" | tail -1 | cut -d= -f2 || true)
   demand=$(grep -o 'demand=[0-9]*' "$WORK/client.log" | tail -1 | cut -d= -f2 || true)
   down=$(grep -o 'down=[0-9]*' "$WORK/client.log" | tail -1 | cut -d= -f2 || true)
+  : "${shaped:=0}" "${demand:=0}" "${down:=0}"
 
-  capped=""
-  [[ -n "$shaped" && "$shaped" == "$GATEWAY_MAX_RATE" ]] && capped="  <- refused, re-bought at the gateway's limit"
+  # Annotate only the rows that are doing something, so the ones that are stand
+  # out instead of every row carrying text.
+  note=""
+  if (( shaped <= MINIMUM_FLOW )); then
+    note="nothing bought yet — minimum flow allowance only"
+  elif (( shaped == GATEWAY_MAX_RATE )) && [[ "$shaped" != "$prev_shaped" ]]; then
+    note="asked above the gateway's cap: refused, re-bought at the cap"
+  elif [[ -n "$prev_shaped" ]] && (( prev_shaped <= MINIMUM_FLOW && shaped > prev_shaped )); then
+    note="first purchase — no grant in force, so nothing forfeited"
+  elif [[ -n "$prev_shaped" ]] && (( shaped > prev_shaped )); then
+    note="demand rose: bought more, forfeiting the old grant's remainder"
+  elif [[ -n "$prev_shaped" ]] && (( shaped < prev_shaped )); then
+    note="demand fell: renewed lower once the old grant lapsed"
+  elif (( shaped == GATEWAY_MAX_RATE )); then
+    note="at the gateway's cap"
+  elif (( down * 10 < shaped * 9 )); then
+    note="shaper still filling after the raise"
+  fi
 
-  printf '%6ss  %12s  %12s  %14s%s\n' \
-    "$((SECONDS - START))" "$(rate "$demand")" "$(rate "$shaped")" "$(rate "$down")" "$capped"
+  printf '%6ss  %12s  %12s  %14s   %s\n' \
+    "$((SECONDS - START))" "$(rate "$demand")" "$(rate "$shaped")" "$(rate "$down")" "$note"
+
+  prev_shaped="$shaped"
 done
 
 echo

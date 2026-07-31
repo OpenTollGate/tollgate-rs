@@ -12,29 +12,46 @@ it. The client's traffic generator ramps, and everything else follows from that.
 ## What you are looking at
 
 ```
-   time        demand        shaped   measured down
-     2s         0 B/s     4.0 KiB/s       4.0 KiB/s
-     4s    2.50 MiB/s    3.12 MiB/s      2.81 MiB/s
-     8s    4.50 MiB/s    5.62 MiB/s      5.38 MiB/s
-    13s    6.50 MiB/s    8.12 MiB/s      7.12 MiB/s
-    17s    8.50 MiB/s   10.62 MiB/s      9.12 MiB/s
-    21s   10.50 MiB/s   12.00 MiB/s     11.72 MiB/s  <- refused, re-bought at the gateway's limit
+   time        demand        shaped            down   note
+     3s    2.50 MiB/s     4.0 KiB/s       4.0 KiB/s   nothing bought yet — minimum flow allowance only
+     4s    2.50 MiB/s    3.12 MiB/s      2.81 MiB/s   first purchase — no grant in force, so nothing forfeited
+     8s    4.50 MiB/s    5.62 MiB/s      5.38 MiB/s   demand rose: bought more, forfeiting the old grant's remainder
+    12s    6.50 MiB/s    8.12 MiB/s      6.88 MiB/s   demand rose: bought more, forfeiting the old grant's remainder
+    21s   10.50 MiB/s   12.00 MiB/s     11.59 MiB/s   asked above the gateway's cap: refused, re-bought at the cap
+    22s   10.50 MiB/s   12.00 MiB/s     12.00 MiB/s   at the gateway's cap
 ```
 
-Rates are shown in binary units because the unit being sold is the byte and a
-grant decomposes into power-of-two proofs — 12 MiB/s is a handful of proofs
-where 12 MB/s is a number with bits set all the way down.
+### The columns
 
-- **demand** — what the client's traffic generator wants. The only input.
-- **shaped** — what the gateway will let the client draw. This is not a
-  negotiated number: it is what the client *bought*, and the gateway derives it
-  from the payment alone.
-- **measured down** — bytes actually arriving at the client, counted off a real
-  socket.
+| Column | What it is | Measured on |
+|---|---|---|
+| **demand** | What the client's traffic generator wants. The only input — everything else is a consequence of it. | client |
+| **shaped** | What the gateway will let the client draw. Not negotiated: it is what the client *bought*, and the gateway derives it from the payment alone. | gateway |
+| **down** | Bytes actually arriving, counted off the socket. | client |
+| **note** | Only on rows where something happens, so those stand out. | — |
 
-The two nodes never exchange either of the other two numbers. The client knows
-what it signed for; the gateway knows what it delivered. Neither has to convince
-the other, because the money moved before the traffic did.
+**Neither node is ever told the other's number.** The client knows what it
+signed for; the gateway knows what it delivered. Nothing reconciles them,
+because the money moved before the traffic did.
+
+Rates are in binary units because the unit being sold is the byte and a grant
+decomposes into power-of-two proofs — 12 MiB/s is a handful of proofs where
+12 MB/s is a number with bits set all the way down.
+
+### The notes
+
+| Note | Meaning |
+|---|---|
+| `nothing bought yet — minimum flow allowance only` | No grant exists. The client is on the free trickle that lets it reach a mint at all. |
+| `first purchase — no grant in force, so nothing forfeited` | The one purchase that costs no remainder. |
+| `demand rose: bought more, forfeiting the old grant's remainder` | A rate raised mid-window. Whatever was left of the previous grant burns at that moment. |
+| `demand fell: renewed lower once the old grant lapsed` | Buying cheaper mid-window would still forfeit the expensive grant, so the client waits for the deadline instead. |
+| `asked above the gateway's cap: refused, re-bought at the cap` | `TopUpReject` carrying a rate the gateway *would* take, answered inside one round trip. |
+| `at the gateway's cap` | Standing state: the client wants more than `max_rate` and is held there. |
+| `shaper still filling after the raise` | The token bucket has not yet accrued a full second at the new rate. |
+
+A blank note is a steady row: the grant in force covers demand, and the client
+is renewing at the same rate as its window rolls over.
 
 ## The four things worth pointing at
 
