@@ -22,4 +22,4 @@ mod state;
 mod tests;
 
 pub use core::{Demand, poll};
-pub use state::{Buyer, BuyerPolicy, Prior, Purchase, Trigger, WindowBounds};
+pub use state::{Buyer, BuyerPolicy, ChannelBuyer, Leg, Purchase, Trigger, WindowBounds};

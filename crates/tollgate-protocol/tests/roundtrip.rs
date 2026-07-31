@@ -43,14 +43,34 @@ fn all_messages() -> Vec<Message> {
             channel_id: channel(3),
         }),
         Message::TopUp(TopUp {
-            channel_id: channel(3),
-            cumulative: 5_242_880,
+            updates: vec![ChannelUpdate {
+                channel_id: channel(3),
+                cumulative: 5_242_880,
+                signature: signature(4),
+            }],
             window_ms: 5_000,
-            signature: signature(4),
+        }),
+        // A purchase spanning a channel that is filling up and its replacement.
+        Message::TopUp(TopUp {
+            updates: vec![
+                ChannelUpdate {
+                    channel_id: channel(3),
+                    cumulative: 8_000_000,
+                    signature: signature(4),
+                },
+                ChannelUpdate {
+                    channel_id: channel(5),
+                    cumulative: 1_500_000,
+                    signature: signature(7),
+                },
+            ],
+            window_ms: 5_000,
         }),
         Message::TopUpReject(TopUpReject {
-            channel_id: channel(3),
-            cumulative_rejected: 9_000_000,
+            refused: vec![RefusedUpdate {
+                channel_id: channel(3),
+                cumulative: 9_000_000,
+            }],
             max_rate_available: 1_000_000,
             reason: ReasonCode::RateExceedsCapacity,
         }),
@@ -121,10 +141,12 @@ fn messages_stay_within_their_size_estimates() {
     assert!(buf.len() <= 60, "announce grew to {} bytes", buf.len());
 
     let topup = Message::TopUp(TopUp {
-        channel_id: channel(3),
-        cumulative: u64::MAX,
+        updates: vec![ChannelUpdate {
+            channel_id: channel(3),
+            cumulative: u64::MAX,
+            signature: signature(4),
+        }],
         window_ms: 5_000,
-        signature: signature(4),
     });
     buf.clear();
     encode(&topup, &mut buf).expect("encode");
@@ -296,4 +318,59 @@ fn only_a_rate_refusal_is_unavoidable_from_the_offer() {
             "{reason:?} should be worth an operator's attention"
         );
     }
+}
+
+#[test]
+fn a_topup_with_no_updates_is_malformed() {
+    // A purchase that ratchets nothing buys nothing.
+    let msg = Message::TopUp(TopUp {
+        updates: vec![],
+        window_ms: 1_000,
+    });
+    let mut buf = Vec::new();
+    encode(&msg, &mut buf).expect("encode");
+    assert_eq!(decode(&buf), Err(Error::NoChannelUpdates));
+}
+
+#[test]
+fn a_topup_with_too_many_updates_is_refused_before_allocating() {
+    // Each update is a signature verification and `min_window_ms` only bounds
+    // how often a TopUp arrives, so an unbounded array would multiply straight
+    // through that budget.
+    let over = MAX_CHANNEL_UPDATES + 1;
+    let msg = Message::TopUp(TopUp {
+        updates: (0..over)
+            .map(|i| ChannelUpdate {
+                channel_id: channel(i as u8),
+                cumulative: 1_000 + i as u64,
+                signature: signature(1),
+            })
+            .collect(),
+        window_ms: 1_000,
+    });
+    let mut buf = Vec::new();
+    encode(&msg, &mut buf).expect("encode");
+    assert_eq!(decode(&buf), Err(Error::TooManyChannelUpdates(over)));
+}
+
+#[test]
+fn a_full_length_topup_still_fits_a_frame_comfortably() {
+    // The cap has to be affordable on the wire as well as in verification time.
+    let msg = Message::TopUp(TopUp {
+        updates: (0..MAX_CHANNEL_UPDATES)
+            .map(|i| ChannelUpdate {
+                channel_id: channel(i as u8),
+                cumulative: u64::MAX,
+                signature: signature(1),
+            })
+            .collect(),
+        window_ms: 30_000,
+    });
+    let mut buf = Vec::new();
+    encode_frame(&msg, &mut buf).expect("encode");
+    assert!(
+        buf.len() < 1_024,
+        "a full top-up reached {} bytes",
+        buf.len()
+    );
 }

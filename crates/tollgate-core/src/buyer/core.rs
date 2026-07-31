@@ -15,7 +15,7 @@
 //!
 //! Anything else holds.
 
-use crate::buyer::state::{Buyer, BuyerPolicy, Purchase, Trigger, WindowBounds};
+use crate::buyer::state::{Buyer, BuyerPolicy, Leg, Purchase, Trigger, WindowBounds};
 use crate::grant::grant_for;
 use crate::time::Millis;
 
@@ -34,10 +34,12 @@ pub struct Demand {
 
 /// Decide whether to buy.
 ///
-/// Returns `None` to hold. The caller sends the returned purchase as a TopUp
-/// and then calls [`Buyer::record`] — the two are separate so a host that fails
-/// to send does not advance its own ratchet past what the provider saw.
+/// Returns `None` to hold. The caller sends a TopUp per leg and then calls
+/// [`Buyer::record`] — the two are separate so a host that fails to send does
+/// not advance its own ratchet past what the provider saw.
 pub fn poll(buyer: &Buyer, policy: &BuyerPolicy, demand: Demand, now: Millis) -> Option<Purchase> {
+    let active = buyer.active()?;
+
     let target = target_rate(buyer, policy, demand.observed_rate);
     let window_ms = demand.bounds.clamp(policy.window_ms);
 
@@ -55,21 +57,78 @@ pub fn poll(buyer: &Buyer, policy: &BuyerPolicy, demand: Demand, now: Millis) ->
         return None;
     };
 
-    // Buying nothing is not a purchase. This also stops an idle link with
-    // `min_rate: 0` from emitting a TopUp every renewal interval forever.
-    if target == 0 {
+    let wanted = grant_for(target, window_ms);
+
+    // A grant that overflows the channel in use is signed across both: the
+    // first is topped to exactly its capacity, and the remainder starts the
+    // replacement. A cumulative total only means anything against the channel
+    // it was signed on, so this cannot be one message.
+    let (first, second, grant) = if wanted <= active.headroom() {
+        (
+            Leg {
+                channel_id: active.id,
+                cumulative: active.cumulative + wanted,
+            },
+            None,
+            wanted,
+        )
+    } else if let Some(next) = buyer.next_channel() {
+        let overflow = wanted - active.headroom();
+        // The replacement is the same size as the one it replaces, so this only
+        // binds if a single grant is larger than a whole channel — in which
+        // case buying what fits is the best available answer.
+        let overflow = overflow.min(next.headroom());
+        (
+            Leg {
+                channel_id: active.id,
+                cumulative: active.capacity,
+            },
+            Some(Leg {
+                channel_id: next.id,
+                cumulative: next.cumulative + overflow,
+            }),
+            active.headroom() + overflow,
+        )
+    } else {
+        // No replacement confirmed yet. Buy what the channel in use will still
+        // take; the rollover that is already under way opens the rest.
+        (
+            Leg {
+                channel_id: active.id,
+                cumulative: active.capacity,
+            },
+            None,
+            active.headroom(),
+        )
+    };
+
+    // Buying nothing is not a purchase. This covers an idle link with
+    // `min_rate: 0`, and a channel with no headroom left and no replacement.
+    if grant == 0 {
         return None;
     }
 
-    let grant = grant_for(target, window_ms);
     Some(Purchase {
-        cumulative: buyer.cumulative.saturating_add(grant),
+        first,
+        second,
         window_ms,
-        rate: target,
+        // What was actually bought may be less than the target asked for, when
+        // a channel ran out mid-purchase. Report the rate this grant really
+        // buys, since that is what the provider will shape to.
+        rate: rate_of(grant, window_ms, target, wanted),
         grant,
         forfeited: buyer.unspent_at(now),
         trigger,
     })
+}
+
+/// The rate a grant buys, given that a channel boundary may have truncated it.
+fn rate_of(grant: u64, window_ms: u32, target: u64, wanted: u64) -> u64 {
+    if grant == wanted {
+        target
+    } else {
+        crate::grant::rate_from(grant, window_ms)
+    }
 }
 
 /// The rate we would like, given demand, headroom, and any ceiling the provider

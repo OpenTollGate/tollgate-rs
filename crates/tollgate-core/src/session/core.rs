@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use tollgate_protocol::{
     Accept, Announce, ChannelReady, Disconnect, Message, Offer, PROTOCOL_VERSION, PubKey,
-    ReasonCode, Reject, RolloverInit, RolloverReady, TopUpReject,
+    ReasonCode, RefusedUpdate, Reject, RolloverInit, RolloverReady, TopUpReject,
 };
 
 use crate::access::AccessLevel;
@@ -21,7 +21,7 @@ use crate::buyer::{self, BuyerPolicy, Demand, WindowBounds};
 use crate::config::{NodePolicy, PeerPolicy};
 use crate::event::Event;
 use crate::grant::{self, Admission, Verdict};
-use crate::session::state::{ChannelSlot, PeerOffer, PeerSession, Phase};
+use crate::session::state::{PeerOffer, PeerSession, Phase};
 use crate::time::Millis;
 
 /// All peers, and the policy they are served under.
@@ -194,18 +194,19 @@ impl Sessions {
                 // The channel we pay them on is live. Nothing to confirm back —
                 // they sent this because they verified our funding.
                 if let Some(session) = self.peers.get_mut(&peer) {
-                    if let Some(slot) = session.outgoing.as_mut() {
-                        slot.id = m.channel_id;
-                    }
+                    session.buyer.confirmed(m.channel_id);
                 }
                 self.poll_buyer(peer, now, out);
             }
             Message::TopUp(m) => self.on_topup(peer, m, now, out),
             Message::TopUpReject(m) => {
                 if let Some(session) = self.peers.get_mut(&peer) {
-                    session
-                        .buyer
-                        .record_reject(m.cumulative_rejected, m.max_rate_available);
+                    let refused: Vec<(tollgate_protocol::ChannelId, u64)> = m
+                        .refused
+                        .iter()
+                        .map(|r| (r.channel_id, r.cumulative))
+                        .collect();
+                    session.buyer.record_reject(&refused, m.max_rate_available);
                 }
                 self.poll_buyer(peer, now, out);
             }
@@ -218,12 +219,13 @@ impl Sessions {
                 });
             }
             Message::RolloverReady(m) => {
+                // The replacement is open. It waits behind the channel in use
+                // rather than displacing it: the old one drains to its capacity
+                // first, and a purchase that overflows is signed across both.
                 if let Some(session) = self.peers.get_mut(&peer) {
-                    if let Some(slot) = session.outgoing.as_mut() {
-                        slot.id = m.new_channel_id;
-                        slot.rolling_over = false;
-                    }
+                    session.buyer.confirmed(m.new_channel_id);
                 }
+                self.poll_buyer(peer, now, out);
             }
             Message::ChannelClose(m) => {
                 out.push(Action::Send {
@@ -345,23 +347,20 @@ impl Sessions {
             return;
         };
 
-        let rolling = session.outgoing.is_some();
-        let old = session.outgoing.map(|s| s.id);
-        session.outgoing = Some(ChannelSlot {
-            id: channel_id,
-            capacity,
-            rolling_over: rolling,
-        });
+        // Nothing is signed on it until the peer confirms it verified the
+        // funding — a grant signed here could otherwise be against a channel
+        // that never opens.
+        let replacing = session.buyer.active().map(|c| c.id);
+        session.buyer.funded(channel_id, capacity);
 
         out.push(Action::Send {
             peer,
-            msg: if let (true, Some(old_channel_id)) = (rolling, old) {
-                Message::RolloverInit(RolloverInit {
+            msg: match replacing {
+                Some(old_channel_id) => Message::RolloverInit(RolloverInit {
                     old_channel_id,
                     funding,
-                })
-            } else {
-                Message::Accept(Accept { funding })
+                }),
+                None => Message::Accept(Accept { funding }),
             },
         });
         self.refresh(peer, now, out);
@@ -393,12 +392,16 @@ impl Sessions {
             return;
         };
 
-        let replacing = session.incoming.map(|s| s.id);
-        session.incoming = Some(ChannelSlot {
-            id: channel_id,
-            capacity,
-            rolling_over: false,
-        });
+        // Recognised alongside whatever is already open rather than replacing
+        // it: the peer drains the old one to its capacity, and a purchase that
+        // spans the boundary ratchets both in one message.
+        let replacing = session
+            .grant
+            .channels()
+            .iter()
+            .find(|c| c.id != channel_id)
+            .map(|c| c.id);
+        session.grant.open_channel(channel_id, capacity);
         session.phase = Phase::Established;
 
         // The party that verified the funding is the party that will be paid on
@@ -437,32 +440,49 @@ impl Sessions {
         let Some(session) = self.peers.get_mut(&peer) else {
             return;
         };
-        let capacity = session.incoming.map(|s| s.capacity).unwrap_or(0);
 
         let verdict = grant::evaluate_topup(
             &session.grant,
             Admission {
                 policy: &self.node.grants,
                 committed_elsewhere,
-                channel_capacity: capacity,
             },
-            m.cumulative,
+            &m.updates,
             m.window_ms,
         );
 
         match verdict {
-            Verdict::Accept { .. } => {
-                session.grant.apply(m.cumulative, m.window_ms, now);
+            Verdict::Accept {
+                ratchets, grant, ..
+            } => {
+                session.grant.apply(&ratchets, grant, m.window_ms, now);
+
+                // A channel drained to its capacity carries nothing further.
+                // Settling it is what keeps our spent-proof set bounded, which
+                // is the reason channels exist at all.
+                let done: Vec<_> = session.grant.exhausted_channels().collect();
+                for channel_id in done {
+                    session.grant.close_channel(channel_id);
+                    out.push(Action::SettleChannel { peer, channel_id });
+                }
             }
             Verdict::Reject {
                 reason,
                 max_rate_available,
             } => {
+                // Echoed in full: a purchase may span several channels, so one
+                // channel id no longer identifies which one was refused.
                 out.push(Action::Send {
                     peer,
                     msg: Message::TopUpReject(TopUpReject {
-                        channel_id: m.channel_id,
-                        cumulative_rejected: m.cumulative,
+                        refused: m
+                            .updates
+                            .iter()
+                            .map(|u| RefusedUpdate {
+                                channel_id: u.channel_id,
+                                cumulative: u.cumulative,
+                            })
+                            .collect(),
                         max_rate_available,
                         reason,
                     }),
@@ -470,7 +490,6 @@ impl Sessions {
             }
         }
         self.refresh(peer, now, out);
-        self.poll_rollover(peer, now, out);
     }
 
     /// Rate committed to every peer but this one, for admission control.
@@ -483,13 +502,18 @@ impl Sessions {
             .fold(0u64, u64::saturating_add)
     }
 
-    /// Ask the buyer whether to top up, and turn a decision into a signing
-    /// request. Core holds no keys, so the host signs and sends.
+    /// Ask the buyer whether to top up, and turn a decision into signing
+    /// requests. Core holds no keys, so the host signs and sends.
+    ///
+    /// A purchase that overflows the channel in use produces two: a cumulative
+    /// total only means anything against the channel it was signed on, so the
+    /// old channel is topped to exactly its capacity and the remainder starts
+    /// the replacement.
     fn poll_buyer(&mut self, peer: PubKey, now: Millis, out: &mut Vec<Action>) {
         let Some(session) = self.peers.get_mut(&peer) else {
             return;
         };
-        let (Some(slot), Some(offer)) = (session.outgoing, session.offer.as_ref()) else {
+        let Some(offer) = session.offer.as_ref() else {
             return;
         };
 
@@ -501,19 +525,28 @@ impl Sessions {
             return;
         };
 
-        // Do not sign past what the channel can carry — it could not be settled.
-        // The rollover poll below opens the replacement.
-        if purchase.cumulative > slot.capacity {
-            return;
-        }
+        let retired = session.buyer.record(purchase, now);
 
-        session.buyer.record(purchase, now);
+        // One message, however many channels it draws from: the grant is their
+        // combined increase, and splitting it would leave the provider unable
+        // to tell one purchase from two.
         out.push(Action::SignAndSendTopUp {
             peer,
-            channel_id: slot.id,
-            cumulative: purchase.cumulative,
+            ratchets: [Some(purchase.first), purchase.second]
+                .into_iter()
+                .flatten()
+                .map(|leg| (leg.channel_id, leg.cumulative))
+                .collect(),
             window_ms: purchase.window_ms,
         });
+
+        // A channel drained to its capacity has nothing left to carry, and its
+        // replacement is already holding the overflow. Settling it now is what
+        // keeps the issuer's spent-proof set bounded, which is the whole reason
+        // channels exist.
+        if let Some(channel_id) = retired {
+            out.push(Action::SettleChannel { peer, channel_id });
+        }
     }
 
     /// Open a replacement channel when the one we fund approaches exhaustion.
@@ -524,8 +557,10 @@ impl Sessions {
         let Some(session) = self.peers.get(&peer) else {
             return;
         };
-        let threshold = self.node.rollover_threshold_pct;
-        if !session.needs_rollover(session.outgoing, session.buyer.cumulative(), threshold) {
+        if !session
+            .buyer
+            .needs_rollover(self.node.rollover_threshold_pct)
+        {
             return;
         }
         let Some(offer) = session.offer.as_ref() else {
@@ -535,11 +570,8 @@ impl Sessions {
             return;
         };
 
-        if let Some(session) = self.peers.get_mut(&peer) {
-            if let Some(slot) = session.outgoing.as_mut() {
-                slot.rolling_over = true;
-            }
-        }
+        // `needs_rollover` stays false from here until the peer confirms, so
+        // this cannot fire again and fund a channel on every tick.
         out.push(Action::FundChannel {
             peer,
             mint_url,
@@ -561,18 +593,13 @@ impl Sessions {
 
         let access = if session.policy.no_charge {
             AccessLevel::Free
-        } else if session.incoming.is_some() {
-            // Exhausted channel with no rollover under way: blocked, but still
-            // able to negotiate, so it recovers without reconnecting.
-            let exhausted = session
-                .incoming
-                .map(|s| session.grant.authorized() >= s.capacity && !s.rolling_over)
-                .unwrap_or(false);
-            if exhausted {
-                AccessLevel::Suspended
-            } else {
-                AccessLevel::Active
-            }
+        } else if !session.grant.channels().is_empty() {
+            AccessLevel::Active
+        } else if session.grant.started() {
+            // Every channel the peer paid us on has been drained and settled,
+            // and nothing has replaced them. Delivery stops, but the peer can
+            // still negotiate, so it recovers without reconnecting.
+            AccessLevel::Suspended
         } else {
             AccessLevel::None
         };

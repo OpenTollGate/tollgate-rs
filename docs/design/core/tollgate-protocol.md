@@ -340,26 +340,51 @@ message in the protocol.
 ```cbor
 {
   0: 0x04,                         // type: TopUp
-  1: <channel_id>,                 // bytes(32) — the payer's Spilman channel
-  2: <cumulative>,                 // u64 — total units authorized on this channel, ever
-  3: <window_ms>,                  // u32 — spend the grant within this long, from receipt
-  4: <signature>,                  // bytes(64) — Schnorr over (channel_id, cumulative)
+  1: [                             // array — one entry per channel, 1..=8
+       [<channel_id>,              //   bytes(32) — a Spilman channel of the payer's
+        <cumulative>,              //   u64 — total units authorized on THAT channel, ever
+        <signature>],              //   bytes(64) — Schnorr over (channel_id, cumulative)
+       ...
+     ],
+  2: <window_ms>,                  // u32 — spend the grant within this long, from receipt
 }
 ```
 
-On receipt:
+**The grant is the combined increase across every update.** One message may
+ratchet several channels, which is what lets a single purchase span a channel
+that is filling up and its replacement, and what lets a payer holding vouchers
+from more than one accepted mint spend from several at once. The unit is the
+same whoever issued it; only the issuer differs.
+
+The array is capped at **8** entries. Each one costs the provider a signature
+verification, and `min_window_ms` bounds only how *often* a TopUp may arrive —
+without a cap the array would multiply straight through that budget, which on a
+constrained provider is the binding limit rather than bandwidth.
+
+On receipt, with `signed[c]` the cumulative total already ratcheted on channel
+`c`:
 
 ```
-verify signature
-require cumulative > authorized
+for each update:
+    verify signature
+    require the channel is one we recognise   // funded, verified, not yet settled
+    require cumulative > signed[channel]
+    require cumulative <= capacity[channel]
+    require the channel appears only once
+
+grant      = Σ (cumulative - signed[channel])   // this purchase alone
 require min_window_ms <= window_ms <= max_window_ms
 
-grant      = cumulative - authorized     // this purchase alone
+for each update: signed[channel] = cumulative
 consumed   = authorized                  // the old grant's remainder burns now
-authorized = cumulative
+authorized = authorized + grant
 deadline   = now + window_ms
 rate       = grant / window_ms           // fixed for the life of the grant
 ```
+
+**Applied atomically.** If any update fails, the whole message is refused —
+applying some of them would leave the grant a different size from the one the
+payer asked for and paid for.
 
 **A grant replaces the previous one, it does not add to it.** Buying again
 before the old window runs out forfeits whatever was left of it. That is the
@@ -410,12 +435,20 @@ would oversubscribe capacity it has already committed to other peers.
 ```cbor
 {
   0: 0x05,                         // type: TopUpReject
-  1: <channel_id>,                 // bytes(32)
-  2: <cumulative_rejected>,        // u64 — the state we are not ratcheting to
-  3: <max_rate_available>,         // u64 — units per second we would accept
-  4: <reason>,                     // u8 — see Reject reason codes
+  1: [                             // array — the states we are not ratcheting to
+       [<channel_id>,              //   bytes(32)
+        <cumulative>],             //   u64
+       ...
+     ],
+  2: <max_rate_available>,         // u64 — units per second we would accept
+  3: <reason>,                     // u8 — see Reject reason codes
 }
 ```
+
+The refused states are echoed in full because a purchase may span several
+channels, so one channel id no longer identifies which purchase was refused.
+Signatures are not echoed — the payer already holds them, and this message is
+rare.
 
 Declining to ratchet is already enough to leave the payer's money untouched —
 an unclaimed Spilman state is worth nothing to the provider. The message exists
@@ -675,6 +708,7 @@ Plus 2 bytes of length prefix per message. Setup messages are one-time. TopUp is
 | First message | Announce (protocol version + pubkey) | Identifies TollGate capability before negotiation |
 | Payment timing | Prepaid: the grant is bought before the traffic it covers | Holding a voucher is already a claim on the issuer, so prepaying adds no trust that was not already there. Postpaying would add provider credit risk on top of it for nothing |
 | Payment message | One — TopUp, which is the Spilman update and the purchase at once | Settlement, metering exchange and balance acknowledgment all collapse into it |
+| Channels per purchase | An array of updates, capped at 8; the grant is their combined increase, applied atomically | A cumulative total only means anything against the channel it was signed on, so spanning a rollover — or spending from several accepted mints — needs several ratchets in one message. Splitting them across messages would leave the provider unable to tell one purchase from two, and a partial application would make the grant size ambiguous |
 | Grant semantics | A grant replaces the previous one; the remainder burns | Selling a rate rather than a stored quantity. Without forfeiture a buyer could accumulate off-peak claims and spend them at peak |
 | Grant state | Cumulative authorized, never decreasing | Satisfies the Spilman ratchet and makes TopUp idempotent, so lost and reordered messages are harmless and no acknowledgment is needed |
 | Reaction latency | One message, no round trip | Fire-and-forget is safe because the state is cumulative, so a payer can raise its rate and use it immediately |

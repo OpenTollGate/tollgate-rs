@@ -16,7 +16,7 @@ use tollgate_core::buyer::BuyerPolicy;
 use tollgate_core::config::{NodePolicy, PeerPolicy};
 use tollgate_core::session::Sessions;
 use tollgate_core::{Action, Event, Millis};
-use tollgate_protocol::{Message, PubKey, TopUp, TopUpReject};
+use tollgate_protocol::{ChannelUpdate, Message, PubKey, TopUp, TopUpReject};
 use tracing::{debug, info, warn};
 
 use crate::adapter::Adapter;
@@ -190,10 +190,16 @@ impl Node {
             Wire::Message { peer, msg } => {
                 // Core trusts what it is handed, so the signature is checked
                 // here — before the message reaches anything that acts on it.
+                // Every update in the purchase, since it is honored or refused
+                // as a whole and one bad signature makes the whole thing
+                // unauthentic.
                 if let Message::TopUp(ref t) = msg
-                    && !verify_update(peer, t.channel_id, t.cumulative, t.signature)
+                    && !t
+                        .updates
+                        .iter()
+                        .all(|u| verify_update(peer, u.channel_id, u.cumulative, u.signature))
                 {
-                    warn!(%peer, "discarding a TopUp whose signature does not verify");
+                    warn!(%peer, "discarding a TopUp whose signatures do not verify");
                     return;
                 }
                 if let Message::TopUpReject(ref r) = msg {
@@ -237,21 +243,21 @@ impl Node {
 
             Action::SignAndSendTopUp {
                 peer,
-                channel_id,
-                cumulative,
+                ratchets,
                 window_ms,
             } => {
-                let signature = self.identity.sign_update(channel_id, cumulative);
-                self.send(
-                    peer,
-                    Message::TopUp(TopUp {
+                // One signature per channel, one message for the purchase: the
+                // grant is their combined increase.
+                let updates = ratchets
+                    .into_iter()
+                    .map(|(channel_id, cumulative)| ChannelUpdate {
                         channel_id,
                         cumulative,
-                        window_ms,
-                        signature,
-                    }),
-                )
-                .await;
+                        signature: self.identity.sign_update(channel_id, cumulative),
+                    })
+                    .collect();
+                self.send(peer, Message::TopUp(TopUp { updates, window_ms }))
+                    .await;
             }
 
             Action::SetAccess { peer, access } => {
@@ -365,17 +371,18 @@ fn log_refusal(peer: PubKey, reject: &TopUpReject, side: Side) {
         Side::Received => "a peer refused our purchase",
     };
 
+    let channels = reject.refused.len();
     if reject.reason.avoidable_from_offer() {
         warn!(
             %peer,
             reason = ?reject.reason,
-            cumulative_rejected = reject.cumulative_rejected,
+            channels,
             "{direction}: this should not happen against an Offer that was read"
         );
     } else {
         info!(
             %peer,
-            cumulative_rejected = reject.cumulative_rejected,
+            channels,
             max_rate_available = reject.max_rate_available,
             "{direction}: rate above what is uncommitted"
         );

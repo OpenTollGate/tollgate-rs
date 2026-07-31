@@ -21,8 +21,8 @@ use core::fmt;
 use minicbor::{Decoder, Encoder};
 
 use crate::message::{
-    Accept, Announce, ChannelClose, ChannelReady, CloseAck, CloseReason, Disconnect, Message,
-    Offer, Reject, RolloverInit, RolloverReady, TopUp, TopUpReject,
+    Accept, Announce, ChannelClose, ChannelReady, ChannelUpdate, CloseAck, CloseReason, Disconnect,
+    Message, Offer, RefusedUpdate, Reject, RolloverInit, RolloverReady, TopUp, TopUpReject,
 };
 use crate::types::{ChannelId, MsgType, PubKey, ReasonCode, Signature};
 
@@ -56,6 +56,14 @@ pub enum Error {
     /// An Offer carried an empty mint list. A node that will take no payment
     /// has nothing to offer, so this is malformed rather than merely unusual.
     EmptyMintList,
+    /// A TopUp carried no channel updates, so it buys nothing.
+    NoChannelUpdates,
+    /// A TopUp carried more updates than [`crate::MAX_CHANNEL_UPDATES`].
+    ///
+    /// Each one is a signature verification, and `min_window_ms` bounds how
+    /// often a payer may send a TopUp — an unbounded array would multiply
+    /// straight through that budget.
+    TooManyChannelUpdates(usize),
 }
 
 impl fmt::Display for Error {
@@ -72,6 +80,12 @@ impl fmt::Display for Error {
             }
             Self::IndefiniteLength => write!(f, "indefinite-length map not accepted"),
             Self::EmptyMintList => write!(f, "offer carried an empty mint list"),
+            Self::NoChannelUpdates => write!(f, "top-up carried no channel updates"),
+            Self::TooManyChannelUpdates(n) => write!(
+                f,
+                "top-up carried {n} channel updates, more than the {} allowed",
+                crate::MAX_CHANNEL_UPDATES
+            ),
         }
     }
 }
@@ -136,20 +150,26 @@ pub fn encode(msg: &Message, out: &mut Vec<u8>) -> Result<(), Error> {
             e.u8(1)?.bytes(&m.channel_id.0)?;
         }
         Message::TopUp(m) => {
-            e.map(5)?;
+            e.map(3)?;
             e.u8(0)?.u8(tag)?;
-            e.u8(1)?.bytes(&m.channel_id.0)?;
-            e.u8(2)?.u64(m.cumulative)?;
-            e.u8(3)?.u32(m.window_ms)?;
-            e.u8(4)?.bytes(&m.signature.0)?;
+            e.u8(1)?.array(m.updates.len() as u64)?;
+            for u in &m.updates {
+                e.array(3)?
+                    .bytes(&u.channel_id.0)?
+                    .u64(u.cumulative)?
+                    .bytes(&u.signature.0)?;
+            }
+            e.u8(2)?.u32(m.window_ms)?;
         }
         Message::TopUpReject(m) => {
-            e.map(5)?;
+            e.map(4)?;
             e.u8(0)?.u8(tag)?;
-            e.u8(1)?.bytes(&m.channel_id.0)?;
-            e.u8(2)?.u64(m.cumulative_rejected)?;
-            e.u8(3)?.u64(m.max_rate_available)?;
-            e.u8(4)?.u8(m.reason as u8)?;
+            e.u8(1)?.array(m.refused.len() as u64)?;
+            for r in &m.refused {
+                e.array(2)?.bytes(&r.channel_id.0)?.u64(r.cumulative)?;
+            }
+            e.u8(2)?.u64(m.max_rate_available)?;
+            e.u8(3)?.u8(m.reason as u8)?;
         }
         Message::RolloverInit(m) => {
             e.map(3)?;
@@ -395,65 +415,108 @@ fn decode_channel_ready(d: &mut Decoder<'_>, pairs: u64) -> Result<ChannelReady,
 }
 
 fn decode_topup(d: &mut Decoder<'_>, pairs: u64) -> Result<TopUp, Error> {
-    let (mut channel_id, mut cumulative, mut window_ms, mut signature) = (None, None, None, None);
+    let mut updates: Option<Vec<ChannelUpdate>> = None;
+    let mut window_ms = None;
+
     for _ in 0..pairs {
         match d.u8()? {
             0 => {
                 d.skip()?;
             }
-            1 => channel_id = Some(ChannelId(fixed::<32>(d, 1)?)),
-            2 => cumulative = Some(d.u64()?),
-            3 => window_ms = Some(d.u32()?),
-            4 => signature = Some(Signature(fixed::<64>(d, 4)?)),
+            1 => {
+                let n = d.array()?.ok_or(Error::IndefiniteLength)?;
+                // Checked before allocating: each update is a signature
+                // verification, so a peer must not be able to name a huge count
+                // and have us reserve for it.
+                if n as usize > crate::MAX_CHANNEL_UPDATES {
+                    return Err(Error::TooManyChannelUpdates(n as usize));
+                }
+                let mut list = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    let fields = d.array()?.ok_or(Error::IndefiniteLength)?;
+                    if fields != 3 {
+                        return Err(Error::BadLength {
+                            key: 1,
+                            expected: 3,
+                            got: fields as usize,
+                        });
+                    }
+                    list.push(ChannelUpdate {
+                        channel_id: ChannelId(fixed::<32>(d, 1)?),
+                        cumulative: d.u64()?,
+                        signature: Signature(fixed::<64>(d, 1)?),
+                    });
+                }
+                updates = Some(list);
+            }
+            2 => window_ms = Some(d.u32()?),
             _ => d.skip()?,
         }
     }
+
+    let updates = match updates {
+        Some(v) => v,
+        None => return missing(MsgType::TopUp, 1),
+    };
+    // A purchase that ratchets nothing buys nothing.
+    if updates.is_empty() {
+        return Err(Error::NoChannelUpdates);
+    }
+
     Ok(TopUp {
-        channel_id: match channel_id {
-            Some(v) => v,
-            None => return missing(MsgType::TopUp, 1),
-        },
-        cumulative: match cumulative {
-            Some(v) => v,
-            None => return missing(MsgType::TopUp, 2),
-        },
+        updates,
         window_ms: match window_ms {
             Some(v) => v,
-            None => return missing(MsgType::TopUp, 3),
-        },
-        signature: match signature {
-            Some(v) => v,
-            None => return missing(MsgType::TopUp, 4),
+            None => return missing(MsgType::TopUp, 2),
         },
     })
 }
 
 fn decode_topup_reject(d: &mut Decoder<'_>, pairs: u64) -> Result<TopUpReject, Error> {
-    let (mut channel_id, mut rejected, mut max_rate, mut reason) = (None, None, None, None);
+    let mut refused: Option<Vec<RefusedUpdate>> = None;
+    let (mut max_rate, mut reason) = (None, None);
+
     for _ in 0..pairs {
         match d.u8()? {
             0 => {
                 d.skip()?;
             }
-            1 => channel_id = Some(ChannelId(fixed::<32>(d, 1)?)),
-            2 => rejected = Some(d.u64()?),
-            3 => max_rate = Some(d.u64()?),
-            4 => reason = Some(ReasonCode::from_u8(d.u8()?)),
+            1 => {
+                let n = d.array()?.ok_or(Error::IndefiniteLength)?;
+                if n as usize > crate::MAX_CHANNEL_UPDATES {
+                    return Err(Error::TooManyChannelUpdates(n as usize));
+                }
+                let mut list = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    let fields = d.array()?.ok_or(Error::IndefiniteLength)?;
+                    if fields != 2 {
+                        return Err(Error::BadLength {
+                            key: 1,
+                            expected: 2,
+                            got: fields as usize,
+                        });
+                    }
+                    list.push(RefusedUpdate {
+                        channel_id: ChannelId(fixed::<32>(d, 1)?),
+                        cumulative: d.u64()?,
+                    });
+                }
+                refused = Some(list);
+            }
+            2 => max_rate = Some(d.u64()?),
+            3 => reason = Some(ReasonCode::from_u8(d.u8()?)),
             _ => d.skip()?,
         }
     }
+
     Ok(TopUpReject {
-        channel_id: match channel_id {
+        refused: match refused {
             Some(v) => v,
             None => return missing(MsgType::TopUpReject, 1),
         },
-        cumulative_rejected: match rejected {
-            Some(v) => v,
-            None => return missing(MsgType::TopUpReject, 2),
-        },
         max_rate_available: match max_rate {
             Some(v) => v,
-            None => return missing(MsgType::TopUpReject, 3),
+            None => return missing(MsgType::TopUpReject, 2),
         },
         reason: reason.unwrap_or(ReasonCode::Other),
     })

@@ -241,3 +241,72 @@ async fn both_directions_are_bought_and_shaped_independently() {
     )
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_channel_that_fills_up_rolls_over_and_buying_continues() {
+    // A channel sized to be exhausted in a few seconds, so the boundary is
+    // crossed several times inside the test. Before per-channel cumulative,
+    // this looped funding a channel per tick and then stopped buying forever.
+    let provider_port = take_port_pair();
+    let client_port = take_port_pair();
+
+    let small_channels = NodePolicy {
+        // ~2 seconds of traffic at the rate the client will buy.
+        initial_channel_capacity: 5_000_000,
+        ..node_policy("https://provider.example/mint")
+    };
+
+    let identity = Identity::generate();
+    let provider = identity.pubkey();
+    let config = NodeConfig {
+        identity,
+        policy: small_channels.clone(),
+        buyer: buyer_policy(),
+        listen: format!("127.0.0.1:{provider_port}")
+            .parse()
+            .expect("address"),
+        peers: vec![],
+    };
+    let node = Node::new(&config, Arc::new(LocalChannels::new()));
+    let provider_adapter = node.adapter();
+    tokio::spawn(async move {
+        let _ = node.run(config).await;
+    });
+
+    let (client, client_adapter) = spawn_node(
+        client_port,
+        "https://client.example/mint",
+        vec![PeerConfig {
+            pubkey: provider,
+            endpoint: format!("127.0.0.1:{provider_port}"),
+            policy: PeerPolicy::default(),
+        }],
+    );
+
+    let probe = Arc::clone(&provider_adapter);
+    wait_for("the peering", Duration::from_secs(10), move || {
+        probe.peers().contains(&client)
+    })
+    .await;
+
+    client_adapter.set_demand(provider, 2_000_000);
+    let probe = Arc::clone(&provider_adapter);
+    wait_for("the first purchase", Duration::from_secs(10), move || {
+        probe.shaping_rate(client) == 2_500_000
+    })
+    .await;
+
+    // Long enough to run through several channels' worth of capacity.
+    let sustained = measure_download(&client_adapter, provider, Duration::from_secs(8)).await;
+    assert!(
+        sustained > 1_500_000,
+        "throughput collapsed after a rollover: {sustained} B/s"
+    );
+
+    // And it is still shaping at what was bought, not at the allowance.
+    assert_eq!(
+        provider_adapter.shaping_rate(client),
+        2_500_000,
+        "the client stopped being able to buy"
+    );
+}

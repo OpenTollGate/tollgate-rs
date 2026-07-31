@@ -8,7 +8,7 @@
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec;
 
-use tollgate_protocol::{ChannelId, Message, PubKey, Signature, TopUp};
+use tollgate_protocol::{ChannelId, ChannelUpdate, Message, PubKey, Signature, TopUp};
 
 use super::*;
 use crate::access::AccessLevel;
@@ -140,8 +140,7 @@ impl Link {
 
                     // The signer: core decides what to sign, we produce bytes.
                     Action::SignAndSendTopUp {
-                        channel_id,
-                        cumulative,
+                        ratchets,
                         window_ms,
                         ..
                     } => queue.push_back((
@@ -149,10 +148,15 @@ impl Link {
                         Event::MessageReceived {
                             peer: from,
                             msg: Message::TopUp(TopUp {
-                                channel_id,
-                                cumulative,
+                                updates: ratchets
+                                    .into_iter()
+                                    .map(|(channel_id, cumulative)| ChannelUpdate {
+                                        channel_id,
+                                        cumulative,
+                                        signature: Signature([0; 64]),
+                                    })
+                                    .collect(),
                                 window_ms,
-                                signature: Signature([0; 64]),
                             }),
                         },
                     )),
@@ -216,8 +220,8 @@ fn both_sides_open_a_channel_and_reach_active() {
 
     let a_to_b = link.a.sessions.peer(&link.b.id).expect("session");
     assert_eq!(a_to_b.phase, Phase::Established);
-    assert!(a_to_b.incoming.is_some(), "B pays A on this one");
-    assert!(a_to_b.outgoing.is_some(), "A pays B on this one");
+    assert!(!a_to_b.grant.channels().is_empty(), "B pays A on this one");
+    assert!(a_to_b.buyer.active().is_some(), "A pays B on this one");
 }
 
 #[test]
@@ -384,7 +388,7 @@ fn traffic_draws_the_grant_down_and_exhausting_it_falls_back_to_the_allowance() 
         },
     );
 
-    let grant = link.b.sessions.peer(&a).expect("session").grant;
+    let grant = &link.b.sessions.peer(&a).expect("session").grant;
     assert_eq!(grant.remaining(), 0);
     assert_eq!(link.b_shapes_a(), 4_096);
 }
@@ -428,7 +432,7 @@ fn a_peers_uploads_draw_its_own_grant_when_the_multiplier_is_set() {
         },
     );
 
-    let grant = link.b.sessions.peer(&a).expect("session").grant;
+    let grant = &link.b.sessions.peer(&a).expect("session").grant;
     assert_eq!(grant.consumed(), upload * 2, "each uploaded unit drew two");
 }
 

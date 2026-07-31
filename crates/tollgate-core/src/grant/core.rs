@@ -1,4 +1,4 @@
-//! Pure admission decisions on an incoming TopUp.
+//! Pure admission decisions on an incoming purchase.
 //!
 //! Snapshot in, verdict out. No clock, no I/O, no state mutated — the caller
 //! applies the verdict to a [`GrantState`] if it says to.
@@ -8,14 +8,16 @@
 //! has already committed across peers and refuse **before** taking the money,
 //! rather than accepting payment and quietly shaping below what was sold.
 
-use tollgate_protocol::ReasonCode;
+use alloc::vec::Vec;
+
+use tollgate_protocol::{ChannelId, ChannelUpdate, ReasonCode};
 
 use crate::config::GrantPolicy;
 use crate::grant::limits;
 use crate::grant::state::GrantState;
 
-/// Everything outside the peer's own grant state that bears on whether a TopUp
-/// can be honored.
+/// Everything outside the peer's own grant state that bears on whether a
+/// purchase can be honored.
 #[derive(Debug, Clone, Copy)]
 pub struct Admission<'a> {
     /// Window bounds and the per-peer rate ceiling.
@@ -23,10 +25,6 @@ pub struct Admission<'a> {
     /// Rate already committed to *other* peers, in units per second. Summed by
     /// the host across its live grants.
     pub committed_elsewhere: u64,
-    /// Units still spendable on the channel this update ratchets. A grant that
-    /// runs past it cannot be settled, so it is refused rather than accepted
-    /// and then dishonored.
-    pub channel_capacity: u64,
 }
 
 impl Admission<'_> {
@@ -40,17 +38,20 @@ impl Admission<'_> {
     }
 }
 
-/// What to do with an incoming TopUp.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What to do with an incoming purchase.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     /// Honor it. Apply to the grant state and start shaping at `rate`.
     Accept {
-        /// Units bought by this purchase alone, `cumulative - authorized`.
+        /// Each channel's new cumulative total, ready to apply.
+        ratchets: Vec<(ChannelId, u64)>,
+        /// Units bought by this purchase alone — the **combined increase**
+        /// across every channel it ratchets.
         grant: u64,
         /// Units per second it buys, fixed for the life of the grant.
         rate: u64,
     },
-    /// Refuse it.
+    /// Refuse it, in full.
     ///
     /// Declining to ratchet is already enough to leave the payer's money
     /// untouched — an unclaimed channel state is worth nothing to us. The
@@ -65,55 +66,78 @@ pub enum Verdict {
     },
 }
 
-/// Decide whether to honor a TopUp.
+/// Decide whether to honor a purchase.
 ///
-/// The checks, in the order the protocol specifies them:
+/// **All or nothing.** Every update must be valid, or the whole message is
+/// refused: applying some of them would leave the grant a different size from
+/// the one the payer asked for and thought it was paying for.
 ///
-/// 1. `cumulative > authorized` — the ratchet only turns forwards. This is also
-///    what makes a replayed or reordered TopUp harmless.
-/// 2. the window falls inside what we advertised.
-/// 3. the rate fits under what we have left to commit.
-/// 4. the new total fits inside the channel's capacity.
+/// The checks:
+///
+/// 1. every update names a channel we recognise. A settled or replaced channel
+///    is not one, which is what stops the recognised set growing with every
+///    rollover a long session performs.
+/// 2. every `cumulative` increases on its own channel. This is the ratchet, and
+///    it is also what makes a replayed or reordered purchase harmless.
+/// 3. no channel is signed past its capacity — it could not be settled.
+/// 4. the window falls inside what we advertised.
+/// 5. the combined rate fits under what we have left to commit.
 pub fn evaluate_topup(
     state: &GrantState,
     admission: Admission<'_>,
-    cumulative: u64,
+    updates: &[ChannelUpdate],
     window_ms: u32,
 ) -> Verdict {
     let available = admission.rate_available();
+    let refuse = |reason| Verdict::Reject {
+        reason,
+        max_rate_available: available,
+    };
 
-    // A cumulative that does not increase is a replay or a reorder. Discarding
-    // it is what lets TopUp be fire-and-forget in the first place.
-    if cumulative <= state.authorized() {
-        return Verdict::Reject {
-            reason: ReasonCode::GrantInvalid,
-            max_rate_available: available,
+    if updates.is_empty() {
+        return refuse(ReasonCode::GrantInvalid);
+    }
+
+    let mut ratchets = Vec::with_capacity(updates.len());
+    let mut grant: u64 = 0;
+
+    for update in updates {
+        let Some(channel) = state.channel(update.channel_id) else {
+            // Either never funded, or already settled. Neither is something we
+            // can ratchet.
+            return refuse(ReasonCode::FundingInvalid);
         };
+
+        // A cumulative that does not increase is a replay or a reorder.
+        // Discarding it is what lets a purchase be fire-and-forget.
+        if update.cumulative <= channel.signed {
+            return refuse(ReasonCode::GrantInvalid);
+        }
+        if update.cumulative > channel.capacity {
+            return refuse(ReasonCode::GrantExceedsChannel);
+        }
+        // The same channel twice would let the second reading of `signed` be
+        // stale and the delta be counted from the wrong base.
+        if ratchets.iter().any(|(id, _)| *id == update.channel_id) {
+            return refuse(ReasonCode::GrantInvalid);
+        }
+
+        grant = grant.saturating_add(update.cumulative - channel.signed);
+        ratchets.push((update.channel_id, update.cumulative));
     }
 
     if !admission.policy.window_acceptable(window_ms) {
-        return Verdict::Reject {
-            reason: ReasonCode::WindowOutOfRange,
-            max_rate_available: available,
-        };
+        return refuse(ReasonCode::WindowOutOfRange);
     }
 
-    let grant = cumulative - state.authorized();
     let rate = limits::rate_from(grant, window_ms);
-
     if rate > available {
-        return Verdict::Reject {
-            reason: ReasonCode::RateExceedsCapacity,
-            max_rate_available: available,
-        };
+        return refuse(ReasonCode::RateExceedsCapacity);
     }
 
-    if cumulative > admission.channel_capacity {
-        return Verdict::Reject {
-            reason: ReasonCode::GrantExceedsChannel,
-            max_rate_available: available,
-        };
+    Verdict::Accept {
+        ratchets,
+        grant,
+        rate,
     }
-
-    Verdict::Accept { grant, rate }
 }

@@ -67,7 +67,7 @@ A peer arrives already holding vouchers for the node it wants service from, or i
 
 2. **Buying capacity**: The payer sends a **TopUp** whenever it wants a rate — a signed channel update carrying a cumulative total and a **window** to spend the new units in. The rate is one divided by the other. A new grant replaces the one in force, so raising the rate mid-window forfeits the remainder; that is what makes the product bandwidth rather than a stored quantity of bytes. Nothing is acknowledged, so a payer can raise its rate and use it in the same breath.
 
-3. **Rollover**: When a channel approaches exhaustion (default: at 80% capacity), a new channel is opened alongside it. The old channel continues to be drained to 100%. Once exhausted, grants seamlessly continue on the new channel. For example: if the old channel has 2 vouchers remaining and the next grant is 5, the old channel exhausts and the remaining 3 are signed onto the new one.
+3. **Rollover**: When a channel approaches exhaustion (default: at 80% capacity), a new channel is opened alongside it. The old channel continues to be drained to 100%. Once exhausted, grants continue on the new channel. A purchase that straddles the boundary is signed against **both in one TopUp** — if the old channel has 2 vouchers remaining and the next grant is 5, the same message ratchets the old channel to its capacity and starts the new one at 3. The grant is the combined increase, so the payer never sees a short window at a channel boundary.
 
 4. **Settlement**: Either party can settle at any time. The receiver submits the latest signed channel state to the mint — its own — and the sender reclaims the remaining change.
 
