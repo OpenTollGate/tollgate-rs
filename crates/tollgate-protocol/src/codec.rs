@@ -21,8 +21,8 @@ use core::fmt;
 use minicbor::{Decoder, Encoder};
 
 use crate::message::{
-    Accept, Announce, ChannelClose, ChannelReady, CloseAck, CloseReason, Disconnect, Message, Offer,
-    Reject, RolloverInit, RolloverReady, TopUp, TopUpReject,
+    Accept, Announce, ChannelClose, ChannelReady, CloseAck, CloseReason, Disconnect, Message,
+    Offer, Reject, RolloverInit, RolloverReady, TopUp, TopUpReject,
 };
 use crate::types::{ChannelId, MsgType, PubKey, ReasonCode, Signature};
 
@@ -119,7 +119,10 @@ pub fn encode(msg: &Message, out: &mut Vec<u8>) -> Result<(), Error> {
                 e.str(mint)?;
             }
             e.u8(2)?.str(&m.unit)?;
-            e.u8(3)?.array(2)?.u32(m.min_window_ms)?.u32(m.max_window_ms)?;
+            e.u8(3)?
+                .array(2)?
+                .u32(m.min_window_ms)?
+                .u32(m.max_window_ms)?;
             e.u8(4)?.u16(m.received_multiplier)?;
         }
         Message::Accept(m) => {

@@ -138,7 +138,10 @@ fn cumulative_only_ever_increases() {
     {
         now = Millis(step as u64 * 2_000);
         let p = poll(&buyer, &policy(), demand(rate), now).expect("should buy");
-        assert!(p.cumulative > last, "cumulative went backwards at step {step}");
+        assert!(
+            p.cumulative > last,
+            "cumulative went backwards at step {step}"
+        );
         last = p.cumulative;
         buyer.record(p, now);
     }
@@ -184,7 +187,11 @@ fn a_rejection_is_answered_at_the_rate_the_provider_named() {
     let before = buyer.cumulative();
     buyer.record(asked, Millis(400));
     buyer.record_reject(asked.cumulative, 4_000_000);
-    assert_eq!(buyer.cumulative(), before, "the refused purchase was undone");
+    assert_eq!(
+        buyer.cumulative(),
+        before,
+        "the refused purchase was undone"
+    );
 
     let p = poll(&buyer, &policy(), demand(16_000_000), Millis(500)).expect("should re-buy");
     assert_eq!(p.trigger, Trigger::Rebuy);

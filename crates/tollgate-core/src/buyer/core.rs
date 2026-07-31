@@ -37,12 +37,7 @@ pub struct Demand {
 /// Returns `None` to hold. The caller sends the returned purchase as a TopUp
 /// and then calls [`Buyer::record`] — the two are separate so a host that fails
 /// to send does not advance its own ratchet past what the provider saw.
-pub fn poll(
-    buyer: &Buyer,
-    policy: &BuyerPolicy,
-    demand: Demand,
-    now: Millis,
-) -> Option<Purchase> {
+pub fn poll(buyer: &Buyer, policy: &BuyerPolicy, demand: Demand, now: Millis) -> Option<Purchase> {
     let target = target_rate(buyer, policy, demand.observed_rate);
     let window_ms = demand.bounds.clamp(policy.window_ms);
 

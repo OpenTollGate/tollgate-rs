@@ -256,7 +256,11 @@ fn traffic_on_one_side_raises_the_rate_the_other_side_shapes_to() {
         1_250_000,
         "B shapes A to the 1 M/s A wanted plus its 25% headroom"
     );
-    assert_eq!(link.a_shapes_b(), 4_096, "B bought nothing, so B is unchanged");
+    assert_eq!(
+        link.a_shapes_b(),
+        4_096,
+        "B bought nothing, so B is unchanged"
+    );
 }
 
 #[test]
@@ -359,7 +363,13 @@ fn traffic_draws_the_grant_down_and_exhausting_it_falls_back_to_the_allowance() 
             rate: 1_000_000,
         },
     );
-    let bought = link.b.sessions.peer(&a).expect("session").grant.authorized();
+    let bought = link
+        .b
+        .sessions
+        .peer(&a)
+        .expect("session")
+        .grant
+        .authorized();
     assert_eq!(bought, 2_500_000, "1.25 M/s over a 2 s window");
 
     // B delivers the whole grant to A.
@@ -397,7 +407,13 @@ fn a_peers_uploads_draw_its_own_grant_when_the_multiplier_is_set() {
             rate: 1_000_000,
         },
     );
-    let authorized = link.b.sessions.peer(&a).expect("session").grant.authorized();
+    let authorized = link
+        .b
+        .sessions
+        .peer(&a)
+        .expect("session")
+        .grant
+        .authorized();
 
     // A uploads a quarter of its grant's worth. At m = 2 that draws half.
     let upload = authorized / 4;
@@ -446,8 +462,20 @@ fn a_rate_beyond_capacity_is_refused_and_the_payer_re_buys_at_what_was_offered()
     assert_eq!(link.b_shapes_a(), 5_000_000, "re-bought at what B offered");
 
     // A's own ratchet is where B's is: the refused purchase left no trace.
-    let authorized = link.b.sessions.peer(&link.a.id).expect("session").grant.authorized();
-    let signed = link.a.sessions.peer(&b).expect("session").buyer.cumulative();
+    let authorized = link
+        .b
+        .sessions
+        .peer(&link.a.id)
+        .expect("session")
+        .grant
+        .authorized();
+    let signed = link
+        .a
+        .sessions
+        .peer(&b)
+        .expect("session")
+        .buyer
+        .cumulative();
     assert_eq!(signed, authorized, "payer and provider agree on the total");
 }
 

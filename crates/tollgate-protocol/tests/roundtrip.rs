@@ -27,7 +27,10 @@ fn all_messages() -> Vec<Message> {
             capabilities: 0,
         }),
         Message::Offer(Offer {
-            accepted_mints: vec!["https://upstream.example/mint".into(), "https://hub.example/mint".into()],
+            accepted_mints: vec![
+                "https://upstream.example/mint".into(),
+                "https://hub.example/mint".into(),
+            ],
             unit: "byte".into(),
             min_window_ms: 200,
             max_window_ms: 30_000,
@@ -147,7 +150,11 @@ fn frame_reader_reassembles_across_arbitrary_chunk_boundaries() {
     }
 
     assert_eq!(out, msgs);
-    assert_eq!(reader.pending(), 0, "reader held bytes after the last frame");
+    assert_eq!(
+        reader.pending(),
+        0,
+        "reader held bytes after the last frame"
+    );
 }
 
 #[test]
@@ -181,7 +188,10 @@ fn a_corrupt_frame_does_not_desync_the_ones_behind_it() {
     let mut reader = FrameReader::new();
     reader.push(&stream);
     assert!(reader.next_message().expect("a frame").is_err());
-    assert_eq!(reader.next_message().expect("a frame").expect("decode"), good);
+    assert_eq!(
+        reader.next_message().expect("a frame").expect("decode"),
+        good
+    );
 }
 
 #[test]
@@ -208,7 +218,10 @@ fn unknown_fields_are_skipped_rather_than_rejected() {
     let mut e = minicbor::Encoder::new(&mut buf);
     e.map(3).unwrap();
     e.u8(0).unwrap().u8(MsgType::Disconnect as u8).unwrap();
-    e.u8(1).unwrap().u8(ReasonCode::MintNotAccepted as u8).unwrap();
+    e.u8(1)
+        .unwrap()
+        .u8(ReasonCode::MintNotAccepted as u8)
+        .unwrap();
     e.u8(9).unwrap().str("from the future").unwrap();
 
     assert_eq!(
@@ -226,7 +239,10 @@ fn the_type_field_may_arrive_last() {
     let mut buf = Vec::new();
     let mut e = minicbor::Encoder::new(&mut buf);
     e.map(2).unwrap();
-    e.u8(1).unwrap().u8(ReasonCode::VersionUnsupported as u8).unwrap();
+    e.u8(1)
+        .unwrap()
+        .u8(ReasonCode::VersionUnsupported as u8)
+        .unwrap();
     e.u8(0).unwrap().u8(MsgType::Disconnect as u8).unwrap();
 
     assert_eq!(

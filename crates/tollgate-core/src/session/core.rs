@@ -203,7 +203,9 @@ impl Sessions {
             Message::TopUp(m) => self.on_topup(peer, m, now, out),
             Message::TopUpReject(m) => {
                 if let Some(session) = self.peers.get_mut(&peer) {
-                    session.buyer.record_reject(m.cumulative_rejected, m.max_rate_available);
+                    session
+                        .buyer
+                        .record_reject(m.cumulative_rejected, m.max_rate_available);
                 }
                 self.poll_buyer(peer, now, out);
             }

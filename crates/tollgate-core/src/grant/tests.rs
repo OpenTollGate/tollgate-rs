@@ -127,7 +127,10 @@ fn the_grant_expires_at_its_deadline_and_the_payment_is_kept() {
     assert!(state.expire_if_due(Millis(1_000)), "60 k forfeited");
     assert_eq!(state.remaining(), 0);
     assert_eq!(state.authorized(), 100_000, "the payment is kept");
-    assert!(!state.expire_if_due(Millis(2_000)), "nothing left to forfeit");
+    assert!(
+        !state.expire_if_due(Millis(2_000)),
+        "nothing left to forfeit"
+    );
 }
 
 #[test]
@@ -159,7 +162,11 @@ fn an_expired_grant_falls_back_to_the_allowance_not_to_silence() {
 fn a_peer_that_has_never_paid_still_gets_the_allowance() {
     let state = GrantState::new();
     assert_eq!(state.shaping_rate(Millis(0), 4_096), 4_096);
-    assert_eq!(state.shaping_rate(Millis(0), 0), 0, "allowance off by default");
+    assert_eq!(
+        state.shaping_rate(Millis(0), 0),
+        0,
+        "allowance off by default"
+    );
 }
 
 #[test]
@@ -183,7 +190,13 @@ fn the_multiplier_table_holds() {
         delivered: 0,
         received: 1_000,
     };
-    for &(m, drawn) in &[(0u16, 0u64), (1, 1_000), (2, 2_000), (10, 10_000), (11, 11_000)] {
+    for &(m, drawn) in &[
+        (0u16, 0u64),
+        (1, 1_000),
+        (2, 2_000),
+        (10, 10_000),
+        (11, 11_000),
+    ] {
         assert_eq!(upload.weighted(m), drawn, "m = {m}");
     }
 }
@@ -195,7 +208,11 @@ fn a_download_always_draws_exactly_one_per_unit() {
         received: 0,
     };
     for m in [0u16, 1, 2, 11] {
-        assert_eq!(download.weighted(m), 1_000, "the multiplier is not on downloads");
+        assert_eq!(
+            download.weighted(m),
+            1_000,
+            "the multiplier is not on downloads"
+        );
     }
 }
 
@@ -205,7 +222,11 @@ fn the_weighted_draw_down_saturates() {
         delivered: u64::MAX,
         received: u64::MAX,
     };
-    assert_eq!(hostile.weighted(u16::MAX), u64::MAX, "no wrap into free capacity");
+    assert_eq!(
+        hostile.weighted(u16::MAX),
+        u64::MAX,
+        "no wrap into free capacity"
+    );
 }
 
 #[test]

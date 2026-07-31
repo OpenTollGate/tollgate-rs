@@ -29,8 +29,8 @@ mod types;
 pub use codec::{Error, decode, encode};
 pub use frame::{FrameReader, MAX_FRAME_LEN, encode_frame};
 pub use message::{
-    Accept, Announce, ChannelClose, ChannelReady, CloseAck, CloseReason, Disconnect, Message, Offer,
-    Reject, RolloverInit, RolloverReady, TopUp, TopUpReject,
+    Accept, Announce, ChannelClose, ChannelReady, CloseAck, CloseReason, Disconnect, Message,
+    Offer, Reject, RolloverInit, RolloverReady, TopUp, TopUpReject,
 };
 pub use types::{ChannelId, MsgType, PubKey, ReasonCode, Signature};
 
