@@ -4,6 +4,7 @@
 //! until interrupted. `--demand` drives the traffic generator, which is what
 //! makes the buying algorithm do anything visible.
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,6 +56,10 @@ struct Args {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        // Colour only for a human at a terminal. Redirected to a file or a
+        // pipe, escape codes land in the middle of every field and make the
+        // output unreadable to anything that tries to parse it.
+        .with_ansi(std::io::stderr().is_terminal())
         .init();
 
     let args = Args::parse();
