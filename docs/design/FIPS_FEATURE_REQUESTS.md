@@ -20,7 +20,29 @@ This document consolidates all FIPS modifications required for tollgate-rs integ
 
 ---
 
-### 2. Bloom Filter Exclusion
+### 2. Per-Peer Forwarding Rate
+
+**What**: Control-socket command to set a per-peer forwarding rate, in bytes per second, enforced **at the forwarding decision**.
+
+**Behavior**:
+- The rate bounds bytes FIPS forwards **toward** that peer — its download. `0` blocks; an absent value means unlimited.
+- Enforcement is a token bucket whose burst is bounded well under a second. Capacity left unused must **not** accumulate: a peer that idles and then bursts is precisely what the payment model exists to prevent.
+- The setting must be changeable several times per second and take effect immediately. A payer may buy a new rate as often as `min_window_ms` allows — 200 ms by default — and a grant takes effect when it arrives, with no acknowledgement.
+- Orthogonal to the forwarding policy in feature 1. A `local_only` peer still has a rate, because the minimum flow allowance is a rate rather than an exemption.
+
+**Why this cannot be done outside FIPS**: TollGate sells a **rate**, not an allowance. A grant is a quantity paired with a window, and what it buys is one divided by the other ([tollgate-vouchers.md](core/tollgate-vouchers.md)). The binary `local_only`/`full` policy in feature 1 cannot express 3.12 MiB/s, so without this the provider has no way to deliver what it sold.
+
+Shaping outside FIPS only reaches part of the traffic. Each node is a distinct `fd00::/8` address on the TUN interface, so `tc` against that interface can shape traffic **terminating at or originating from** this node. **Transit never traverses the TUN** — it is forwarded inside FIPS — and transit is exactly what a gateway sells. So the enforcement point has to be the forwarding path itself.
+
+**Note on the direction that is not shaped**: a peer's *upload* is not rate-limited by this. TollGate charges uploads through the `received_multiplier`, which draws down that peer's own grant faster rather than capping its ingress. A peer that pushes more simply exhausts its grant sooner and falls to the allowance.
+
+**Complexity**: Medium — the forwarding path exists; this adds a per-peer bucket check before the forward and a control-socket setter.
+
+**Referenced in**: [peering-fips.md](network-peering/peering-fips.md), [tollgate-vouchers.md](core/tollgate-vouchers.md), [tollgate-access-control.md](core/tollgate-access-control.md)
+
+---
+
+### 3. Bloom Filter Exclusion
 
 **What**: Bloom filter inclusion is inferred from the forwarding policy — `local_only` peers are excluded; `full` peers are included. This is a derived behavior of the policy from feature 1, not a separate API.
 
@@ -36,7 +58,7 @@ This document consolidates all FIPS modifications required for tollgate-rs integ
 
 ---
 
-### 3. Per-Peer Traffic Counter Livestream
+### 4. Per-Peer Traffic Counter Livestream
 
 **What**: Control-socket subscription that livestreams per-peer rx/tx byte counts.
 
@@ -50,7 +72,7 @@ This document consolidates all FIPS modifications required for tollgate-rs integ
 
 ---
 
-### 4. Peer Lifecycle Events
+### 5. Peer Lifecycle Events
 
 **What**: Control-socket event stream announcing peer connect / disconnect.
 
@@ -66,7 +88,7 @@ This document consolidates all FIPS modifications required for tollgate-rs integ
 
 ## High Priority
 
-### 5. MMP Metrics Subscription
+### 6. MMP Metrics Subscription
 
 **What**: Control-socket subscription that streams per-peer MMP (Metrics Measurement Protocol) state changes.
 
@@ -88,7 +110,7 @@ This document consolidates all FIPS modifications required for tollgate-rs integ
 
 ## Future
 
-### 6. FSP Port Dispatch for TollGate
+### 7. FSP Port Dispatch for TollGate
 
 **What**: Register a dedicated FSP (FIPS Session Protocol) port for TollGate message delivery.
 
@@ -100,7 +122,7 @@ This document consolidates all FIPS modifications required for tollgate-rs integ
 
 ---
 
-### 7. Payment-Aware Routing
+### 8. Payment-Aware Routing
 
 **What**: Allow the forwarding decision to consider payment status — well-paying peers get more favorable routing decisions.
 
@@ -119,9 +141,16 @@ This document consolidates all FIPS modifications required for tollgate-rs integ
 | # | Feature | Priority | Complexity |
 |---|---------|----------|-----------|
 | 1 | Per-peer forwarding policy (`local_only`/`full`) | Critical | Medium |
-| 2 | Bloom filter exclusion (inferred from policy) | Critical | Medium |
-| 3 | Per-peer traffic counter livestream (control socket) | Critical | Low — data exists |
-| 4 | Peer lifecycle event stream (control socket) | Critical | Low |
-| 5 | MMP metrics streaming subscription | High | Low |
-| 6 | FSP port dispatch | Future | Medium |
-| 7 | Payment-aware routing | Future | High |
+| 2 | **Per-peer forwarding rate (bytes/sec, at the forwarding decision)** | Critical | Medium |
+| 3 | Bloom filter exclusion (inferred from policy) | Critical | Medium |
+| 4 | Per-peer traffic counter livestream (control socket) | Critical | Low — data exists |
+| 5 | Peer lifecycle event stream (control socket) | Critical | Low |
+| 6 | MMP metrics streaming subscription | High | Low |
+| 7 | FSP port dispatch | Future | Medium |
+| 8 | Payment-aware routing | Future | High |
+
+Feature 2 is the one the voucher model added. Features 1 and 3–5 describe a
+binary gate, which was sufficient when payment bought a balance and service
+stopped once it ran out. A grant now buys a **rate**, so the provider needs to
+deliver an arbitrary bytes-per-second figure rather than an on/off decision, and
+nothing in FIPS can express that today.
