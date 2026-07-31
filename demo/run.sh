@@ -20,7 +20,14 @@ BIN="$ROOT/target/release/tollgated"
 
 # What the gateway will sell to any one peer. Set well under where the ramp
 # ends, so the refusal path is on screen rather than only in the tests.
-GATEWAY_MAX_RATE=12000000
+#
+# These are binary-round on purpose. The unit being sold is the byte and a grant
+# decomposes into power-of-two proofs, so 12 MiB/s is a handful of proofs where
+# 12 MB/s is a number with bits set all the way down.
+GATEWAY_MAX_RATE=$((12 * 1024 * 1024))
+DEMAND_START=$((512 * 1024))
+DEMAND_STEP=$((2 * 1024 * 1024))
+DEMAND_STEP_SECONDS=4
 
 cleanup() {
   [[ -n "${GATEWAY_PID:-}" ]] && kill "$GATEWAY_PID" 2>/dev/null || true
@@ -100,7 +107,7 @@ sleep 1
 
 # --demand is the starting offered load; --ramp steps it up every interval.
 RUST_LOG="$LOG_LEVEL" "$BIN" -c "$WORK/client.yaml" \
-  --demand 500000 --ramp 2000000 --ramp-interval 4 \
+  --demand "$DEMAND_START" --ramp "$DEMAND_STEP" --ramp-interval "$DEMAND_STEP_SECONDS" \
   > "$WORK/client.log" 2>&1 &
 CLIENT_PID=$!
 sleep 1
@@ -116,18 +123,30 @@ for node in gateway client; do
   fi
 done
 
+# Binary units throughout, because the unit being sold is the byte and grants
+# decompose into power-of-two proofs: 1 MiB/s is a round number of proofs where
+# 1 MB/s is not.
+rate() {
+  awk -v v="${1:-0}" 'BEGIN {
+    if (v + 0 <= 0)         { printf "0 B/s" }
+    else if (v >= 1048576)  { printf "%.2f MiB/s", v / 1048576 }
+    else if (v >= 1024)     { printf "%.1f KiB/s", v / 1024 }
+    else                    { printf "%d B/s", v }
+  }'
+}
+
 cat <<BANNER
 
-  gateway  127.0.0.1:4747   sells access, max_rate $((GATEWAY_MAX_RATE / 1000000)) MB/s to one peer
-  client   127.0.0.1:4749   demand ramps 0.5 MB/s, +2 MB/s every 4s
+  gateway  127.0.0.1:4747   sells access, max_rate $(rate "$GATEWAY_MAX_RATE") to one peer
+  client   127.0.0.1:4749   demand starts at $(rate "$DEMAND_START"), +$(rate "$DEMAND_STEP") every ${DEMAND_STEP_SECONDS}s
 
   shaped = what the gateway will let the client draw, which is what it bought
   down   = what is actually arriving
 
 BANNER
 
-printf '%7s  %14s  %14s  %14s\n' "time" "demand" "shaped" "measured down"
-printf '%7s  %14s  %14s  %14s\n' "-------" "--------------" "--------------" "--------------"
+printf '%7s  %12s  %12s  %14s\n' "time" "demand" "shaped" "measured down"
+printf '%7s  %12s  %12s  %14s\n' "-------" "------------" "------------" "--------------"
 
 START=$SECONDS
 while (( SECONDS - START < DURATION )); do
@@ -141,8 +160,8 @@ while (( SECONDS - START < DURATION )); do
   capped=""
   [[ -n "$shaped" && "$shaped" == "$GATEWAY_MAX_RATE" ]] && capped="  <- refused, re-bought at the gateway's limit"
 
-  printf '%6ss  %14s  %14s  %14s%s\n' \
-    "$((SECONDS - START))" "${demand:-0}" "${shaped:-0}" "${down:-0}" "$capped"
+  printf '%6ss  %12s  %12s  %14s%s\n' \
+    "$((SECONDS - START))" "$(rate "$demand")" "$(rate "$shaped")" "$(rate "$down")" "$capped"
 done
 
 echo

@@ -12,14 +12,18 @@ it. The client's traffic generator ramps, and everything else follows from that.
 ## What you are looking at
 
 ```
-   time          demand          shaped   measured down
-     2s               0            4096            4080
-     4s         2500000         3125000         3125000
-     8s         4500000         5625000         5375000
-    12s         6500000         8125000         6875000
-    16s         8500000        10625000        10375000
-    20s        10500000        12000000        11587500  <- refused, re-bought at the gateway's limit
+   time        demand        shaped   measured down
+     2s         0 B/s     4.0 KiB/s       4.0 KiB/s
+     4s    2.50 MiB/s    3.12 MiB/s      2.81 MiB/s
+     8s    4.50 MiB/s    5.62 MiB/s      5.38 MiB/s
+    13s    6.50 MiB/s    8.12 MiB/s      7.12 MiB/s
+    17s    8.50 MiB/s   10.62 MiB/s      9.12 MiB/s
+    21s   10.50 MiB/s   12.00 MiB/s     11.72 MiB/s  <- refused, re-bought at the gateway's limit
 ```
+
+Rates are shown in binary units because the unit being sold is the byte and a
+grant decomposes into power-of-two proofs — 12 MiB/s is a handful of proofs
+where 12 MB/s is a number with bits set all the way down.
 
 - **demand** — what the client's traffic generator wants. The only input.
 - **shaped** — what the gateway will let the client draw. This is not a
