@@ -270,3 +270,30 @@ fn a_wrong_length_channel_id_is_rejected() {
         })
     );
 }
+
+#[test]
+fn only_a_rate_refusal_is_unavoidable_from_the_offer() {
+    // The Offer advertises mints, unit and window bounds, so a peer that read it
+    // has no excuse for tripping any of those. It carries no rate ceiling —
+    // there is no honest static number, since what is available depends on what
+    // is committed to every other peer — so being refused on rate is how a payer
+    // discovers the limit rather than a fault.
+    assert!(!ReasonCode::RateExceedsCapacity.avoidable_from_offer());
+
+    for reason in [
+        ReasonCode::MultiplierUnacceptable,
+        ReasonCode::MintNotAccepted,
+        ReasonCode::UnitNotAccepted,
+        ReasonCode::WindowOutOfRange,
+        ReasonCode::FundingInvalid,
+        ReasonCode::GrantInvalid,
+        ReasonCode::GrantExceedsChannel,
+        ReasonCode::VersionUnsupported,
+        ReasonCode::Other,
+    ] {
+        assert!(
+            reason.avoidable_from_offer(),
+            "{reason:?} should be worth an operator's attention"
+        );
+    }
+}

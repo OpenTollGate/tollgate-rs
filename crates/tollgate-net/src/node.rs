@@ -16,7 +16,7 @@ use tollgate_core::buyer::BuyerPolicy;
 use tollgate_core::config::{NodePolicy, PeerPolicy};
 use tollgate_core::session::Sessions;
 use tollgate_core::{Action, Event, Millis};
-use tollgate_protocol::{Message, PubKey, TopUp};
+use tollgate_protocol::{Message, PubKey, TopUp, TopUpReject};
 use tracing::{debug, info, warn};
 
 use crate::adapter::Adapter;
@@ -196,6 +196,9 @@ impl Node {
                     warn!(%peer, "discarding a TopUp whose signature does not verify");
                     return;
                 }
+                if let Message::TopUpReject(ref r) = msg {
+                    log_refusal(peer, r, Side::Received);
+                }
                 self.dispatch(Event::MessageReceived { peer, msg }, done)
                     .await;
             }
@@ -225,7 +228,12 @@ impl Node {
 
     async fn execute(&mut self, action: Action, done: &mpsc::Sender<Event>) {
         match action {
-            Action::Send { peer, msg } => self.send(peer, msg).await,
+            Action::Send { peer, msg } => {
+                if let Message::TopUpReject(ref r) = msg {
+                    log_refusal(peer, r, Side::Sent);
+                }
+                self.send(peer, msg).await
+            }
 
             Action::SignAndSendTopUp {
                 peer,
@@ -325,6 +333,52 @@ impl Node {
         if link.try_send(msg).is_err() {
             warn!(%peer, "outbox full, dropping a message");
         }
+    }
+}
+
+/// Which end of a refusal we are.
+#[derive(Debug, Clone, Copy)]
+enum Side {
+    /// We refused a peer's purchase.
+    Sent,
+    /// A peer refused ours.
+    Received,
+}
+
+/// Record a refused purchase.
+///
+/// Both ends log it, because it means different things to each: the provider
+/// learns a peer is asking for more than it will give, and the payer learns its
+/// buying is being clipped and by how much. Neither number is otherwise
+/// visible, so without this a peer sits silently pinned at a limit with nothing
+/// to say why.
+///
+/// Severity follows [`ReasonCode::avoidable_from_offer`]. Nearly every reason
+/// means the peer ignored something we advertised, or that a revised Offer
+/// crossed its message in flight — a real fault, and a warning. A rate refusal
+/// is not: the Offer carries no rate ceiling, so being refused and told what
+/// would be accepted is how a payer is *supposed* to find the limit. Logging
+/// that as a fault would bury the ones that are.
+fn log_refusal(peer: PubKey, reject: &TopUpReject, side: Side) {
+    let direction = match side {
+        Side::Sent => "refused a peer's purchase",
+        Side::Received => "a peer refused our purchase",
+    };
+
+    if reject.reason.avoidable_from_offer() {
+        warn!(
+            %peer,
+            reason = ?reject.reason,
+            cumulative_rejected = reject.cumulative_rejected,
+            "{direction}: this should not happen against an Offer that was read"
+        );
+    } else {
+        info!(
+            %peer,
+            cumulative_rejected = reject.cumulative_rejected,
+            max_rate_available = reject.max_rate_available,
+            "{direction}: rate above what is uncommitted"
+        );
     }
 }
 
