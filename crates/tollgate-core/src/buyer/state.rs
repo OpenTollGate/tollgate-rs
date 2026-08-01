@@ -38,6 +38,9 @@ pub struct BuyerPolicy {
     /// Renew this long before the deadline, so the next grant lands before the
     /// current one lapses and the peer drops to the minimum flow allowance.
     pub renew_lead_ms: u32,
+    /// How long to respect a rate ceiling a provider named before testing
+    /// whether capacity has freed up.
+    pub cap_hold_ms: u64,
     /// Window to ask for, clamped to what the provider advertised.
     ///
     /// Short windows keep the forfeit small and reaction quick, at the cost of
@@ -56,6 +59,7 @@ impl Default for BuyerPolicy {
             headroom_pct: 125,
             raise_threshold_pct: 150,
             renew_lead_ms: 500,
+            cap_hold_ms: 10_000,
             window_ms: 2_000,
             min_rate: 0,
             max_rate: u64::MAX,
@@ -187,9 +191,14 @@ pub struct Buyer {
     pub(super) deadline: Millis,
     /// Whether anything has been bought yet.
     pub(super) started: bool,
-    /// Ceiling the provider last told us it would honor, from a TopUpReject.
-    /// Cleared once a purchase under it succeeds.
-    pub(super) capped_at: Option<u64>,
+    /// Ceiling the provider last told us it would honor, from a TopUpReject,
+    /// and when it is worth testing again.
+    ///
+    /// Held for a while rather than forgotten on the next purchase: capacity
+    /// may free up, but re-probing every window means a peer parked above the
+    /// cap is refused once per window forever, which walks straight through the
+    /// signature-verification budget `min_window_ms` exists to protect.
+    pub(super) capped_at: Option<(u64, Millis)>,
     /// State as it stood before the most recent purchase.
     ///
     /// A TopUp is fire-and-forget, so we assume it landed and advance. If a
@@ -246,6 +255,13 @@ impl Buyer {
     /// When the grant in force lapses.
     pub fn deadline(&self) -> Millis {
         self.deadline
+    }
+
+    /// The rate ceiling in force, if a provider named one recently enough.
+    pub(super) fn cap(&self, now: Millis) -> Option<u64> {
+        self.capped_at
+            .filter(|(_, until)| now < *until)
+            .map(|(rate, _)| rate)
     }
 
     /// Record a channel we have funded but the peer has not yet confirmed.
@@ -331,8 +347,9 @@ impl Buyer {
         self.rate = purchase.rate;
         self.deadline = now + purchase.window_ms as u64;
         self.started = true;
-        self.capped_at = None;
 
+        // A purchase at or under the cap does not disprove it, so the cap
+        // stands until it expires on its own.
         self.retire_exhausted()
     }
 
@@ -364,8 +381,14 @@ impl Buyer {
     /// `refused` identifies which purchase was refused, so a stale rejection
     /// for one we have already moved past only records the cap and does not
     /// rewind anything.
-    pub fn record_reject(&mut self, refused: &[(ChannelId, u64)], max_rate: u64) {
-        self.capped_at = Some(max_rate);
+    pub fn record_reject(
+        &mut self,
+        refused: &[(ChannelId, u64)],
+        max_rate: u64,
+        now: Millis,
+        hold_ms: u64,
+    ) {
+        self.capped_at = Some((max_rate, now + hold_ms));
 
         // A purchase is refused in full, so it is enough that any of the totals
         // named is one we currently hold — they were all sent together.

@@ -127,6 +127,17 @@ async fn main() -> Result<()> {
         "mint serving"
     );
 
+    // The market sits on the same listener and gives vouchers away to anyone
+    // who asks. That is deliberate — acquisition is outside the protocol and
+    // this stands in for it — but it is only defensible where the people who
+    // can reach it are people you would give capacity to anyway.
+    if !config.mint_listen.ip().is_loopback() {
+        tracing::warn!(
+            listen = %config.mint_listen,
+            "the market is reachable beyond this host and issues vouchers for free"
+        );
+    }
+
     let channels = Arc::new(
         SpilmanChannels::new(SpilmanConfig {
             mint: Arc::clone(&mint),
@@ -188,5 +199,32 @@ async fn main() -> Result<()> {
         });
     }
 
-    node.run(config).await
+    node.run(config, interrupted()).await
+}
+
+/// Resolves on the first interrupt or termination signal.
+///
+/// SIGTERM as well as Ctrl-C, because a container is stopped with the former
+/// and a node that ignored it would be killed mid-session.
+async fn interrupted() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "no SIGTERM handler; Ctrl-C only");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }

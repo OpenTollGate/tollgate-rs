@@ -79,6 +79,13 @@ pub struct NodePolicy {
     /// theft, so this trades how often a rollover runs against how much is
     /// committed at once.
     pub initial_channel_capacity: u64,
+    /// Drop a peer that has sent nothing at all for this long, in
+    /// milliseconds. Zero disables it.
+    ///
+    /// Only silence, not non-payment: a peer that stops buying simply runs out
+    /// of grant and falls to the minimum flow allowance, which costs nothing to
+    /// hold open and needs no timer.
+    pub stale_timeout_ms: u64,
     /// Percentage of channel capacity at which the funder starts a rollover.
     ///
     /// A percentage rather than a fraction so the comparison stays integer —
@@ -96,6 +103,7 @@ impl Default for NodePolicy {
             minimum_flow: 0,
             grants: GrantPolicy::default(),
             initial_channel_capacity: 0,
+            stale_timeout_ms: 60_000,
             rollover_threshold_pct: 80,
         }
     }

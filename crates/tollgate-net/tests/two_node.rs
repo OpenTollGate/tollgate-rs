@@ -38,6 +38,7 @@ fn node_policy(mint: &str) -> NodePolicy {
             max_rate: None,
         },
         initial_channel_capacity: 10_000_000_000,
+        stale_timeout_ms: 0,
         rollover_threshold_pct: 80,
     }
 }
@@ -77,7 +78,7 @@ fn spawn_node(port: u16, mint: &str, peers: Vec<PeerConfig>) -> (PubKey, Arc<Ada
     );
     let adapter = node.adapter();
     tokio::spawn(async move {
-        if let Err(e) = node.run(config).await {
+        if let Err(e) = node.run(config, std::future::pending()).await {
             eprintln!("node stopped: {e}");
         }
     });
@@ -286,7 +287,7 @@ async fn a_channel_that_fills_up_rolls_over_and_buying_continues() {
     );
     let provider_adapter = node.adapter();
     tokio::spawn(async move {
-        let _ = node.run(config).await;
+        let _ = node.run(config, std::future::pending::<()>()).await;
     });
 
     let (client, client_adapter) = spawn_node(

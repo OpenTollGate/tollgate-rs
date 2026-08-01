@@ -128,8 +128,13 @@ impl Node {
         Millis(self.started.elapsed().as_millis() as u64)
     }
 
-    /// Listen, dial, and run until something goes badly wrong.
-    pub async fn run(mut self, config: NodeConfig) -> Result<()> {
+    /// Listen, dial, and run until `shutdown` resolves or something goes badly
+    /// wrong.
+    pub async fn run(
+        mut self,
+        config: NodeConfig,
+        shutdown: impl std::future::Future<Output = ()> + Send,
+    ) -> Result<()> {
         let (wire_tx, mut wire_rx) = mpsc::channel::<Wire>(256);
         // Channel work may block — a real backend talks to a mint — so it runs
         // on a blocking thread and its result comes back here rather than
@@ -160,13 +165,34 @@ impl Node {
         let mut ticker = tokio::time::interval(TICK);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+        let mut shutdown = std::pin::pin!(shutdown);
         loop {
             tokio::select! {
                 Some(event) = wire_rx.recv() => self.on_wire(event, &done_tx).await,
                 Some(event) = done_rx.recv() => self.dispatch(event, &done_tx).await,
                 _ = ticker.tick() => self.on_tick(&done_tx).await,
+                _ = &mut shutdown => break,
             }
         }
+
+        self.wind_down(&done_tx).await;
+        Ok(())
+    }
+
+    /// Say goodbye properly.
+    ///
+    /// A bare FIN reads to a peer as an unclean disconnect and starts the same
+    /// cleanup a timeout would, so sending Disconnect first is the difference
+    /// between the peer tearing our state down on a timer and doing it now.
+    async fn wind_down(&mut self, done: &mpsc::Sender<Event>) {
+        info!("shutting down: telling peers and settling");
+        for action in self.sessions.shutdown() {
+            self.execute(action, done).await;
+        }
+
+        // Give the outbound queues a moment to drain before the sockets go.
+        // Nothing is lost if this expires — the peer falls back to its timeout.
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
     async fn on_wire(&mut self, event: Wire, done: &mpsc::Sender<Event>) {
