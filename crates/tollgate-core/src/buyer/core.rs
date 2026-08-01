@@ -40,12 +40,12 @@ pub struct Demand {
 pub fn poll(buyer: &Buyer, policy: &BuyerPolicy, demand: Demand, now: Millis) -> Option<Purchase> {
     let active = buyer.active()?;
 
-    let target = target_rate(buyer, policy, demand.observed_rate);
+    let target = target_rate(buyer, policy, demand.observed_rate, now);
     let window_ms = demand.bounds.clamp(policy.window_ms);
 
     let trigger = if !buyer.started {
         Trigger::First
-    } else if buyer.capped_at.is_some() && target != buyer.rate {
+    } else if buyer.cap(now).is_some() && target != buyer.rate {
         // The provider named a rate it would take; go straight back with it
         // rather than waiting out a grant we never got.
         Trigger::Rebuy
@@ -133,7 +133,7 @@ fn rate_of(grant: u64, window_ms: u32, target: u64, wanted: u64) -> u64 {
 
 /// The rate we would like, given demand, headroom, and any ceiling the provider
 /// has told us about.
-fn target_rate(buyer: &Buyer, policy: &BuyerPolicy, observed: u64) -> u64 {
+fn target_rate(buyer: &Buyer, policy: &BuyerPolicy, observed: u64, now: Millis) -> u64 {
     let with_headroom = (observed as u128) * (policy.headroom_pct as u128) / 100;
     let mut target = with_headroom.min(u64::MAX as u128) as u64;
 
@@ -141,7 +141,7 @@ fn target_rate(buyer: &Buyer, policy: &BuyerPolicy, observed: u64) -> u64 {
 
     // A provider that refused us has already said what it will take. Asking for
     // more again would just be refused again.
-    if let Some(cap) = buyer.capped_at {
+    if let Some(cap) = buyer.cap(now) {
         target = target.min(cap);
     }
     target

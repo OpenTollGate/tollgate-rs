@@ -27,6 +27,7 @@ fn policy() -> BuyerPolicy {
         headroom_pct: 125,
         raise_threshold_pct: 150,
         renew_lead_ms: 500,
+        cap_hold_ms: 10_000,
         window_ms: 2_000,
         min_rate: 0,
         max_rate: u64::MAX,
@@ -235,6 +236,8 @@ fn a_rejection_is_answered_at_the_rate_the_provider_named() {
     buyer.record_reject(
         &[(asked.first.channel_id, asked.first.cumulative)],
         4_000_000,
+        Millis(400),
+        policy().cap_hold_ms,
     );
     assert_eq!(
         buyer.cumulative(),
@@ -246,9 +249,17 @@ fn a_rejection_is_answered_at_the_rate_the_provider_named() {
     assert_eq!(p.trigger, Trigger::Rebuy);
     assert_eq!(p.rate, 4_000_000, "capped at what the provider will take");
 
-    // Once a purchase lands, the cap is forgotten — capacity may have freed up.
+    // The cap is held rather than forgotten: a purchase under it is not
+    // evidence that it lifted, and re-probing every window would have the
+    // provider refusing us once per window forever.
     buyer.record(p, Millis(500));
-    let p = poll(&buyer, &policy(), demand(16_000_000), Millis(600)).expect("should buy");
+    assert!(
+        poll(&buyer, &policy(), demand(16_000_000), Millis(600)).is_none(),
+        "should not immediately ask above a cap it was just given"
+    );
+
+    // Once it expires, capacity may have freed up, so try again.
+    let p = poll(&buyer, &policy(), demand(16_000_000), Millis(11_000)).expect("should re-probe");
     assert_eq!(p.rate, 20_000_000);
 }
 
@@ -259,7 +270,12 @@ fn a_stale_rejection_does_not_rewind_anything() {
     buyer.record(p, Millis(0));
     let committed = buyer.cumulative();
 
-    buyer.record_reject(&[(channel(1), 42)], 4_000_000);
+    buyer.record_reject(
+        &[(channel(1), 42)],
+        4_000_000,
+        Millis(0),
+        policy().cap_hold_ms,
+    );
     assert_eq!(buyer.cumulative(), committed, "not a total we ever sent");
 }
 

@@ -69,6 +69,36 @@ impl Sessions {
         &self.node
     }
 
+    /// Wind the node down: tell every peer we are going, and settle what we can.
+    ///
+    /// A bare FIN is treated as an unclean disconnect and triggers the same
+    /// cleanup as a timeout, so saying so first is the difference between a peer
+    /// tearing our state down on a timer and doing it at once.
+    pub fn shutdown(&mut self) -> Vec<Action> {
+        let mut out = Vec::new();
+        for (peer, session) in &mut self.peers {
+            session.phase = Phase::Closing;
+
+            // Every channel a peer paid us on holds value we can still claim.
+            // Settling is the point at which our own spent-proof set stops
+            // growing, so it is worth doing before we go.
+            for channel in session.grant.channels() {
+                out.push(Action::SettleChannel {
+                    peer: *peer,
+                    channel_id: channel.id,
+                });
+            }
+
+            out.push(Action::Send {
+                peer: *peer,
+                msg: Message::Disconnect(Disconnect {
+                    reason: ReasonCode::Other,
+                }),
+            });
+        }
+        out
+    }
+
     /// Feed in something that happened; get back what to do about it.
     pub fn handle(&mut self, event: Event, now: Millis) -> Vec<Action> {
         let mut out = Vec::new();
@@ -98,6 +128,18 @@ impl Sessions {
                     None => return out,
                 };
                 if let Some(session) = self.peers.get_mut(&peer) {
+                    // What we have been pushing at them, as a rate. Read before
+                    // `observe` consumes the reading.
+                    let grew = counters.delta_since(session.meter.totals());
+                    let elapsed = now.saturating_since(session.last_meter_at);
+                    if elapsed > 0 {
+                        session.upload_rate = crate::grant::rate_from(
+                            grew.delivered,
+                            elapsed.min(u32::MAX as u64) as u32,
+                        );
+                        session.last_meter_at = now;
+                    }
+
                     let drawn = session.meter.observe(counters, multiplier);
                     session.grant.draw(drawn);
                 }
@@ -112,6 +154,18 @@ impl Sessions {
             Event::Tick => {
                 let peers: Vec<PubKey> = self.peers.keys().copied().collect();
                 for peer in peers {
+                    // A peer that has said nothing at all for this long is
+                    // gone. Nothing needs to detect a peer that merely stops
+                    // *paying* — its grant lapses and it drops to the minimum
+                    // flow allowance — so this only catches silence.
+                    if self.node.stale_timeout_ms > 0
+                        && let Some(session) = self.peers.get(&peer)
+                        && now.saturating_since(session.last_seen) > self.node.stale_timeout_ms
+                    {
+                        self.peers.remove(&peer);
+                        out.push(Action::DropPeer { peer });
+                        continue;
+                    }
                     if let Some(session) = self.peers.get_mut(&peer) {
                         session.grant.expire_if_due(now);
                     }
@@ -206,7 +260,10 @@ impl Sessions {
                         .iter()
                         .map(|r| (r.channel_id, r.cumulative))
                         .collect();
-                    session.buyer.record_reject(&refused, m.max_rate_available);
+                    let hold = self.buyer_policy.cap_hold_ms;
+                    session
+                        .buyer
+                        .record_reject(&refused, m.max_rate_available, now, hold);
                 }
                 self.poll_buyer(peer, now, out);
             }
@@ -517,8 +574,14 @@ impl Sessions {
             return;
         };
 
+        // A unit we download draws one from our grant; a unit we upload draws
+        // the peer's multiplier. Buying for the download alone would leave us
+        // shaped for the difference, which is exactly what the surcharge is for.
+        let surcharged = session
+            .upload_rate
+            .saturating_mul(offer.received_multiplier as u64);
         let demand = Demand {
-            observed_rate: session.demand,
+            observed_rate: session.demand.saturating_add(surcharged),
             bounds: offer.bounds,
         };
         let Some(purchase) = buyer::poll(&session.buyer, &self.buyer_policy, demand, now) else {

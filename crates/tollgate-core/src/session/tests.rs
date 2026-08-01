@@ -39,6 +39,7 @@ fn node_policy(mint: &str) -> NodePolicy {
             max_rate: None,
         },
         initial_channel_capacity: CHANNEL_CAPACITY,
+        stale_timeout_ms: 0,
         rollover_threshold_pct: 80,
     }
 }
@@ -586,5 +587,191 @@ fn the_shaper_is_only_told_when_something_actually_changed() {
             .iter()
             .any(|x| matches!(x, Action::SetShapingRate { .. })),
         "rate did not change, so the adapter should not have been told"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Winding down and going quiet
+// ---------------------------------------------------------------------------
+
+#[test]
+fn shutting_down_tells_every_peer_and_offers_its_channels_for_settlement() {
+    // A bare FIN reads as an unclean disconnect and starts the same cleanup a
+    // timeout would, so saying so is the difference between the peer tearing
+    // our state down on a timer and doing it now.
+    let mut link = Link::new();
+    link.connect();
+
+    let actions = link.b.sessions.shutdown();
+    let a = link.a.id;
+
+    assert!(
+        actions.iter().any(|x| matches!(
+            x,
+            Action::Send {
+                msg: Message::Disconnect(_),
+                peer,
+            } if *peer == a
+        )),
+        "the peer should be told"
+    );
+    assert!(
+        actions
+            .iter()
+            .any(|x| matches!(x, Action::SettleChannel { peer, .. } if *peer == a)),
+        "the channel it paid us on still holds value we can claim"
+    );
+}
+
+#[test]
+fn a_peer_that_goes_completely_silent_is_dropped() {
+    let mut policy = node_policy("https://b.example/mint");
+    policy.stale_timeout_ms = 5_000;
+
+    let mut link = Link::new();
+    link.b = Node::new(link.b.id, policy);
+    link.connect();
+    let a = link.a.id;
+    assert!(link.b.sessions.peer(&a).is_some());
+
+    // Ticking alone does not refresh `last_seen` — only hearing from them does.
+    link.now = Millis(5_001);
+    let actions = link.b.sessions.handle(Event::Tick, link.now);
+
+    assert!(
+        link.b.sessions.peer(&a).is_none(),
+        "the peer should be gone"
+    );
+    assert!(actions.iter().any(|x| matches!(x, Action::DropPeer { .. })));
+}
+
+#[test]
+fn a_peer_that_has_merely_stopped_paying_is_kept() {
+    // Non-payment enforces itself — the grant lapses and the peer falls to the
+    // allowance. A link costs nothing to hold open, so there is nothing here
+    // for a timer to do.
+    let mut policy = node_policy("https://b.example/mint");
+    policy.stale_timeout_ms = 5_000;
+
+    let mut link = Link::new();
+    link.b = Node::new(link.b.id, policy);
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+
+    // It keeps talking, but buys nothing.
+    for step in 1..=10u64 {
+        link.now = Millis(step * 1_000);
+        link.deliver(
+            false,
+            Event::MessageReceived {
+                peer: a,
+                msg: Message::Offer(tollgate_protocol::Offer {
+                    accepted_mints: vec!["https://a.example/mint".into()],
+                    unit: "byte".into(),
+                    min_window_ms: 200,
+                    max_window_ms: 30_000,
+                    received_multiplier: 0,
+                }),
+            },
+        );
+        link.deliver(false, Event::Tick);
+    }
+
+    assert!(link.b.sessions.peer(&a).is_some(), "still a peer");
+}
+
+#[test]
+fn a_node_uploading_to_a_surcharging_peer_buys_for_the_surcharge_too() {
+    // At m = 2 an uploaded unit draws the same as a downloaded one, so a node
+    // that sized its purchase on download alone would be shaped for the
+    // difference — which is exactly what the surcharge is meant to make it feel.
+    let mut policy = node_policy("https://b.example/mint");
+    policy.received_multiplier = 2;
+
+    let mut link = Link::new();
+    link.b = Node::new(link.b.id, policy);
+    link.connect();
+    let b = link.b.id;
+
+    // A wants 1 M/s down, and is pushing 500 k/s up.
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    link.now = Millis(1_000);
+    link.deliver(
+        true,
+        Event::Metered {
+            peer: b,
+            counters: Counters {
+                delivered: 500_000,
+                received: 0,
+            },
+        },
+    );
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+
+    // 1 M down + 500 k up x 2 = 2 M/s of draw, at 125% headroom.
+    assert_eq!(
+        link.b_shapes_a(),
+        2_500_000,
+        "the purchase should cover the surcharge on what A uploads"
+    );
+}
+
+#[test]
+fn a_peer_that_does_not_surcharge_is_bought_for_on_download_alone() {
+    let mut link = Link::new();
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+    let _ = a;
+
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    link.now = Millis(1_000);
+    link.deliver(
+        true,
+        Event::Metered {
+            peer: b,
+            counters: Counters {
+                delivered: 500_000,
+                received: 0,
+            },
+        },
+    );
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+
+    assert_eq!(
+        link.b_shapes_a(),
+        1_250_000,
+        "at m = 0 the peer pays for our uploads out of its own grant"
     );
 }

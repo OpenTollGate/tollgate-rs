@@ -58,11 +58,14 @@ cat > "$WORK/gateway.yaml" <<YAML
 identity:
   secret_key: "$GATEWAY_SEC"
 mint:
-  url: "http://gateway.local:3338"
+  # Peers fund their channels against this, so it has to be reachable by them —
+  # which it always is, being the node they are already talking to.
+  url: "http://127.0.0.1:3338"
+  listen: "127.0.0.1:3338"
   unit: "byte"
 vouchers:
   accepted_mints:
-    - "http://gateway.local:3338"
+    - "http://127.0.0.1:3338"
   # An unsigned surcharge on what the client pushes at us. The net rate is m-1,
   # so 2 charges an upload at the same rate as a download.
   received_multiplier: 2
@@ -82,11 +85,12 @@ cat > "$WORK/client.yaml" <<YAML
 identity:
   secret_key: "$CLIENT_SEC"
 mint:
-  url: "http://client.local:3338"
+  url: "http://127.0.0.1:3339"
+  listen: "127.0.0.1:3339"
   unit: "byte"
 vouchers:
   accepted_mints:
-    - "http://client.local:3338"
+    - "http://127.0.0.1:3339"
 access:
   minimum_flow:
     enabled: true
@@ -107,7 +111,13 @@ LOG_LEVEL="info"
 
 RUST_LOG="$LOG_LEVEL" "$BIN" -c "$WORK/gateway.yaml" > "$WORK/gateway.log" 2>&1 &
 GATEWAY_PID=$!
-sleep 1
+
+# Wait for the gateway's mint to answer before starting the client: the client
+# cannot acquire vouchers, and so cannot fund a channel, until it does.
+for _ in $(seq 50); do
+  curl -sf "http://127.0.0.1:3338/v1/keys" >/dev/null 2>&1 && break
+  sleep 0.2
+done
 
 # --demand is the starting offered load; --ramp steps it up every interval.
 RUST_LOG="$LOG_LEVEL" "$BIN" -c "$WORK/client.yaml" \
@@ -141,8 +151,13 @@ rate() {
 
 cat <<BANNER
 
-  gateway  127.0.0.1:4747   sells access, max_rate $(rate "$GATEWAY_MAX_RATE") to one peer
-  client   127.0.0.1:4749   demand starts at $(rate "$DEMAND_START"), +$(rate "$DEMAND_STEP") every ${DEMAND_STEP_SECONDS}s
+  gateway  control 4747, data 4748, mint 3338   sells access, max_rate $(rate "$GATEWAY_MAX_RATE") to one peer
+  client   control 4749, data 4750, mint 3339   demand from $(rate "$DEMAND_START"), +$(rate "$DEMAND_STEP") every ${DEMAND_STEP_SECONDS}s
+
+  Each node runs its own Cashu mint with a byte-denominated keyset. The client
+  acquires the gateway's vouchers from the gateway's mint, funds a Spilman
+  channel with them, and every purchase below is a signed balance update on
+  that channel.
 
   demand   what the client's traffic generator wants. The only input; everything
            else below is a consequence of it.

@@ -53,10 +53,18 @@ pub struct IdentitySection {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct MintSection {
-    /// Mint URL advertised to peers.
+    /// Mint URL advertised to peers, and the one they fund channels against.
+    ///
+    /// It has to be reachable *by peers*, which it always is — it is the node
+    /// they are already talking to.
     pub url: String,
+    /// Where to serve the mint. Peers reach it at [`Self::url`].
+    pub listen: String,
     /// Quantity unit. Fixed by the resource and identical across every node
     /// selling it.
+    ///
+    /// `"byte"` for network forwarding: a proof is then a claim on one byte of
+    /// this node's capacity rather than on money.
     pub unit: String,
 }
 
@@ -64,6 +72,7 @@ impl Default for MintSection {
     fn default() -> Self {
         Self {
             url: "http://127.0.0.1:3338".into(),
+            listen: "0.0.0.0:3338".into(),
             unit: "byte".into(),
         }
     }
@@ -107,6 +116,8 @@ pub struct ChannelsSection {
     pub initial_capacity: u64,
     /// Percentage of capacity at which the funder starts a rollover.
     pub rollover_threshold_pct: u8,
+    /// Drop a peer that has sent nothing at all for this long. Zero disables it.
+    pub stale_timeout_seconds: u64,
 }
 
 impl Default for ChannelsSection {
@@ -114,6 +125,7 @@ impl Default for ChannelsSection {
         Self {
             initial_capacity: 1_000_000_000,
             rollover_threshold_pct: 80,
+            stale_timeout_seconds: 60,
         }
     }
 }
@@ -150,6 +162,9 @@ pub struct BuyingSection {
     pub raise_threshold_pct: u32,
     /// Renew this long before the deadline.
     pub renew_lead_ms: u32,
+    /// How long to respect a rate ceiling a provider named before testing
+    /// whether capacity has freed up.
+    pub cap_hold_ms: u64,
     /// Window to ask for, clamped to what the provider advertises.
     pub window_ms: u32,
     /// Never buy below this rate.
@@ -165,6 +180,7 @@ impl Default for BuyingSection {
             headroom_pct: d.headroom_pct,
             raise_threshold_pct: d.raise_threshold_pct,
             renew_lead_ms: d.renew_lead_ms,
+            cap_hold_ms: d.cap_hold_ms,
             window_ms: d.window_ms,
             min_rate: d.min_rate,
             max_rate: d.max_rate,
@@ -245,6 +261,7 @@ impl File {
                 max_rate: self.grants.max_rate,
             },
             initial_channel_capacity: self.channels.initial_capacity,
+            stale_timeout_ms: self.channels.stale_timeout_seconds.saturating_mul(1_000),
             rollover_threshold_pct: self.channels.rollover_threshold_pct,
         };
 
@@ -252,6 +269,7 @@ impl File {
             headroom_pct: self.buying.headroom_pct,
             raise_threshold_pct: self.buying.raise_threshold_pct,
             renew_lead_ms: self.buying.renew_lead_ms,
+            cap_hold_ms: self.buying.cap_hold_ms,
             window_ms: self.buying.window_ms,
             min_rate: self.buying.min_rate,
             max_rate: self.buying.max_rate,
@@ -260,6 +278,11 @@ impl File {
         let listen: SocketAddr = self.network.listen.parse().with_context(|| {
             format!("network.listen {:?} is not an address", self.network.listen)
         })?;
+        let mint_listen: SocketAddr = self
+            .mint
+            .listen
+            .parse()
+            .with_context(|| format!("mint.listen {:?} is not an address", self.mint.listen))?;
 
         let mut peers = Vec::new();
         for (key, section) in &self.peers {
@@ -285,6 +308,8 @@ impl File {
             policy,
             buyer,
             listen,
+            mint_listen,
+            mint_url: self.mint.url.clone(),
             peers,
         })
     }
