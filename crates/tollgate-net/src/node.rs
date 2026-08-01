@@ -21,6 +21,7 @@ use tracing::{debug, info, warn};
 
 use crate::adapter::Adapter;
 use crate::channel::ChannelBackend;
+use crate::control;
 use crate::dataplane;
 use crate::identity::Identity;
 use crate::wire::{self, Wire};
@@ -82,6 +83,8 @@ pub struct Node {
     /// Where the data-plane socket for each peer lives, so we can dial it once
     /// the control plane has introduced us.
     endpoints: HashMap<PubKey, String>,
+    /// What the node is doing, republished each tick for the control socket.
+    published: control::Published,
     started: Instant,
 }
 
@@ -106,8 +109,15 @@ impl Node {
             channels,
             links: HashMap::new(),
             endpoints,
+            published: Default::default(),
             started: Instant::now(),
         }
+    }
+
+    /// The snapshot the control socket serves. Cheap to clone and lock-free to
+    /// read, so a watcher never holds the event loop up.
+    pub fn published(&self) -> control::Published {
+        Arc::clone(&self.published)
     }
 
     /// The adapter, so a demo or a test can set demand and read counters.
@@ -170,7 +180,10 @@ impl Node {
             tokio::select! {
                 Some(event) = wire_rx.recv() => self.on_wire(event, &done_tx).await,
                 Some(event) = done_rx.recv() => self.dispatch(event, &done_tx).await,
-                _ = ticker.tick() => self.on_tick(&done_tx).await,
+                _ = ticker.tick() => {
+                    self.on_tick(&done_tx).await;
+                    self.publish(&config);
+                }
                 _ = &mut shutdown => break,
             }
         }
@@ -239,6 +252,18 @@ impl Node {
                     .await;
             }
         }
+    }
+
+    /// Republish what the node is doing, for anything watching.
+    fn publish(&self, config: &NodeConfig) {
+        self.published.store(Arc::new(control::snapshot(
+            &self.sessions,
+            &self.adapter,
+            &hex::encode(self.identity.pubkey().0),
+            &config.mint_url,
+            self.started.elapsed().as_millis() as u64,
+            self.now(),
+        )));
     }
 
     /// Sample the meters and tick core.
