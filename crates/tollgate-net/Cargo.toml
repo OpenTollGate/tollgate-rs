@@ -8,26 +8,6 @@ version.workspace = true
 repository.workspace = true
 authors.workspace = true
 
-[features]
-default = []
-# Real Cashu Spilman channels funded against a real cdk mint.
-#
-# Off by default because it path-depends on `reference/cashu_spilman_channels`,
-# which is not checked into this repository — a clone without it must still
-# build and test. With the feature off, `channel::LocalChannels` stands in.
-spilman = [
-    "dep:cdk-spilman",
-    "dep:cdk",
-    "dep:cdk-axum",
-    "dep:cdk-common",
-    "dep:cdk-fake-wallet",
-    "dep:cdk-sqlite",
-    "dep:cashu",
-    "dep:axum",
-    "dep:reqwest",
-    "dep:serde_json",
-]
-
 [[bin]]
 name = "tollgated"
 path = "src/bin/tollgated.rs"
@@ -48,19 +28,23 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 hex.workspace = true
 
-# --- spilman feature only ------------------------------------------------
+# --- Cashu: the mint this node runs, and the channels it pays over ---------
 # Pinned to the same cdk tag the reference workspace uses; two different cdk
 # versions in one graph would not resolve.
-cdk-spilman = { path = "../../reference/cashu_spilman_channels/crates/cdk-spilman", features = ["wallet", "configurable-host-reqwest"], optional = true }
-cdk = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk", default-features = false, features = ["mint"], optional = true }
-cdk-axum = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk-axum", default-features = false, optional = true }
-cdk-common = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk-common", default-features = false, optional = true }
-cdk-fake-wallet = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk-fake-wallet", optional = true }
-cdk-sqlite = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk-sqlite", default-features = false, features = ["mint"], optional = true }
-cashu = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cashu", default-features = false, optional = true }
-axum = { version = "0.8", optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"], optional = true }
-serde_json = { version = "1", optional = true }
+#
+# cdk-spilman is a path dependency on `reference/cashu_spilman_channels`, which
+# is not checked into this repository. A fresh clone needs that checkout present
+# before it will build — see the README.
+cdk-spilman = { path = "../../reference/cashu_spilman_channels/crates/cdk-spilman", features = ["wallet", "configurable-host-reqwest"] }
+cdk = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk", default-features = false, features = ["mint"] }
+cdk-axum = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk-axum", default-features = false }
+cdk-common = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk-common", default-features = false }
+cdk-fake-wallet = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk-fake-wallet" }
+cdk-sqlite = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk-sqlite", default-features = false, features = ["mint"] }
+cashu = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cashu", default-features = false }
+axum = { version = "0.8" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+serde_json = { version = "1" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

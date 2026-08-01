@@ -6,9 +6,9 @@
 //!
 //! # No prices here
 //!
-//! The receiver is configured with an **empty pricing table**, so the Spilman
-//! layer's "amount due" is always zero and it enforces only the ratchet and the
-//! signature. That is deliberate and it is the whole fit: delivery has no price
+//! The receiver is configured with a pricing entry that **prices nothing**, so
+//! the Spilman layer's "amount due" is always zero and it enforces only the
+//! ratchet and the signature. That is deliberate and it is the whole fit: delivery has no price
 //! ([`tollgate-vouchers.md`]), and what a peer may draw is decided by
 //! `tollgate-core`'s admission control against the grant. The channel layer
 //! carries the money; it does not decide how much is owed.
@@ -28,9 +28,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use cdk::mint::Mint;
-use cdk_spilman::configurable_host::{ConfigurableHost, ConfigurableHostConfig, StorageConfig};
+use cdk_spilman::configurable_host::{
+    ConfigurableHost, ConfigurableHostConfig, KeysetCacheEntry, StorageConfig, UnitPricingConfig,
+};
 use cdk_spilman::{
     ConfigurableClientHost, MemoryClientStorage, ReqwestClientNetworking, SpilmanBridge,
     SpilmanClientBridge, SpilmanNetworking,
@@ -42,10 +44,18 @@ use super::{ChannelBackend, FundedChannel, VerifiedChannel};
 /// How long a funded channel stays refundable to the payer.
 const CHANNEL_TTL_SECONDS: u64 = 3_600;
 
-/// Largest single proof amount used when funding. Bigger amounts mean fewer
-/// proofs, and proof count is what the funding blob and the spent-proof set
-/// both scale with.
-const MAX_PROOF_AMOUNT: u64 = 8_192;
+/// Largest single proof amount used when funding.
+///
+/// Amounts are powers of two, so a channel takes one proof per set bit and the
+/// count is what the funding blob and the spent-proof set both scale with. Byte
+/// denomination makes the numbers large — a 1 GiB channel is a 30-bit number,
+/// so ~30 proofs at worst and about 15 on average.
+///
+/// Capping this low would be ruinous here: at 8192 the same channel would need
+/// 131,072 proofs. The cap exists for money-denominated channels where a small
+/// maximum keeps individual proofs cheap; for bytes it has to track the
+/// capacity being funded.
+const MAX_PROOF_AMOUNT: u64 = 1 << 30;
 
 /// What a Spilman backend needs to know about this node.
 #[derive(Debug, Clone)]
@@ -117,11 +127,23 @@ impl SpilmanChannels {
                 min_expiry_seconds: CHANNEL_TTL_SECONDS,
                 pricing_scale: 1,
                 storage: StorageConfig::Memory,
-                // Empty on purpose: with no pricing entry for the unit the
-                // amount due is always zero, so this layer enforces the ratchet
-                // and the signature and nothing else. What a peer may draw is
-                // core's decision, against the grant.
-                pricing: HashMap::new(),
+                // A pricing entry with **nothing priced**. The amount due is a
+                // linear combination over priced variables, so an empty set
+                // makes it zero always: this layer enforces the ratchet and the
+                // signature and never second-guesses what is owed. What a peer
+                // may draw is core's decision, against the grant.
+                //
+                // The entry has to exist even though it prices nothing — the
+                // host refuses to start if a unit is trusted by a mint but
+                // absent from the table.
+                pricing: HashMap::from([(
+                    config.unit.clone(),
+                    UnitPricingConfig {
+                        min_capacity: 1,
+                        max_amount_per_output: Some(MAX_PROOF_AMOUNT),
+                        variables: HashMap::new(),
+                    },
+                )]),
             },
             &config.secret_key_hex,
         )
@@ -137,6 +159,50 @@ impl SpilmanChannels {
     /// The mint URL this node advertises.
     pub fn mint_url(&self) -> &str {
         &self.config.mint_url
+    }
+
+    /// Make sure we hold the keys for the keyset a peer funded against.
+    ///
+    /// The receiver will not accept a channel on a keyset it cannot verify
+    /// signatures against, and there is no way to know ahead of time which
+    /// keyset of which accepted mint a peer will choose.
+    fn cache_keyset(&self, params: &serde_json::Value) -> Result<()> {
+        let mint = params["mint"]
+            .as_str()
+            .ok_or_else(|| anyhow!("channel parameters name no mint"))?;
+        let keyset_id = params["keyset_id"]
+            .as_str()
+            .or_else(|| params["keyset_info"]["keysetId"].as_str())
+            .ok_or_else(|| anyhow!("channel parameters name no keyset"))?;
+
+        if !self.config.accepted_mints.iter().any(|m| m == mint) {
+            bail!("{mint} is not a mint we take payment in");
+        }
+
+        let id: cashu::nuts::Id = keyset_id
+            .parse()
+            .map_err(|e| anyhow!("keyset id {keyset_id:?}: {e}"))?;
+
+        let info = self
+            .client
+            .lock()
+            .expect("not poisoned")
+            .fetch_keyset_info(mint, keyset_id)
+            .map_err(|e| anyhow!("read keyset {keyset_id} from {mint}: {e}"))?;
+
+        self.server
+            .host()
+            .set_keyset(
+                mint,
+                id,
+                KeysetCacheEntry {
+                    info_json: info,
+                    active: true,
+                    unit: crate::mint::currency_unit(&self.config.unit),
+                },
+            )
+            .map_err(|e| anyhow!("cache keyset {keyset_id}: {e}"))?;
+        Ok(())
     }
 }
 
@@ -187,12 +253,16 @@ struct FundingBlob {
 
 impl ChannelBackend for SpilmanChannels {
     fn fund(&self, peer: PubKey, mint_url: &str, capacity: u64) -> Result<FundedChannel> {
+        // Which keyset denominates in our unit. A mint may run several — an old
+        // one still being redeemed alongside the active one — and only the
+        // active one can be funded against.
+        let keyset_id = active_keyset(mint_url, &self.config.unit)?;
         let keyset_info = self
             .client
             .lock()
             .expect("not poisoned")
-            .fetch_keyset_info(mint_url, "")
-            .map_err(|e| anyhow!("could not read keysets from {mint_url}: {e}"))?;
+            .fetch_keyset_info(mint_url, &keyset_id)
+            .map_err(|e| anyhow!("could not read keyset {keyset_id} from {mint_url}: {e}"))?;
 
         // Acquiring the peer's vouchers is outside the protocol; a peer arrives
         // holding them or it gets no service.
@@ -248,6 +318,12 @@ impl ChannelBackend for SpilmanChannels {
             serde_json::from_slice(funding).context("funding blob is not the expected shape")?;
         let proofs: Vec<cashu::nuts::Proof> = serde_json::from_value(blob.funding_proofs)
             .context("funding blob carried unreadable proofs")?;
+
+        // A keyset is only acceptable once we hold its keys, and we cannot know
+        // in advance which of our accepted mints a peer will fund against — or
+        // which keyset that mint had active at the time. So it is fetched when
+        // the funding names it, from the mint that issued it.
+        self.cache_keyset(&blob.params)?;
 
         // This is where the money is checked: locked to the two of us, against
         // a mint and keyset we accept, and not already spent.
@@ -352,27 +428,77 @@ impl SpilmanNetworking for MintNetworking {
     }
 }
 
+/// A blocking HTTP call, for the paths the synchronous backend trait drives.
+///
+/// The node runs every backend call on a blocking thread, so a blocking client
+/// here does not stall the runtime.
+fn http(method: &str, url: &str, body: &str) -> Result<String, String> {
+    let client = reqwest::blocking::Client::new();
+    let request = match method {
+        "GET" => client.get(url),
+        _ => client
+            .post(url)
+            .header("content-type", "application/json")
+            .body(body.to_owned()),
+    };
+    let response: reqwest::blocking::Response = request.send().map_err(|e| e.to_string())?;
+    response.text().map_err(|e| e.to_string())
+}
+
+/// The id of the mint's active keyset for `unit`.
+///
+/// A channel is funded against one keyset, and it has to be the active one:
+/// a mint keeps older keysets readable so outstanding vouchers stay redeemable,
+/// but it will not sign new ones against them.
+fn active_keyset(mint_url: &str, unit: &str) -> Result<String> {
+    let body = http("GET", &format!("{mint_url}/v1/keysets"), "")
+        .map_err(|e| anyhow!("list keysets at {mint_url}: {e}"))?;
+    let listing: serde_json::Value =
+        serde_json::from_str(&body).with_context(|| format!("keyset listing from {mint_url}"))?;
+
+    listing["keysets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|k| k["unit"].as_str() == Some(unit) && k["active"].as_bool().unwrap_or(false))
+        .and_then(|k| k["id"].as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("{mint_url} has no active {unit} keyset"))
+}
+
 /// Acquire `amount` units of a mint's vouchers.
 ///
-/// **Outside the protocol.** This is the direct-from-the-issuer route from the
-/// market documents. Against a mint whose payment backend auto-pays its own
-/// quotes it costs nothing, which is exactly why it lives behind a feature flag.
+/// **Outside the protocol.** A peer arrives holding the vouchers it needs or it
+/// gets no service, and how it got them is the market's business — see
+/// [`crate::market`], which is what serves the other end of this and which
+/// currently gives them away.
+///
+/// This deliberately does *not* go through a Lightning quote. A byte-denominated
+/// keyset cannot be invoiced over bolt11, because bolt11 is denominated in msat
+/// and there is no invoice for 1024 bytes. Pricing bytes in money is exactly
+/// the market layer the design leaves out of the protocol.
 fn acquire(mint_url: &str, amount: u64, unit: &str, keyset_info: &str) -> Result<String> {
-    let http = |method: &str, url: &str, body: &str| -> Result<String, String> {
-        let client = reqwest::blocking::Client::new();
-        let request = match method {
-            "GET" => client.get(url),
-            _ => client
-                .post(url)
-                .header("content-type", "application/json")
-                .body(body.to_owned()),
-        };
-        let response: reqwest::blocking::Response = request.send().map_err(|e| e.to_string())?;
-        response.text().map_err(|e| e.to_string())
-    };
+    // Blinded messages for the amount, split into powers of two.
+    let blinded = cdk_spilman::create_plain_blinded_messages(amount, keyset_info)
+        .map_err(|e| anyhow!("blind {amount} {unit}: {e}"))?;
+    let blinded: serde_json::Value = serde_json::from_str(&blinded).context("blinded messages")?;
+    let secrets = blinded["secrets_with_blinding"].to_string();
 
-    let proofs = cdk_spilman::mint_proofs_from_mint(mint_url, amount, keyset_info, &http)
-        .map_err(|e| anyhow!("mint {amount} from {mint_url}: {e}"))?;
+    let issued = http(
+        "POST",
+        &format!("{mint_url}{}", crate::market::ISSUE_PATH),
+        &serde_json::json!({ "outputs": blinded["blinded_messages"] }).to_string(),
+    )
+    .map_err(|e| anyhow!("buy {amount} {unit} from {mint_url}: {e}"))?;
+
+    let issued: serde_json::Value = serde_json::from_str(&issued).context("issue response")?;
+    let signatures = issued["signatures"]
+        .as_array()
+        .ok_or_else(|| anyhow!("{mint_url} issued nothing for {amount} {unit}: {issued}"))?;
+
+    let proofs =
+        cdk_spilman::construct_proofs(&serde_json::to_string(signatures)?, &secrets, keyset_info)
+            .map_err(|e| anyhow!("unblind {amount} {unit}: {e}"))?;
 
     cdk_spilman::build_cashu_b_token(mint_url, unit, &proofs)
         .map_err(|e| anyhow!("build a token: {e}"))

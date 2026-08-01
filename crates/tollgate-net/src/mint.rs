@@ -130,12 +130,17 @@ pub async fn serve(
     listen: std::net::SocketAddr,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
+    // The market rides on the same listener as the mint under its own path.
+    // It is a separate protocol that happens to be served by the same process;
+    // `market.path` in the configuration schema may point somewhere else
+    // entirely, including at a third party.
     let router = cdk_axum::create_mint_router(
         Arc::clone(&mint),
         vec![PaymentMethod::Known(KnownMethod::Bolt11).to_string()],
     )
     .await
-    .context("build the mint router")?;
+    .context("build the mint router")?
+    .merge(crate::market::router(Arc::clone(&mint)));
 
     let listener = tokio::net::TcpListener::bind(listen)
         .await

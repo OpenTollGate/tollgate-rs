@@ -13,8 +13,9 @@
 //!   to what was bought.
 //! - [`adapter`] — the delivery gate and the meters.
 //! - [`channel`] — payment channels behind a trait.
-//! - `mint` — this node's own mint, with a byte-denominated keyset
-//!   (`spilman` feature only).
+//! - [`mint`] — this node's own mint, with a byte-denominated keyset.
+//! - [`market`] — selling those vouchers. A separate protocol on its own path,
+//!   and the one piece that is deliberately stubbed.
 //! - [`node`] — the driver that connects all of it to core.
 //! - [`config`] — the YAML the operator writes.
 
@@ -23,7 +24,7 @@ pub mod channel;
 pub mod config;
 pub mod dataplane;
 pub mod identity;
-#[cfg(feature = "spilman")]
+pub mod market;
 pub mod mint;
 pub mod node;
 pub mod wire;

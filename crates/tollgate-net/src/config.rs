@@ -53,10 +53,18 @@ pub struct IdentitySection {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct MintSection {
-    /// Mint URL advertised to peers.
+    /// Mint URL advertised to peers, and the one they fund channels against.
+    ///
+    /// It has to be reachable *by peers*, which it always is — it is the node
+    /// they are already talking to.
     pub url: String,
+    /// Where to serve the mint. Peers reach it at [`Self::url`].
+    pub listen: String,
     /// Quantity unit. Fixed by the resource and identical across every node
     /// selling it.
+    ///
+    /// `"byte"` for network forwarding: a proof is then a claim on one byte of
+    /// this node's capacity rather than on money.
     pub unit: String,
 }
 
@@ -64,6 +72,7 @@ impl Default for MintSection {
     fn default() -> Self {
         Self {
             url: "http://127.0.0.1:3338".into(),
+            listen: "0.0.0.0:3338".into(),
             unit: "byte".into(),
         }
     }
@@ -260,6 +269,11 @@ impl File {
         let listen: SocketAddr = self.network.listen.parse().with_context(|| {
             format!("network.listen {:?} is not an address", self.network.listen)
         })?;
+        let mint_listen: SocketAddr = self
+            .mint
+            .listen
+            .parse()
+            .with_context(|| format!("mint.listen {:?} is not an address", self.mint.listen))?;
 
         let mut peers = Vec::new();
         for (key, section) in &self.peers {
@@ -285,6 +299,8 @@ impl File {
             policy,
             buyer,
             listen,
+            mint_listen,
+            mint_url: self.mint.url.clone(),
             peers,
         })
     }

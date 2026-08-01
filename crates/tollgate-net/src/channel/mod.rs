@@ -19,11 +19,9 @@ use anyhow::Result;
 use tollgate_protocol::{ChannelId, PubKey, Signature};
 
 mod local;
-#[cfg(feature = "spilman")]
 mod spilman;
 
 pub use local::LocalChannels;
-#[cfg(feature = "spilman")]
 pub use spilman::{SpilmanChannels, SpilmanConfig};
 
 /// A channel we funded, ready to tell the peer about.

@@ -63,6 +63,11 @@ fn spawn_node(port: u16, mint: &str, peers: Vec<PeerConfig>) -> (PubKey, Arc<Ada
         policy: node_policy(mint),
         buyer: buyer_policy(),
         listen,
+        // Unused here: these tests drive `LocalChannels`, so no mint is served.
+        mint_listen: format!("127.0.0.1:{}", port + 10_000)
+            .parse()
+            .expect("address"),
+        mint_url: format!("http://127.0.0.1:{}", port + 10_000),
         peers,
     };
 
@@ -268,6 +273,11 @@ async fn a_channel_that_fills_up_rolls_over_and_buying_continues() {
         listen: format!("127.0.0.1:{provider_port}")
             .parse()
             .expect("address"),
+        // Unused here: these tests drive `LocalChannels`, so no mint is served.
+        mint_listen: format!("127.0.0.1:{}", provider_port + 10_000)
+            .parse()
+            .expect("address"),
+        mint_url: format!("http://127.0.0.1:{}", provider_port + 10_000),
         peers: vec![],
     };
     let node = Node::new(

@@ -54,6 +54,10 @@ pub struct NodeConfig {
     pub buyer: BuyerPolicy,
     /// Control-plane listen address.
     pub listen: SocketAddr,
+    /// Where this node serves its own mint.
+    pub mint_listen: SocketAddr,
+    /// The URL peers reach that mint on, advertised in our Offer.
+    pub mint_url: String,
     /// Peers to dial. Anyone else has to dial us.
     pub peers: Vec<PeerConfig>,
 }
@@ -293,7 +297,9 @@ impl Node {
                                 funding: funded.funding,
                             });
                         }
-                        Err(e) => warn!(%peer, error = %e, "could not fund a channel"),
+                        Err(e) => {
+                            warn!(%peer, error = format!("{e:#}"), "could not fund a channel")
+                        }
                     }
                 });
             }
@@ -309,7 +315,7 @@ impl Node {
                             capacity: v.capacity,
                         },
                         Err(e) => {
-                            warn!(%peer, error = %e, "peer funding did not verify");
+                            warn!(%peer, error = format!("{e:#}"), "peer funding did not verify");
                             Event::IncomingFundingRejected { peer }
                         }
                     };
@@ -321,7 +327,7 @@ impl Node {
                 let channels = Arc::clone(&self.channels);
                 tokio::task::spawn_blocking(move || {
                     if let Err(e) = channels.settle(channel_id) {
-                        warn!(%peer, error = %e, "could not settle a channel");
+                        warn!(%peer, error = format!("{e:#}"), "could not settle a channel");
                     }
                 });
             }

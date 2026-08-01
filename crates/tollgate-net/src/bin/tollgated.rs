@@ -11,8 +11,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use tollgate_net::channel::LocalChannels;
+use tollgate_net::channel::{SpilmanChannels, SpilmanConfig};
 use tollgate_net::config::File;
+use tollgate_net::mint::{self, MintConfig};
 use tollgate_net::node::Node;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -52,6 +53,20 @@ struct Args {
     report: u64,
 }
 
+/// Derive the mint's keyset seed from the node's identity.
+///
+/// Deterministic, so a restart keeps issuing against the same keys and the
+/// vouchers a peer already holds stay redeemable. Hashed rather than used
+/// directly so the mint's key material is not the node's signing key.
+fn mint_seed(secret_hex: &str) -> Result<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+    let secret = hex::decode(secret_hex).context("identity key is not hex")?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"tollgate-mint-seed");
+    hasher.update(&secret);
+    Ok(hasher.finalize().to_vec())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -81,10 +96,49 @@ async fn main() -> Result<()> {
         "starting"
     );
 
-    let node = Node::new(
-        &config,
-        Arc::new(LocalChannels::new(config.identity.clone())),
+    // The mint comes up first. A peer funds its channel against *our* mint, so
+    // nothing can be paid for until it is serving.
+    let mint = Arc::new(
+        mint::build(&MintConfig {
+            url: config.mint_url.clone(),
+            unit: config.policy.unit.clone(),
+            // Derived from the identity so a restart keeps issuing against the
+            // same keys, and two nodes never share a keyset.
+            seed: mint_seed(&config.identity.secret_hex())?,
+            max_amount: config.policy.initial_channel_capacity.max(1),
+        })
+        .await
+        .context("bring up this node's mint")?,
     );
+
+    {
+        let mint = Arc::clone(&mint);
+        let listen = config.mint_listen;
+        tokio::spawn(async move {
+            if let Err(e) = mint::serve(mint, listen, std::future::pending()).await {
+                tracing::error!(error = %e, "the mint stopped");
+            }
+        });
+    }
+    info!(
+        url = %config.mint_url,
+        listen = %config.mint_listen,
+        unit = %config.policy.unit,
+        "mint serving"
+    );
+
+    let channels = Arc::new(
+        SpilmanChannels::new(SpilmanConfig {
+            mint: Arc::clone(&mint),
+            mint_url: config.mint_url.clone(),
+            unit: config.policy.unit.clone(),
+            accepted_mints: config.policy.accepted_mints.clone(),
+            secret_key_hex: config.identity.secret_hex(),
+        })
+        .context("build the channel backend")?,
+    );
+
+    let node = Node::new(&config, channels);
     let adapter = node.adapter();
 
     // The traffic generator. Demand is what we want to pull from a peer, which
