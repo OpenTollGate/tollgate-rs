@@ -42,7 +42,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "building..."
-cargo build --release --bin tollgated --manifest-path "$ROOT/Cargo.toml" 2>&1 | tail -1
+cargo build --release --bin tollgated --bin tolltop --manifest-path "$ROOT/Cargo.toml" 2>&1 | tail -1
 
 # Peers are dialed by public key, so each side has to know the other's before
 # either starts.
@@ -109,7 +109,12 @@ YAML
 LOG_LEVEL="info"
 [[ -n "${DEBUG:-}" ]] && LOG_LEVEL="tollgate_net=debug,info"
 
-RUST_LOG="$LOG_LEVEL" "$BIN" -c "$WORK/gateway.yaml" > "$WORK/gateway.log" 2>&1 &
+# Short socket paths: AF_UNIX truncates at ~104 bytes, and a temp dir plus a
+# long name overruns it.
+GATEWAY_SOCK=/tmp/tollgate-demo-gateway.sock
+CLIENT_SOCK=/tmp/tollgate-demo-client.sock
+
+RUST_LOG="$LOG_LEVEL" "$BIN" -c "$WORK/gateway.yaml" --control-socket "$GATEWAY_SOCK" > "$WORK/gateway.log" 2>&1 &
 GATEWAY_PID=$!
 
 # Wait for the gateway's mint to answer before starting the client: the client
@@ -120,7 +125,7 @@ for _ in $(seq 50); do
 done
 
 # --demand is the starting offered load; --ramp steps it up every interval.
-RUST_LOG="$LOG_LEVEL" "$BIN" -c "$WORK/client.yaml" \
+RUST_LOG="$LOG_LEVEL" "$BIN" -c "$WORK/client.yaml" --control-socket "$CLIENT_SOCK" \
   --demand "$DEMAND_START" --ramp "$DEMAND_STEP" --ramp-interval "$DEMAND_STEP_SECONDS" \
   > "$WORK/client.log" 2>&1 &
 CLIENT_PID=$!
@@ -170,6 +175,10 @@ cat <<BANNER
   Neither node is ever told the other's number. The client knows what it signed
   for, the gateway knows what it delivered, and nothing reconciles them —
   the money moved before the traffic did.
+
+  For a live view of either node, in another terminal:
+      tolltop --socket $GATEWAY_SOCK
+      tolltop --socket $CLIENT_SOCK
 
 BANNER
 

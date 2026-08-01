@@ -51,6 +51,10 @@ struct Args {
     /// Zero turns the report off.
     #[arg(long, default_value_t = 1)]
     report: u64,
+
+    /// Where to serve the control socket that `tolltop` reads.
+    #[arg(long)]
+    control_socket: Option<PathBuf>,
 }
 
 /// Derive the mint's keyset seed from the node's identity.
@@ -151,6 +155,23 @@ async fn main() -> Result<()> {
 
     let node = Node::new(&config, channels);
     let adapter = node.adapter();
+
+    // Anything watching this node reads here. A Unix socket rather than a port:
+    // it is operational state for a local tool, not something a peer acts on.
+    {
+        let published = node.published();
+        let path = args
+            .control_socket
+            .clone()
+            .unwrap_or_else(tollgate_net::control::default_socket_path);
+        tokio::spawn(async move {
+            if let Err(e) =
+                tollgate_net::control::serve(&path, published, std::future::pending()).await
+            {
+                tracing::warn!(error = %format!("{e:#}"), "the control socket stopped");
+            }
+        });
+    }
 
     // The traffic generator. Demand is what we want to pull from a peer, which
     // is what the buyer reacts to; the shaper decides how much of it arrives.

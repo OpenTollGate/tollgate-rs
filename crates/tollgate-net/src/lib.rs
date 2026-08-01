@@ -18,10 +18,13 @@
 //!   and the one piece that is deliberately stubbed.
 //! - [`node`] — the driver that connects all of it to core.
 //! - [`config`] — the YAML the operator writes.
+//! - [`control`] — a local socket publishing what the node is doing, which is
+//!   what `tolltop` reads.
 
 pub mod adapter;
 pub mod channel;
 pub mod config;
+pub mod control;
 pub mod dataplane;
 pub mod identity;
 pub mod market;
