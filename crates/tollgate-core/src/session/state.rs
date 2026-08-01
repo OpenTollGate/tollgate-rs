@@ -79,7 +79,19 @@ pub struct PeerSession {
     /// its own cumulative total.
     pub buyer: Buyer,
     /// Units per second we last observed ourselves wanting over this link.
+    ///
+    /// Our *download*. What we have to buy is more than that whenever the peer
+    /// surcharges what we push at it — see [`Self::upload_rate`].
     pub demand: u64,
+    /// Units per second we have recently been pushing at this peer.
+    ///
+    /// A peer's `received_multiplier` is applied to this, and it draws down the
+    /// grant we bought. A node that uploads heavily to a peer with `m > 0` and
+    /// sized its purchases on download alone would be shaped for the
+    /// difference.
+    pub upload_rate: u64,
+    /// When the meter was last sampled, so a delta can become a rate.
+    pub last_meter_at: Millis,
 
     /// Shaping rate last handed to the adapter, so we only emit a change when
     /// it actually changes. A shaper call per meter reading would be a lot of
@@ -102,6 +114,8 @@ impl PeerSession {
             meter: Meter::new(),
             buyer: Buyer::new(),
             demand: 0,
+            upload_rate: 0,
+            last_meter_at: now,
             applied_rate: None,
             last_seen: now,
         }

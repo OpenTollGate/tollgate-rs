@@ -687,3 +687,91 @@ fn a_peer_that_has_merely_stopped_paying_is_kept() {
 
     assert!(link.b.sessions.peer(&a).is_some(), "still a peer");
 }
+
+#[test]
+fn a_node_uploading_to_a_surcharging_peer_buys_for_the_surcharge_too() {
+    // At m = 2 an uploaded unit draws the same as a downloaded one, so a node
+    // that sized its purchase on download alone would be shaped for the
+    // difference — which is exactly what the surcharge is meant to make it feel.
+    let mut policy = node_policy("https://b.example/mint");
+    policy.received_multiplier = 2;
+
+    let mut link = Link::new();
+    link.b = Node::new(link.b.id, policy);
+    link.connect();
+    let b = link.b.id;
+
+    // A wants 1 M/s down, and is pushing 500 k/s up.
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    link.now = Millis(1_000);
+    link.deliver(
+        true,
+        Event::Metered {
+            peer: b,
+            counters: Counters {
+                delivered: 500_000,
+                received: 0,
+            },
+        },
+    );
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+
+    // 1 M down + 500 k up x 2 = 2 M/s of draw, at 125% headroom.
+    assert_eq!(
+        link.b_shapes_a(),
+        2_500_000,
+        "the purchase should cover the surcharge on what A uploads"
+    );
+}
+
+#[test]
+fn a_peer_that_does_not_surcharge_is_bought_for_on_download_alone() {
+    let mut link = Link::new();
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+    let _ = a;
+
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    link.now = Millis(1_000);
+    link.deliver(
+        true,
+        Event::Metered {
+            peer: b,
+            counters: Counters {
+                delivered: 500_000,
+                received: 0,
+            },
+        },
+    );
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+
+    assert_eq!(
+        link.b_shapes_a(),
+        1_250_000,
+        "at m = 0 the peer pays for our uploads out of its own grant"
+    );
+}

@@ -128,6 +128,18 @@ impl Sessions {
                     None => return out,
                 };
                 if let Some(session) = self.peers.get_mut(&peer) {
+                    // What we have been pushing at them, as a rate. Read before
+                    // `observe` consumes the reading.
+                    let grew = counters.delta_since(session.meter.totals());
+                    let elapsed = now.saturating_since(session.last_meter_at);
+                    if elapsed > 0 {
+                        session.upload_rate = crate::grant::rate_from(
+                            grew.delivered,
+                            elapsed.min(u32::MAX as u64) as u32,
+                        );
+                        session.last_meter_at = now;
+                    }
+
                     let drawn = session.meter.observe(counters, multiplier);
                     session.grant.draw(drawn);
                 }
@@ -562,8 +574,14 @@ impl Sessions {
             return;
         };
 
+        // A unit we download draws one from our grant; a unit we upload draws
+        // the peer's multiplier. Buying for the download alone would leave us
+        // shaped for the difference, which is exactly what the surcharge is for.
+        let surcharged = session
+            .upload_rate
+            .saturating_mul(offer.received_multiplier as u64);
         let demand = Demand {
-            observed_rate: session.demand,
+            observed_rate: session.demand.saturating_add(surcharged),
             bounds: offer.bounds,
         };
         let Some(purchase) = buyer::poll(&session.buyer, &self.buyer_policy, demand, now) else {
