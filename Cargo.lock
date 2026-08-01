@@ -613,6 +613,7 @@ dependencies = [
 [[package]]
 name = "cdk-spilman"
 version = "0.15.1"
+source = "git+https://github.com/Origami74/cashu_spilman_channels.git?branch=fix%2Fcustom-currency-units#679fb3d2bac24a539159838f5b9437b8d94ecd34"
 dependencies = [
  "anyhow",
  "async-trait",

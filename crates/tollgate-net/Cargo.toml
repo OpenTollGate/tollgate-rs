@@ -32,10 +32,15 @@ hex.workspace = true
 # Pinned to the same cdk tag the reference workspace uses; two different cdk
 # versions in one graph would not resolve.
 #
-# cdk-spilman is a path dependency on `reference/cashu_spilman_channels`, which
-# is not checked into this repository. A fresh clone needs that checkout present
-# before it will build — see the README.
-cdk-spilman = { path = "../../reference/cashu_spilman_channels/crates/cdk-spilman", features = ["wallet", "configurable-host-reqwest"] }
+# cdk-spilman comes from our fork rather than upstream, because upstream cannot
+# round-trip a custom currency unit and a byte-denominated keyset is exactly
+# that. Fix submitted as SatsAndSports/cashu_spilman_channels#2; switch the
+# `git` URL back to upstream once it lands.
+#
+# A git dependency rather than a path into `reference/`: that directory holds
+# reading copies of other projects and is not checked in, so depending on it
+# would break a fresh clone and the container build.
+cdk-spilman = { git = "https://github.com/Origami74/cashu_spilman_channels.git", branch = "fix/custom-currency-units", package = "cdk-spilman", features = ["wallet", "configurable-host-reqwest"] }
 cdk = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk", default-features = false, features = ["mint"] }
 cdk-axum = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk-axum", default-features = false }
 cdk-common = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk-common", default-features = false }
