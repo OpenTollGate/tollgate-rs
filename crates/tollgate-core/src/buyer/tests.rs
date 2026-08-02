@@ -454,3 +454,37 @@ fn cumulative_restarts_from_zero_on_the_replacement() {
         "the replacement starts empty"
     );
 }
+
+#[test]
+fn a_replacement_is_opened_before_the_channel_is_too_small_for_another_purchase() {
+    // A threshold alone is reactive, and a purchase is not gradual: a grant can
+    // take a channel from empty to nearly full in one step. Waiting for 80%
+    // *signed* would leave nothing to move onto, and the peer would fall to the
+    // minimum flow allowance while a replacement is funded and verified.
+    let mut buyer = opened(3_000_000);
+
+    // One purchase takes a third of the channel.
+    let p = poll(&buyer, &policy(), demand(400_000), Millis(0)).expect("should buy");
+    assert_eq!(p.grant, 1_000_000);
+    buyer.record(p, Millis(0));
+
+    // Only 2 M left, which is two more purchases — already worth replacing,
+    // well before the 80% the threshold would wait for.
+    assert_eq!(buyer.cumulative(), 1_000_000, "a third of the way through");
+    assert!(
+        buyer.needs_rollover(80),
+        "should ask for a replacement while there is still room to use it"
+    );
+}
+
+#[test]
+fn a_channel_with_plenty_of_room_is_left_alone() {
+    let mut buyer = opened(CAPACITY);
+    let p = poll(&buyer, &policy(), demand(400_000), Millis(0)).expect("should buy");
+    buyer.record(p, Millis(0));
+
+    assert!(
+        !buyer.needs_rollover(80),
+        "1 M against a 1 GiB channel is no reason to fund another"
+    );
+}

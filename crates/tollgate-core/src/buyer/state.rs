@@ -199,6 +199,9 @@ pub struct Buyer {
     /// cap is refused once per window forever, which walks straight through the
     /// signature-verification budget `min_window_ms` exists to protect.
     pub(super) capped_at: Option<(u64, Millis)>,
+    /// Units bought by the most recent purchase, so a rollover can be started
+    /// before a channel is too small to carry another one.
+    pub(super) last_grant: u64,
     /// State as it stood before the most recent purchase.
     ///
     /// A TopUp is fire-and-forget, so we assume it landed and advance. If a
@@ -221,6 +224,7 @@ impl Buyer {
             deadline: Millis::ZERO,
             started: false,
             capped_at: None,
+            last_grant: 0,
             prior: None,
         }
     }
@@ -288,13 +292,24 @@ impl Buyer {
         }
     }
 
-    /// Whether the channel in use is far enough through its capacity to open a
-    /// replacement.
+    /// Whether to open a replacement for the channel in use.
     ///
     /// Rollover is started by the funder alone — only the party putting up new
     /// funds decides when — so this is only ever asked about our own channel.
     /// It stays false while one is already on the way, or the threshold would
     /// re-trigger on every check and fund a channel each time.
+    ///
+    /// Two triggers, and the second is the one that matters in practice:
+    ///
+    /// 1. **Past the threshold.** The channel is far enough through its
+    ///    capacity to be worth replacing.
+    /// 2. **Not enough headroom for another purchase like the last one.**
+    ///    A threshold alone is reactive, and a purchase is not gradual: a grant
+    ///    can take a channel from empty to full in a single step, and then
+    ///    there is nothing to move onto. The peer falls to the minimum flow
+    ///    allowance while a replacement is funded and verified — a round trip
+    ///    plus a mint swap — which is a visible stall for something entirely
+    ///    predictable.
     pub fn needs_rollover(&self, threshold_pct: u8) -> bool {
         if self.next.is_some() || self.pending.is_some() {
             return false;
@@ -305,6 +320,15 @@ impl Buyer {
         if active.capacity == 0 {
             return false;
         }
+
+        // Room for more than the next purchase and the one after it. Exactly
+        // two is already too late: the replacement has to be funded, sent,
+        // verified and confirmed before the channel in use runs dry, and that
+        // is a round trip plus a mint swap.
+        if active.headroom() <= self.last_grant.saturating_mul(2) {
+            return true;
+        }
+
         // Widened rather than saturated: saturating either side would make a
         // large channel look permanently past its threshold.
         (active.cumulative as u128) * 100 >= (active.capacity as u128) * (threshold_pct as u128)
@@ -347,6 +371,7 @@ impl Buyer {
         self.rate = purchase.rate;
         self.deadline = now + purchase.window_ms as u64;
         self.started = true;
+        self.last_grant = purchase.grant;
 
         // A purchase at or under the cap does not disprove it, so the cap
         // stands until it expires on its own.

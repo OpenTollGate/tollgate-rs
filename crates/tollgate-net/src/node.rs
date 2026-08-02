@@ -375,6 +375,9 @@ impl Node {
             }
 
             Action::SettleChannel { peer, channel_id } => {
+                // Worth logging: a channel settling far sooner than expected is
+                // what a rollover going wrong looks like from outside.
+                debug!(%peer, ?channel_id, "settling a channel");
                 let channels = Arc::clone(&self.channels);
                 tokio::task::spawn_blocking(move || {
                     if let Err(e) = channels.settle(channel_id) {

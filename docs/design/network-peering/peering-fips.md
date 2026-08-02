@@ -262,3 +262,22 @@ The following FIPS modifications are required for TollGate integration. Full det
 | Message transport (future) | Native FSP port | Optimization; removes the TCP handshake per session |
 | MMP metrics | Exposed for visibility, never an input to price | The peer influences its own metrics, so pricing from them lets it price itself |
 | Peer identification | pubkey <-> node_addr mapping | Deterministic, same keypair serves both |
+
+---
+
+## Per-Peer Rate
+
+**Not yet expressible over FIPS.** A grant buys a rate, and the control-socket
+surface FIPS exposes today is a binary forwarding policy — `local_only` or
+`full` — which cannot say 3.12 MiB/s.
+
+Shaping outside FIPS only reaches part of the traffic: each node is a distinct
+`fd00::/8` address on the TUN interface, so `tc` there can shape what terminates
+at or originates from this node, but **transit never traverses the TUN** and
+transit is what a gateway sells.
+
+So this is a FIPS-side change, requested as feature 2 in
+[FIPS_FEATURE_REQUESTS.md](../FIPS_FEATURE_REQUESTS.md). Until it lands, a
+TollGate node over FIPS can gate delivery but cannot deliver a bought rate, and
+the IP adapter ([peering-ip.md](peering-ip.md)) is the only substrate where the
+full model runs.
