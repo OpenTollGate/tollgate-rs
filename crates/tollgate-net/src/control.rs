@@ -20,7 +20,7 @@ use tollgate_core::access::AccessLevel;
 use tollgate_core::session::{Phase, Sessions};
 use tracing::debug;
 
-use crate::adapter::Adapter;
+use crate::adapter::ResourceAdapter;
 
 /// Where the control socket lives unless the operator says otherwise.
 pub fn default_socket_path() -> PathBuf {
@@ -103,7 +103,7 @@ pub type Published = Arc<ArcSwap<Snapshot>>;
 /// Build a snapshot of everything the node is doing right now.
 pub fn snapshot(
     sessions: &Sessions,
-    adapter: &Adapter,
+    adapter: &dyn ResourceAdapter,
     pubkey: &str,
     mint_url: &str,
     uptime_ms: u64,

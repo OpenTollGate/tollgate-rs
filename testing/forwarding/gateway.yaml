@@ -1,0 +1,22 @@
+# Sells transit. Forwards the client's traffic and gates it with nftables.
+identity:
+  secret_key: "78d684aa33cd91c862ca9dd42e969b97e511bf36d4848e6a90d967bc174199c1"
+mint:
+  url: "http://gateway:3338"
+  listen: "0.0.0.0:3338"
+  unit: "byte"
+vouchers:
+  accepted_mints:
+    - "http://gateway:3338"
+access:
+  minimum_flow:
+    enabled: true
+    bytes_per_second: 4096
+grants:
+  window_range_ms: [200, 30000]
+forwarding:
+  # The real thing: the kernel forwards, nftables gates, tc shapes.
+  mode: nftables
+  interface: eth0
+network:
+  listen: "0.0.0.0:4747"

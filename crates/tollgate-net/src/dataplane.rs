@@ -23,7 +23,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tollgate_protocol::PubKey;
 use tracing::debug;
 
-use crate::adapter::Adapter;
+use crate::adapter::Loopback;
 
 /// How often the writer wakes to release what the bucket has accrued.
 ///
@@ -36,7 +36,7 @@ const WRITE_INTERVAL: Duration = Duration::from_millis(50);
 const CHUNK: usize = 64 * 1024;
 
 /// Accept data-plane connections forever.
-pub async fn listen(listener: TcpListener, adapter: Arc<Adapter>) -> Result<()> {
+pub async fn listen(listener: TcpListener, adapter: Arc<Loopback>) -> Result<()> {
     loop {
         let (stream, addr) = listener.accept().await.context("accept")?;
         let adapter = Arc::clone(&adapter);
@@ -48,7 +48,7 @@ pub async fn listen(listener: TcpListener, adapter: Arc<Adapter>) -> Result<()> 
     }
 }
 
-async fn accept_one(mut stream: TcpStream, adapter: Arc<Adapter>) -> Result<()> {
+async fn accept_one(mut stream: TcpStream, adapter: Arc<Loopback>) -> Result<()> {
     // The caller identifies itself with its raw compressed key. This is not
     // authentication — the control plane and the layer below it deal with that.
     // It only says which meter the bytes belong to.
@@ -61,7 +61,7 @@ async fn accept_one(mut stream: TcpStream, adapter: Arc<Adapter>) -> Result<()> 
 }
 
 /// Open a data-plane connection to a peer.
-pub async fn dial(addr: &str, local: PubKey, peer: PubKey, adapter: Arc<Adapter>) -> Result<()> {
+pub async fn dial(addr: &str, local: PubKey, peer: PubKey, adapter: Arc<Loopback>) -> Result<()> {
     let mut stream = TcpStream::connect(addr)
         .await
         .with_context(|| format!("dial data plane at {addr}"))?;
@@ -73,7 +73,7 @@ pub async fn dial(addr: &str, local: PubKey, peer: PubKey, adapter: Arc<Adapter>
 }
 
 /// Stream in both directions until either side stops.
-async fn run(stream: TcpStream, peer: PubKey, adapter: Arc<Adapter>) -> Result<()> {
+async fn run(stream: TcpStream, peer: PubKey, adapter: Arc<Loopback>) -> Result<()> {
     stream.set_nodelay(true).ok();
     let (mut rx, mut tx) = stream.into_split();
 
@@ -113,5 +113,49 @@ async fn run(stream: TcpStream, peer: PubKey, adapter: Arc<Adapter>) -> Result<(
     match result {
         Ok(()) => Ok(()),
         Err(e) => bail!(e),
+    }
+}
+
+/// Keep a data-plane connection to a peer up for as long as it will have us.
+///
+/// A peering is a standing relationship, so a dropped connection is a reason to
+/// wait and redial rather than to give up.
+pub fn keep_dialing(control_endpoint: String, local: PubKey, peer: PubKey, adapter: Arc<Loopback>) {
+    tokio::spawn(async move {
+        let Some(addr) = one_port_up(&control_endpoint) else {
+            tracing::warn!(%control_endpoint, "cannot derive a data-plane address");
+            return;
+        };
+        loop {
+            if let Err(e) = dial(&addr, local, peer, Arc::clone(&adapter)).await {
+                debug!(%addr, error = %e, "data dial failed");
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+}
+
+/// The data plane sits one port above the control plane.
+pub fn one_port_up(control: &str) -> Option<String> {
+    let (host, port) = control.rsplit_once(':')?;
+    let port: u16 = port.parse().ok()?;
+    Some(format!("{host}:{}", port.checked_add(1)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_data_plane_is_one_port_above_the_control_plane() {
+        assert_eq!(
+            one_port_up("127.0.0.1:4747").as_deref(),
+            Some("127.0.0.1:4748")
+        );
+    }
+
+    #[test]
+    fn an_endpoint_without_a_port_has_no_data_plane() {
+        assert_eq!(one_port_up("127.0.0.1"), None);
     }
 }

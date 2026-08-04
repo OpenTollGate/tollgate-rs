@@ -37,6 +37,8 @@ pub struct File {
     pub buying: BuyingSection,
     /// Where to listen.
     pub network: NetworkSection,
+    /// What actually delivers the resource.
+    pub forwarding: ForwardingSection,
     /// Per-peer overrides, keyed by hex-encoded compressed pubkey.
     pub peers: BTreeMap<String, PeerSection>,
 }
@@ -202,6 +204,43 @@ impl Default for NetworkSection {
             listen: format!("0.0.0.0:{DEFAULT_PORT}"),
         }
     }
+}
+
+/// What actually delivers the resource.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ForwardingSection {
+    /// `loopback` or `nftables`.
+    ///
+    /// `loopback` shapes and meters a socket of its own and forwards nobody's
+    /// traffic — right for a demo or a test, and it runs anywhere. `nftables`
+    /// gates and shapes the kernel's forwarding path, which is what actually
+    /// sells transit, and needs Linux with `CAP_NET_ADMIN`.
+    pub mode: ForwardingMode,
+    /// Interface facing the peers, where their `tc` classes live.
+    pub interface: String,
+}
+
+impl Default for ForwardingSection {
+    fn default() -> Self {
+        Self {
+            // The default has to run everywhere and gate nothing it does not
+            // own: a node that silently installed firewall rules because of a
+            // missing config line would be a nasty surprise.
+            mode: ForwardingMode::Loopback,
+            interface: "eth0".into(),
+        }
+    }
+}
+
+/// Which adapter enforces access and rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ForwardingMode {
+    /// A shaper and meter over a dedicated socket.
+    Loopback,
+    /// nftables and `tc` on the kernel forwarding path.
+    Nftables,
 }
 
 /// Per-peer overrides.

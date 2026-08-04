@@ -41,8 +41,21 @@ use tollgate_protocol::{ChannelId, PubKey, Signature};
 
 use super::{ChannelBackend, FundedChannel, VerifiedChannel};
 
-/// How long a funded channel stays refundable to the payer.
-const CHANNEL_TTL_SECONDS: u64 = 3_600;
+/// Shortest expiry we will accept on a channel a peer funds to pay us.
+///
+/// The refund timelock is what a payer would rely on if the receiver vanished,
+/// so a receiver insisting on a floor is insisting the payer keep its own
+/// protection.
+const MIN_EXPIRY_SECONDS: u64 = 3_600;
+
+/// How long a channel *we* fund stays refundable to us.
+///
+/// Comfortably longer than the floor we ourselves require, because time passes
+/// between choosing the expiry and the peer checking it: the vouchers have to
+/// be acquired, the channel funded, the Accept sent and the funding verified.
+/// Funding at exactly the minimum means every one of those seconds counts
+/// against us, and the peer refuses a channel that was valid when it was built.
+const CHANNEL_TTL_SECONDS: u64 = 2 * MIN_EXPIRY_SECONDS;
 
 /// Largest single proof amount used when funding.
 ///
@@ -124,7 +137,7 @@ impl SpilmanChannels {
         let host = ConfigurableHost::new(
             ConfigurableHostConfig {
                 mints,
-                min_expiry_seconds: CHANNEL_TTL_SECONDS,
+                min_expiry_seconds: MIN_EXPIRY_SECONDS,
                 pricing_scale: 1,
                 storage: StorageConfig::Memory,
                 // A pricing entry with **nothing priced**. The amount due is a

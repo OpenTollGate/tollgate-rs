@@ -1,21 +1,25 @@
-//! The resource adapter: what actually delivers, and what counts it.
+//! A shaper and meter over a dedicated socket, in userspace.
 //!
-//! Core decides *what* to enforce; this enforces it. For network forwarding
-//! that means two numbers per peer — an access level and a shaping rate — and
-//! two counters. Nothing here knows about grants, windows or vouchers.
+//! It forwards nobody's traffic — the bytes it governs are produced by
+//! [`crate::dataplane`] rather than by somebody wanting them — but the shaping
+//! and the accounting are real, which is what lets the whole protocol be
+//! exercised on any platform.
 //!
-//! The shaper is a token bucket. A grant buys a rate for a window, and the rate
-//! is fixed for the grant's life, so a bucket that refills at that rate and
-//! caps at a short burst is the natural enforcement: capacity left unused early
-//! is not banked, which is exactly what the bucket's cap expresses.
+//! The shaper is a token bucket. A grant buys a rate that is fixed for the
+//! grant's life, so a bucket refilling at that rate and capped at a short burst
+//! is the natural enforcement: capacity left unused early is not banked, which
+//! is exactly what the cap expresses.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Mutex;
 
 use tollgate_core::access::AccessLevel;
 use tollgate_core::grant::units_in;
 use tollgate_core::meter::Counters;
 use tollgate_protocol::PubKey;
+
+use super::ResourceAdapter;
 
 /// How much of an unused second the bucket will hold onto.
 ///
@@ -53,26 +57,24 @@ impl Default for Link {
     }
 }
 
-/// A resource adapter that forwards nothing but meters and shapes for real.
-///
-/// The bytes it governs are produced by the data plane in
-/// [`crate::dataplane`], which is a real socket carrying real traffic at
-/// whatever rate this permits. What is simulated is only *where the traffic
-/// comes from* — a generator rather than a user — not the shaping or the
-/// accounting.
+/// A shaper and meter over a dedicated socket.
 #[derive(Debug, Default)]
-pub struct Adapter {
+pub struct Loopback {
     links: Mutex<HashMap<PubKey, Link>>,
 }
 
-impl Adapter {
+impl Loopback {
     /// An adapter with no peers.
     pub fn new() -> Self {
         Self::default()
     }
+}
 
-    /// Apply an access level decided by core.
-    pub fn set_access(&self, peer: PubKey, access: AccessLevel) {
+impl ResourceAdapter for Loopback {
+    /// Nothing is gated by address here, so the address is not needed.
+    fn register(&self, _peer: PubKey, _addr: IpAddr) {}
+
+    fn set_access(&self, peer: PubKey, access: AccessLevel) {
         self.links
             .lock()
             .expect("not poisoned")
@@ -81,11 +83,7 @@ impl Adapter {
             .access = access;
     }
 
-    /// Apply a shaping rate decided by core.
-    ///
-    /// Already includes the minimum flow allowance as its floor, so there is no
-    /// second rule here about what an unpaid peer may do.
-    pub fn set_shaping_rate(&self, peer: PubKey, rate: u64) {
+    fn set_shaping_rate(&self, peer: PubKey, rate: u64) {
         let mut links = self.links.lock().expect("not poisoned");
         let link = links.entry(peer).or_default();
         link.rate = rate;
@@ -95,8 +93,7 @@ impl Adapter {
         link.tokens = link.tokens.min(units_in(rate, BURST_MS));
     }
 
-    /// Set what we want to pull from this peer, in units per second.
-    pub fn set_demand(&self, peer: PubKey, rate: u64) {
+    fn set_demand(&self, peer: PubKey, rate: u64) {
         self.links
             .lock()
             .expect("not poisoned")
@@ -105,8 +102,7 @@ impl Adapter {
             .demand = rate;
     }
 
-    /// What we want to pull from this peer.
-    pub fn demand(&self, peer: PubKey) -> u64 {
+    fn demand(&self, peer: PubKey) -> u64 {
         self.links
             .lock()
             .expect("not poisoned")
@@ -115,8 +111,7 @@ impl Adapter {
             .unwrap_or(0)
     }
 
-    /// Cumulative counters for a peer.
-    pub fn counters(&self, peer: PubKey) -> Counters {
+    fn counters(&self, peer: PubKey) -> Counters {
         self.links
             .lock()
             .expect("not poisoned")
@@ -125,8 +120,7 @@ impl Adapter {
             .unwrap_or(Counters::ZERO)
     }
 
-    /// The rate a peer is currently shaped to.
-    pub fn shaping_rate(&self, peer: PubKey) -> u64 {
+    fn shaping_rate(&self, peer: PubKey) -> u64 {
         self.links
             .lock()
             .expect("not poisoned")
@@ -135,8 +129,7 @@ impl Adapter {
             .unwrap_or(0)
     }
 
-    /// Every peer the adapter is tracking.
-    pub fn peers(&self) -> Vec<PubKey> {
+    fn peers(&self) -> Vec<PubKey> {
         self.links
             .lock()
             .expect("not poisoned")
@@ -145,6 +138,12 @@ impl Adapter {
             .collect()
     }
 
+    fn remove(&self, peer: PubKey) {
+        self.links.lock().expect("not poisoned").remove(&peer);
+    }
+}
+
+impl Loopback {
     /// Refill a peer's bucket for `elapsed_ms` and take out what may be sent now.
     ///
     /// Returns the number of units the data plane is allowed to write. A peer
@@ -181,11 +180,6 @@ impl Adapter {
         let link = links.entry(peer).or_default();
         link.counters.received = link.counters.received.saturating_add(units);
     }
-
-    /// Forget a peer that has gone away.
-    pub fn remove(&self, peer: PubKey) {
-        self.links.lock().expect("not poisoned").remove(&peer);
-    }
 }
 
 #[cfg(test)]
@@ -198,7 +192,7 @@ mod tests {
 
     #[test]
     fn the_bucket_refills_at_the_shaped_rate() {
-        let adapter = Adapter::new();
+        let adapter = Loopback::new();
         adapter.set_access(peer(), AccessLevel::Active);
         adapter.set_shaping_rate(peer(), 1_000_000);
 
@@ -214,7 +208,7 @@ mod tests {
     fn an_idle_peer_cannot_bank_capacity_and_then_burst() {
         // This is the token bucket standing in for "capacity left unused early
         // is not banked for later".
-        let adapter = Adapter::new();
+        let adapter = Loopback::new();
         adapter.set_access(peer(), AccessLevel::Active);
         adapter.set_shaping_rate(peer(), 1_000_000);
 
@@ -228,7 +222,7 @@ mod tests {
 
     #[test]
     fn a_rate_rise_does_not_release_tokens_banked_at_the_old_rate() {
-        let adapter = Adapter::new();
+        let adapter = Loopback::new();
         adapter.set_access(peer(), AccessLevel::Active);
         adapter.set_shaping_rate(peer(), 1_000);
         adapter.take_allowance(peer(), 10_000);
@@ -243,7 +237,7 @@ mod tests {
 
     #[test]
     fn a_blocked_peer_with_no_allowance_gets_nothing() {
-        let adapter = Adapter::new();
+        let adapter = Loopback::new();
         adapter.set_access(peer(), AccessLevel::None);
         adapter.set_shaping_rate(peer(), 0);
         assert_eq!(adapter.take_allowance(peer(), 1_000), 0);
@@ -253,7 +247,7 @@ mod tests {
     fn a_blocked_peer_still_gets_the_minimum_flow_allowance() {
         // The allowance is what breaks the bootstrap circle: a peer holding no
         // vouchers has to be able to reach a mint to acquire some.
-        let adapter = Adapter::new();
+        let adapter = Loopback::new();
         adapter.set_access(peer(), AccessLevel::None);
         adapter.set_shaping_rate(peer(), 4_096);
         assert_eq!(
@@ -265,7 +259,7 @@ mod tests {
 
     #[test]
     fn counters_accumulate_in_both_directions() {
-        let adapter = Adapter::new();
+        let adapter = Loopback::new();
         adapter.record_delivered(peer(), 1_000);
         adapter.record_delivered(peer(), 500);
         adapter.record_received(peer(), 200);

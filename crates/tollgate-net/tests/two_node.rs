@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use tollgate_core::buyer::BuyerPolicy;
 use tollgate_core::config::{GrantPolicy, NodePolicy, PeerPolicy};
-use tollgate_net::adapter::Adapter;
+use tollgate_net::adapter::{Loopback, ResourceAdapter};
 use tollgate_net::channel::LocalChannels;
 use tollgate_net::identity::Identity;
 use tollgate_net::node::{Node, NodeConfig, PeerConfig};
@@ -54,7 +54,7 @@ fn buyer_policy() -> BuyerPolicy {
 }
 
 /// Start a node and return its identity and adapter.
-fn spawn_node(port: u16, mint: &str, peers: Vec<PeerConfig>) -> (PubKey, Arc<Adapter>) {
+fn spawn_node(port: u16, mint: &str, peers: Vec<PeerConfig>) -> (PubKey, Arc<Loopback>) {
     let identity = Identity::generate();
     let pubkey = identity.pubkey();
     let listen: SocketAddr = format!("127.0.0.1:{port}").parse().expect("address");
@@ -72,11 +72,13 @@ fn spawn_node(port: u16, mint: &str, peers: Vec<PeerConfig>) -> (PubKey, Arc<Ada
         peers,
     };
 
+    let adapter = Arc::new(Loopback::new());
     let node = Node::new(
         &config,
         Arc::new(LocalChannels::new(config.identity.clone())),
+        adapter.clone(),
     );
-    let adapter = node.adapter();
+    spawn_loopback_plane(&config, adapter.clone());
     tokio::spawn(async move {
         if let Err(e) = node.run(config, std::future::pending()).await {
             eprintln!("node stopped: {e}");
@@ -84,6 +86,29 @@ fn spawn_node(port: u16, mint: &str, peers: Vec<PeerConfig>) -> (PubKey, Arc<Ada
     });
 
     (pubkey, adapter)
+}
+
+/// Start the loopback data plane for a node: a listener, and a dialer per peer.
+///
+/// The node does not do this itself, because a kernel adapter forwards real
+/// traffic and has no socket of its own.
+fn spawn_loopback_plane(config: &NodeConfig, adapter: Arc<Loopback>) {
+    let listen = config.data_listen();
+    let local = config.identity.pubkey();
+    let a = adapter.clone();
+    tokio::spawn(async move {
+        if let Ok(l) = tokio::net::TcpListener::bind(listen).await {
+            let _ = tollgate_net::dataplane::listen(l, a).await;
+        }
+    });
+    for peer in &config.peers {
+        tollgate_net::dataplane::keep_dialing(
+            peer.endpoint.clone(),
+            local,
+            peer.pubkey,
+            adapter.clone(),
+        );
+    }
 }
 
 /// Poll until `check` passes, or give up. Real sockets and a real clock mean
@@ -100,7 +125,7 @@ async fn wait_for(label: &str, timeout: Duration, mut check: impl FnMut() -> boo
 }
 
 /// Bytes per second actually arriving from a peer, measured over `window`.
-async fn measure_download(adapter: &Adapter, peer: PubKey, window: Duration) -> u64 {
+async fn measure_download(adapter: &Loopback, peer: PubKey, window: Duration) -> u64 {
     let before = adapter.counters(peer).received;
     tokio::time::sleep(window).await;
     let after = adapter.counters(peer).received;
@@ -108,7 +133,7 @@ async fn measure_download(adapter: &Adapter, peer: PubKey, window: Duration) -> 
 }
 
 /// Bring up a provider and a client, connected and paying.
-async fn connected_pair() -> (PubKey, Arc<Adapter>, PubKey, Arc<Adapter>) {
+async fn connected_pair() -> (PubKey, Arc<Loopback>, PubKey, Arc<Loopback>) {
     let provider_port = take_port_pair();
     let client_port = take_port_pair();
 
@@ -281,11 +306,13 @@ async fn a_channel_that_fills_up_rolls_over_and_buying_continues() {
         mint_url: format!("http://127.0.0.1:{}", provider_port + 10_000),
         peers: vec![],
     };
+    let provider_adapter = Arc::new(Loopback::new());
     let node = Node::new(
         &config,
         Arc::new(LocalChannels::new(config.identity.clone())),
+        provider_adapter.clone(),
     );
-    let provider_adapter = node.adapter();
+    spawn_loopback_plane(&config, provider_adapter.clone());
     tokio::spawn(async move {
         let _ = node.run(config, std::future::pending::<()>()).await;
     });

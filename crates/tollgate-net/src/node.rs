@@ -19,10 +19,9 @@ use tollgate_core::{Action, Event, Millis};
 use tollgate_protocol::{ChannelUpdate, Message, PubKey, TopUp, TopUpReject};
 use tracing::{debug, info, warn};
 
-use crate::adapter::Adapter;
+use crate::adapter::ResourceAdapter;
 use crate::channel::ChannelBackend;
 use crate::control;
-use crate::dataplane;
 use crate::identity::Identity;
 use crate::wire::{self, Wire};
 
@@ -64,7 +63,10 @@ pub struct NodeConfig {
 }
 
 impl NodeConfig {
-    /// The data plane sits one port above the control plane.
+    /// Where the loopback data plane listens, one port above the control plane.
+    ///
+    /// Only meaningful for the loopback adapter: a kernel adapter forwards real
+    /// traffic and has no socket of its own.
     pub fn data_listen(&self) -> SocketAddr {
         let mut addr = self.listen;
         addr.set_port(self.listen.port() + 1);
@@ -76,13 +78,10 @@ impl NodeConfig {
 pub struct Node {
     identity: Identity,
     sessions: Sessions,
-    adapter: Arc<Adapter>,
+    adapter: Arc<dyn ResourceAdapter>,
     channels: Arc<dyn ChannelBackend>,
     /// Outbound queue per connected peer.
     links: HashMap<PubKey, mpsc::Sender<Message>>,
-    /// Where the data-plane socket for each peer lives, so we can dial it once
-    /// the control plane has introduced us.
-    endpoints: HashMap<PubKey, String>,
     /// What the node is doing, republished each tick for the control socket.
     published: control::Published,
     started: Instant,
@@ -90,25 +89,26 @@ pub struct Node {
 
 impl Node {
     /// Build a node. Nothing is listening or dialing until [`Self::run`].
-    pub fn new(config: &NodeConfig, channels: Arc<dyn ChannelBackend>) -> Self {
+    pub fn new(
+        config: &NodeConfig,
+        channels: Arc<dyn ChannelBackend>,
+        adapter: Arc<dyn ResourceAdapter>,
+    ) -> Self {
         let mut sessions = Sessions::new(
             config.identity.pubkey(),
             config.policy.clone(),
             config.buyer,
         );
-        let mut endpoints = HashMap::new();
         for peer in &config.peers {
             sessions.set_peer_policy(peer.pubkey, peer.policy);
-            endpoints.insert(peer.pubkey, peer.endpoint.clone());
         }
 
         Self {
             identity: config.identity.clone(),
             sessions,
-            adapter: Arc::new(Adapter::new()),
+            adapter,
             channels,
             links: HashMap::new(),
-            endpoints,
             published: Default::default(),
             started: Instant::now(),
         }
@@ -121,7 +121,7 @@ impl Node {
     }
 
     /// The adapter, so a demo or a test can set demand and read counters.
-    pub fn adapter(&self) -> Arc<Adapter> {
+    pub fn adapter(&self) -> Arc<dyn ResourceAdapter> {
         Arc::clone(&self.adapter)
     }
 
@@ -154,19 +154,13 @@ impl Node {
         let control = TcpListener::bind(config.listen)
             .await
             .with_context(|| format!("bind control plane on {}", config.listen))?;
-        let data = TcpListener::bind(config.data_listen())
-            .await
-            .with_context(|| format!("bind data plane on {}", config.data_listen()))?;
-
         info!(
             pubkey = %self.identity.pubkey(),
             control = %config.listen,
-            data = %config.data_listen(),
             "node listening"
         );
 
         tokio::spawn(wire::listen(control, wire_tx.clone()));
-        tokio::spawn(dataplane::listen(data, Arc::clone(&self.adapter)));
 
         for peer in &config.peers {
             spawn_dialer(peer.clone(), wire_tx.clone());
@@ -210,20 +204,12 @@ impl Node {
 
     async fn on_wire(&mut self, event: Wire, done: &mpsc::Sender<Event>) {
         match event {
-            Wire::PeerUp { peer, tx } => {
+            Wire::PeerUp { peer, addr, tx } => {
                 self.links.insert(peer, tx);
+                // Tie the key the protocol knows to the address the kernel
+                // knows, before anything is gated or shaped for this peer.
+                self.adapter.register(peer, addr.ip());
                 self.dispatch(Event::PeerConnected { peer }, done).await;
-
-                // The control plane has introduced us, so we know where to find
-                // their data plane: one port above the endpoint we dialed.
-                if let Some(endpoint) = self.endpoints.get(&peer).cloned() {
-                    spawn_data_dialer(
-                        endpoint,
-                        self.identity.pubkey(),
-                        peer,
-                        Arc::clone(&self.adapter),
-                    );
-                }
             }
             Wire::PeerDown { peer } => {
                 self.links.remove(&peer);
@@ -258,7 +244,7 @@ impl Node {
     fn publish(&self, config: &NodeConfig) {
         self.published.store(Arc::new(control::snapshot(
             &self.sessions,
-            &self.adapter,
+            self.adapter.as_ref(),
             &hex::encode(self.identity.pubkey().0),
             &config.mint_url,
             self.started.elapsed().as_millis() as u64,
@@ -468,45 +454,4 @@ fn spawn_dialer(peer: PeerConfig, wire_tx: mpsc::Sender<Wire>) {
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
-}
-
-/// Keep the data-plane connection to a peer up for as long as it will have us.
-fn spawn_data_dialer(endpoint: String, local: PubKey, peer: PubKey, adapter: Arc<Adapter>) {
-    tokio::spawn(async move {
-        let Some(addr) = data_endpoint(&endpoint) else {
-            warn!(%endpoint, "cannot derive a data-plane address");
-            return;
-        };
-        loop {
-            if let Err(e) = dataplane::dial(&addr, local, peer, Arc::clone(&adapter)).await {
-                debug!(%addr, error = %e, "data dial failed");
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    });
-}
-
-/// The data plane sits one port above the control plane.
-fn data_endpoint(control: &str) -> Option<String> {
-    let (host, port) = control.rsplit_once(':')?;
-    let port: u16 = port.parse().ok()?;
-    Some(format!("{host}:{}", port.checked_add(1)?))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_data_plane_is_one_port_above_the_control_plane() {
-        assert_eq!(
-            data_endpoint("127.0.0.1:4747").as_deref(),
-            Some("127.0.0.1:4748")
-        );
-    }
-
-    #[test]
-    fn a_control_endpoint_without_a_port_has_no_data_plane() {
-        assert_eq!(data_endpoint("127.0.0.1"), None);
-    }
 }

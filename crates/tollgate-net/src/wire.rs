@@ -9,6 +9,8 @@
 //! already authenticated and encrypted the link; on plain IP the operator wraps
 //! the connection as it sees fit.
 
+use std::net::SocketAddr;
+
 use anyhow::{Context, Result, bail};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -23,6 +25,11 @@ pub enum Wire {
     PeerUp {
         /// Who is on the other end.
         peer: PubKey,
+        /// Where they reach us from.
+        ///
+        /// The session identifies a peer by public key; the kernel identifies
+        /// it by address, and an adapter that gates forwarding needs both.
+        addr: SocketAddr,
         /// Outbound queue for this link.
         tx: mpsc::Sender<Message>,
     },
@@ -123,13 +130,16 @@ async fn run(
     node: mpsc::Sender<Wire>,
 ) -> Result<()> {
     stream.set_nodelay(true).ok();
+    let addr = stream
+        .peer_addr()
+        .context("the peer's address is what an adapter gates on")?;
     let (mut rx_half, mut tx_half) = stream.into_split();
 
     // Depth enough to absorb a burst of setup messages without making core
     // wait, but bounded: a peer that will not read should not be able to make
     // us buffer without limit.
     let (tx, mut outbox) = mpsc::channel::<Message>(64);
-    node.send(Wire::PeerUp { peer, tx }).await.ok();
+    node.send(Wire::PeerUp { peer, addr, tx }).await.ok();
 
     // Anything read before the peer was identified still has to reach core,
     // in the order it arrived.
