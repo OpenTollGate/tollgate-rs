@@ -23,7 +23,7 @@ use crate::adapter::ResourceAdapter;
 use crate::channel::ChannelBackend;
 use crate::control;
 use crate::identity::Identity;
-use crate::wire::{self, Wire};
+use crate::wire::{self, Identify, Wire};
 
 /// How often the node samples its meters and ticks core.
 ///
@@ -54,6 +54,9 @@ pub struct NodeConfig {
     pub buyer: BuyerPolicy,
     /// Control-plane listen address.
     pub listen: SocketAddr,
+    /// Whether a peer's announced key has to agree with the address it
+    /// connects from.
+    pub identify: Identify,
     /// Where this node serves its own mint.
     pub mint_listen: SocketAddr,
     /// The URL peers reach that mint on, advertised in our Offer.
@@ -157,13 +160,23 @@ impl Node {
         info!(
             pubkey = %self.identity.pubkey(),
             control = %config.listen,
+            identify = ?config.identify,
             "node listening"
         );
 
-        tokio::spawn(wire::listen(control, wire_tx.clone()));
+        // Refusing every connection is the correct behaviour here and a baffling
+        // one to debug, so say it once at startup rather than once per peer.
+        if config.identify == Identify::Fips && config.listen.is_ipv4() {
+            warn!(
+                control = %config.listen,
+                "listening on IPv4 while checking mesh identity: no peer on fips0 can reach this"
+            );
+        }
+
+        tokio::spawn(wire::listen(control, wire_tx.clone(), config.identify));
 
         for peer in &config.peers {
-            spawn_dialer(peer.clone(), wire_tx.clone());
+            spawn_dialer(peer.clone(), wire_tx.clone(), config.identify);
         }
 
         let mut ticker = tokio::time::interval(TICK);
@@ -445,10 +458,11 @@ fn log_refusal(peer: PubKey, reject: &TopUpReject, side: Side) {
 ///
 /// A peering is a standing relationship, not a one-shot connection, so a
 /// refused dial is a reason to wait and try again rather than to give up.
-fn spawn_dialer(peer: PeerConfig, wire_tx: mpsc::Sender<Wire>) {
+fn spawn_dialer(peer: PeerConfig, wire_tx: mpsc::Sender<Wire>, identify: Identify) {
     tokio::spawn(async move {
         loop {
-            if let Err(e) = wire::dial(&peer.endpoint, peer.pubkey, wire_tx.clone()).await {
+            if let Err(e) = wire::dial(&peer.endpoint, peer.pubkey, wire_tx.clone(), identify).await
+            {
                 debug!(endpoint = %peer.endpoint, error = %e, "control dial failed");
             }
             tokio::time::sleep(Duration::from_secs(2)).await;

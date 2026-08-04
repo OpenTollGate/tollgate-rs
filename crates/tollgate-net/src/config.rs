@@ -16,6 +16,7 @@ use tollgate_protocol::{DEFAULT_PORT, PubKey};
 
 use crate::identity::Identity;
 use crate::node::{NodeConfig, PeerConfig};
+use crate::wire::Identify;
 
 /// The whole configuration file.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -195,6 +196,10 @@ impl Default for BuyingSection {
 #[serde(deny_unknown_fields, default)]
 pub struct NetworkSection {
     /// Control-plane listen address. The data plane is the next port up.
+    ///
+    /// Under `forwarding.mode: fips` this has to be somewhere mesh peers reach
+    /// — the node's own `fips0` address, or `[::]` — because a connection from
+    /// anywhere else cannot prove whose key it is announcing and is refused.
     pub listen: String,
 }
 
@@ -217,7 +222,9 @@ pub struct ForwardingSection {
     /// gates and shapes the kernel's forwarding path, which is what actually
     /// sells transit, and needs Linux with `CAP_NET_ADMIN`. `fips` sells
     /// transit across a FIPS mesh instead, leaving the enforcement to the FIPS
-    /// node and reaching it over its control socket.
+    /// node and reaching it over its control socket — and, because a mesh
+    /// address names a key, it is also the only mode in which a peer's
+    /// announced identity is checked rather than believed.
     pub mode: ForwardingMode,
     /// Interface facing the peers, where their `tc` classes live.
     ///
@@ -352,11 +359,21 @@ impl File {
             }
         }
 
+        // Not a knob of its own: what makes an announced key checkable is the
+        // network carrying the control plane, and that is what `forwarding.mode`
+        // already says. A FIPS node therefore verifies from the first
+        // connection, with no second setting to forget.
+        let identify = match self.forwarding.mode {
+            ForwardingMode::Fips => Identify::Fips,
+            ForwardingMode::Loopback | ForwardingMode::Nftables => Identify::Claimed,
+        };
+
         Ok(NodeConfig {
             identity,
             policy,
             buyer,
             listen,
+            identify,
             mint_listen,
             mint_url: self.mint.url.clone(),
             peers,
@@ -400,6 +417,27 @@ mod tests {
         )
         .expect("parse");
         assert_eq!(file.resolve().expect("resolve").policy.minimum_flow, 0);
+    }
+
+    #[test]
+    fn a_fips_node_checks_a_peers_key_against_its_address() {
+        let file: File = serde_yaml::from_str("forwarding:\n  mode: fips\n").expect("parse");
+        assert_eq!(file.resolve().expect("resolve").identify, Identify::Fips);
+    }
+
+    #[test]
+    fn a_node_on_plain_ip_has_nothing_to_check_a_key_against() {
+        // Including nftables, which gates by address: there the announced key is
+        // taken on trust, and the operator has to wrap the link itself.
+        for mode in ["loopback", "nftables"] {
+            let yaml = format!("forwarding:\n  mode: {mode}\n");
+            let file: File = serde_yaml::from_str(&yaml).expect("parse");
+            assert_eq!(
+                file.resolve().expect("resolve").identify,
+                Identify::Claimed,
+                "{mode}"
+            );
+        }
     }
 
     #[test]

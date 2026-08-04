@@ -188,8 +188,20 @@ Backed by a streaming subscription on the FIPS control socket, not per-call poll
 FIPS peers are identified by:
 - **Public key**: secp256k1 compressed public key (33 bytes) — same as TollGate's peer identifier
 - **node_addr**: SHA-256 hash of public key, truncated to 16 bytes — used in packet headers and bloom filters
+- **FIPS address**: `0xfd` followed by the first 15 bytes of the node_addr — the peer's IPv6 address on `fips0`
 
-The adapter maps between the two as needed. TollGate protocol uses pubkey; FIPS forwarding uses node_addr. The mapping is deterministic (`node_addr = SHA256(pubkey)[..16]`).
+The adapter maps between them as needed. TollGate protocol uses pubkey; FIPS forwarding uses node_addr; the control plane arrives from the FIPS address. All three mappings are deterministic and derived locally (`crates/tollgate-net/src/fips.rs`), so nothing has to be asked of the daemon.
+
+### Verifying the peer
+
+An `Announce` is unauthenticated — it is the first thing a stranger says. On plain IP there is nothing to check it against, and an adapter that binds pubkey to address does so on the peer's own say-so: claim a paying peer's key and your address rides their grant.
+
+A FIPS address is a commitment to a key. The mesh routes to it only for the node that completed the Noise IK handshake for that key, so an impostor cannot receive at the address it would have to claim. `forwarding.mode: fips` therefore turns on the check (`wire::Identify::Fips`): every control connection, accepted or dialled, must come from the FIPS address of the key it announces, or it is dropped before a session exists.
+
+Two consequences worth stating:
+
+- The control plane has to be bound where mesh peers reach it — `network.listen` on the node's `fips0` address, or on `[::]`. A connection arriving on plain IPv4 is refused under this mode rather than waved through, which is the point: otherwise a node that also answered on its uplink would have a way in that skips the handshake.
+- `tollgated` and `fipsd` on the same node must run the same key. The check compares a TollGate pubkey against a FIPS address; if the two daemons hold different identities, every peer's derived address is somebody else's.
 
 ---
 
@@ -242,6 +254,7 @@ The following FIPS modifications are required for TollGate integration. Full det
 | Metrics | MMP (SRTT, loss, ETX, goodput, jitter) — control-socket subscription | None / coarse |
 | Peer discovery | Automatic (FIPS mesh protocol) | Dynamic probing / static |
 | Authentication | Noise IK (automatic) | Unauthenticated (default) |
+| Announced identity | Checked against the address it arrives from | Taken on trust |
 | Message transport | Raw TCP over IPv6 adapter (initially), FSP port (future) | Raw TCP, or HTTP/WS if a network requires it |
 | Control plane overhead | Negligible; livestreamed counters | Per-peer firewall rule installs/removes |
 

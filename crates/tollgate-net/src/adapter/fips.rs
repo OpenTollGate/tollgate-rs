@@ -22,13 +22,8 @@
 //!
 //! # Identity
 //!
-//! TollGate carries a 33-byte compressed secp256k1 key; FIPS names the same key
-//! two ways, and this derives both locally rather than asking:
-//!
-//! - the **npub** (NIP-19 bech32 of the 32-byte x-only key) is how a policy is
-//!   addressed,
-//! - the **node address** (`SHA-256(x-only)[..16]`) is how the reply is keyed,
-//!   because a node address is a hash and cannot be turned back into an npub.
+//! A peer is addressed by npub and reported by node address, both derived from
+//! its TollGate key in [`crate::fips`] rather than asked for.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -39,13 +34,13 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use sha2::{Digest, Sha256};
 use tollgate_core::access::AccessLevel;
 use tollgate_core::meter::Counters;
 use tollgate_protocol::PubKey;
 use tracing::{debug, warn};
 
 use super::ResourceAdapter;
+use crate::fips::names;
 
 /// How long a counter reading is reused before the socket is asked again.
 ///
@@ -247,20 +242,6 @@ impl Fips {
     }
 }
 
-/// The npub and node address FIPS knows a TollGate key by.
-///
-/// Both come from the 32-byte x-only key, which is the compressed key without
-/// its parity byte.
-fn fips_names(peer: PubKey) -> (String, String) {
-    let x_only = &peer.0[1..];
-
-    let npub = bech32::encode::<bech32::Bech32>(bech32::Hrp::parse_unchecked("npub"), x_only)
-        .expect("an x-only key is always encodable as bech32");
-
-    let node_addr = hex::encode(&Sha256::digest(x_only)[..16]);
-    (npub, node_addr)
-}
-
 impl ResourceAdapter for Fips {
     /// Note a peer. The address is ignored: FIPS gates by authenticated
     /// identity, and there is nothing here for an address to add.
@@ -269,7 +250,7 @@ impl ResourceAdapter for Fips {
         if peers.contains_key(&peer) {
             return;
         }
-        let (npub, node_addr) = fips_names(peer);
+        let (npub, node_addr) = names(peer);
         debug!(%peer, %npub, "peer registered with FIPS");
         peers.insert(
             peer,
@@ -363,49 +344,5 @@ impl ResourceAdapter for Fips {
         ) {
             warn!(npub = %entry.npub, error = format!("{e:#}"), "could not clear a peer's transit policy");
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A key whose npub and node address are known, so the derivation is
-    /// checked against FIPS's own encoding rather than against itself.
-    ///
-    /// Taken from `PeerIdentity::from_npub` in the FIPS tree: the npub below
-    /// decodes to this x-only key, and FIPS derives the node address as
-    /// `SHA-256(x-only)[..16]`.
-    const NPUB: &str = "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6";
-    const X_ONLY_HEX: &str = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
-
-    fn key() -> PubKey {
-        let mut bytes = [0u8; 33];
-        // The parity byte is not part of the identity FIPS names, so either
-        // prefix must produce the same npub.
-        bytes[0] = 0x02;
-        bytes[1..].copy_from_slice(&hex::decode(X_ONLY_HEX).unwrap());
-        PubKey(bytes)
-    }
-
-    #[test]
-    fn a_key_maps_to_the_npub_fips_names_it_by() {
-        let (npub, _) = fips_names(key());
-        assert_eq!(npub, NPUB);
-    }
-
-    #[test]
-    fn the_parity_byte_does_not_change_the_identity() {
-        let mut odd = key();
-        odd.0[0] = 0x03;
-        assert_eq!(fips_names(key()), fips_names(odd));
-    }
-
-    #[test]
-    fn a_key_maps_to_the_node_address_fips_reports_it_by() {
-        let (_, node_addr) = fips_names(key());
-        let expected = hex::encode(&Sha256::digest(hex::decode(X_ONLY_HEX).unwrap())[..16]);
-        assert_eq!(node_addr, expected);
-        assert_eq!(node_addr.len(), 32, "16 bytes, hex-encoded");
     }
 }

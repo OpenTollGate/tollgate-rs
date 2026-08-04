@@ -16,6 +16,7 @@ use tollgate_net::adapter::{Loopback, ResourceAdapter};
 use tollgate_net::channel::LocalChannels;
 use tollgate_net::identity::Identity;
 use tollgate_net::node::{Node, NodeConfig, PeerConfig};
+use tollgate_net::wire::Identify;
 use tollgate_protocol::PubKey;
 
 /// Each node needs two consecutive ports, and tests share a process, so hand
@@ -64,6 +65,9 @@ fn spawn_node(port: u16, mint: &str, peers: Vec<PeerConfig>) -> (PubKey, Arc<Loo
         policy: node_policy(mint),
         buyer: buyer_policy(),
         listen,
+        // These tests talk plain IP on loopback, where an address commits to
+        // nothing there is to check.
+        identify: Identify::Claimed,
         // Unused here: these tests drive `LocalChannels`, so no mint is served.
         mint_listen: format!("127.0.0.1:{}", port + 10_000)
             .parse()
@@ -299,6 +303,7 @@ async fn a_channel_that_fills_up_rolls_over_and_buying_continues() {
         listen: format!("127.0.0.1:{provider_port}")
             .parse()
             .expect("address"),
+        identify: Identify::Claimed,
         // Unused here: these tests drive `LocalChannels`, so no mint is served.
         mint_listen: format!("127.0.0.1:{}", provider_port + 10_000)
             .parse()
