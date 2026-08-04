@@ -18,9 +18,12 @@ TESTING_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export TESTING_DIR
 
 # Build the image unless the caller already has one.
+#
+# A topology that needs something other than the ordinary image — one that also
+# carries a FIPS daemon, say — names its own build script in `BUILD_SCRIPT`.
 tollgate::build() {
   if [[ -z "${SKIP_BUILD:-}" ]]; then
-    "$TESTING_DIR/scripts/build.sh"
+    "$TESTING_DIR/scripts/${BUILD_SCRIPT:-build.sh}"
   fi
 }
 
@@ -53,6 +56,18 @@ tollgate::snapshot() {
 tollgate::peer_field() {
   local service="$1" field="$2"
   tollgate::snapshot "$service" | jq -r ".peers[0].$field // empty" 2>/dev/null || true
+}
+
+# The same, for a node with more than one peer: says which one.
+#
+# `peers[0]` is whichever key sorts first, so a topology where a node sells to
+# one peer and carries for another has to name the peer it means or it will
+# assert against the wrong session half the time.
+tollgate::peer_field_of() {
+  local service="$1" pubkey="$2" field="$3"
+  tollgate::snapshot "$service" \
+    | jq -r --arg k "$pubkey" ".peers[] | select(.pubkey == \$k) | .$field // empty" \
+      2>/dev/null || true
 }
 
 # Poll until `condition` succeeds, or fail the test.

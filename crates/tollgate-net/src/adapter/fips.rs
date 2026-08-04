@@ -65,6 +65,9 @@ struct Peer {
     node_addr: String,
     access: AccessLevel,
     rate: u64,
+    /// What this node wants to pull from the peer, if anything. See
+    /// [`ResourceAdapter::set_demand`].
+    demand: u64,
     counters: Counters,
 }
 
@@ -183,7 +186,7 @@ impl Fips {
             serde_json::json!({
                 "npub": peer.npub,
                 "admitted": peer.access.delivery_allowed(),
-                "rate_bytes_per_sec": peer.rate,
+                "rate_bytes_per_sec": rate_for_fips(peer.rate),
             }),
         );
         if let Err(e) = result {
@@ -242,6 +245,21 @@ impl Fips {
     }
 }
 
+/// A rate as FIPS wants it: a number, or `null` for unshaped.
+///
+/// Core says `u64::MAX` when a peer is not metered at all — an operator's own
+/// upstream, or a peer it has chosen not to charge. FIPS has a word for that,
+/// and it is not a very large bucket: passing the number through would build a
+/// token bucket sized in exabytes and do per-packet arithmetic against it
+/// forever, to arrive at the answer `null` gives for free.
+fn rate_for_fips(rate: u64) -> serde_json::Value {
+    if rate == u64::MAX {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::from(rate)
+    }
+}
+
 impl ResourceAdapter for Fips {
     /// Note a peer. The address is ignored: FIPS gates by authenticated
     /// identity, and there is nothing here for an address to add.
@@ -259,6 +277,7 @@ impl ResourceAdapter for Fips {
                 node_addr,
                 access: AccessLevel::None,
                 rate: 0,
+                demand: 0,
                 counters: Counters::default(),
             },
         );
@@ -305,14 +324,29 @@ impl ResourceAdapter for Fips {
             .unwrap_or_default()
     }
 
-    fn demand(&self, _peer: PubKey) -> u64 {
-        // A forwarding node wants no traffic of its own: what it buys upstream
-        // follows from what its customers pull through it, which the node works
-        // out from the meters.
-        0
+    /// What this node wants to pull from a peer, in bytes per second.
+    ///
+    /// Zero unless something says otherwise, which is right for a node that
+    /// only forwards: what it buys upstream follows from what its customers
+    /// pull through it, and that it works out from the meters.
+    ///
+    /// A node at the edge of the mesh is the other case — it wants traffic for
+    /// itself, and FIPS offers no signal for how much. So this is a value that
+    /// is told rather than measured, which is what `tollgated --demand` sets.
+    fn demand(&self, peer: PubKey) -> u64 {
+        self.peers
+            .lock()
+            .expect("not poisoned")
+            .get(&peer)
+            .map(|p| p.demand)
+            .unwrap_or(0)
     }
 
-    fn set_demand(&self, _peer: PubKey, _rate: u64) {}
+    fn set_demand(&self, peer: PubKey, rate: u64) {
+        if let Some(entry) = self.peers.lock().expect("not poisoned").get_mut(&peer) {
+            entry.demand = rate;
+        }
+    }
 
     fn shaping_rate(&self, peer: PubKey) -> u64 {
         self.peers
@@ -344,5 +378,23 @@ impl ResourceAdapter for Fips {
         ) {
             warn!(npub = %entry.npub, error = format!("{e:#}"), "could not clear a peer's transit policy");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_metered_rate_goes_to_fips_as_a_number() {
+        assert_eq!(rate_for_fips(2_500_000), serde_json::json!(2_500_000));
+        // Zero is a real policy — carried, but nothing gets through — and not
+        // the same thing as no ceiling at all.
+        assert_eq!(rate_for_fips(0), serde_json::json!(0));
+    }
+
+    #[test]
+    fn an_unmetered_peer_goes_to_fips_as_no_ceiling() {
+        assert_eq!(rate_for_fips(u64::MAX), serde_json::Value::Null);
     }
 }

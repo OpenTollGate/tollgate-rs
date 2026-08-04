@@ -19,6 +19,8 @@ SKIP_BUILD=1 testing/purchase/test.sh
 | `refusal/` | The gateway sells at most 3 MB/s; the client wants 8. It ends up shaped at the cap rather than blocked, and both sides log the refusal. |
 | `rollover/` | Channels sized to exhaust in seconds, so the test runs through several. Buying continues across each boundary. |
 | `allowance/` | A client that buys nothing stays on the minimum flow allowance — not blocked, because that allowance is what lets a peer with no vouchers acquire some. |
+| `forwarding/` | The gateway carries somebody else's packets: the client pulls a large file from a third host, every packet crosses the gateway, and nftables and `tc` hold it to the rate it bought. Asserts bytes, not elapsed time. |
+| `fips/` | The same claim with the enforcement in a FIPS mesh instead of the local kernel — three nodes, all traffic over `fips0`, the gateway the only node the other two can reach. Also asserts what only a mesh can: the peer that gets the grant is the peer that holds the key. |
 
 ## How a test sees what happened
 
@@ -30,9 +32,29 @@ The exception is `refusal/`, which does check the logs — because there the
 thing being asserted *is* that the operator can see why a peer is pinned at a
 limit.
 
+## The FIPS topology needs a second image
+
+`fips/` runs two daemons per container — `fipsd` forwards and `tollgated`
+sells — so it builds `tollgate-fips-test:latest` on top of the ordinary image:
+
+```sh
+testing/scripts/build-fips.sh     # tollgate-test, then fips-node, then both
+SKIP_BUILD=1 testing/fips/test.sh
+```
+
+`fipsd` is built from a FIPS checkout at `reference/fips`, which is not part of
+this repository; point `FIPS_CHECKOUT` elsewhere if yours lives somewhere else.
+The image is built from `git archive` rather than from the working tree, so
+only committed state reaches it — and docker is not asked to upload a
+multi-gigabyte `target/` as build context.
+
+Each node's `nsec` is the same secret key its `tollgated` runs as. It has to
+be: the control plane checks a peer's announced key against the mesh address
+the connection arrived from, and that address is derived from the key.
+
 ## Identities
 
-The two keypairs are fixed and checked in. A client has to name its gateway's
+The keypairs are fixed and checked in. A client has to name its gateway's
 public key in its config, so generating them per run would mean generating the
 configs too; fixed keys also make a failure reproducible.
 
@@ -59,6 +81,9 @@ against it — which is why the configs name compose service names rather than
 1. `docker-compose.yml` using `image: tollgate-test:latest`.
 2. A `gateway.yaml` and `client.yaml`.
 3. A `test.sh` that sources `../lib/common.sh` and calls `tollgate::start`.
+
+A topology needing a different image names its build script in `BUILD_SCRIPT`
+before calling `tollgate::start`, as `fips/` does.
 
 `common.sh` carries the waiting: these are real nodes on real sockets buying
 from a real mint, so nothing is instant and a fixed sleep is either flaky or
