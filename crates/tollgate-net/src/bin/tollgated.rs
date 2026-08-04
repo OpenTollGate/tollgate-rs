@@ -197,13 +197,18 @@ async fn main() -> Result<()> {
             } else {
                 file.forwarding.fips_socket.clone().into()
             };
-            let adapter = tollgate_net::adapter::Fips::new(&socket).with_context(|| {
-                format!(
-                    "reach the FIPS control socket at {}; is fipsd running?",
-                    socket.display()
-                )
-            })?;
-            info!(socket = %socket.display(), "setting transit policy on the FIPS node");
+            let adapter = tollgate_net::adapter::Fips::new(&socket, config.policy.minimum_flow)
+                .with_context(|| {
+                    format!(
+                        "reach the FIPS control socket at {}; is fipsd running?",
+                        socket.display()
+                    )
+                })?;
+            info!(
+                socket = %socket.display(),
+                allowance = config.policy.minimum_flow,
+                "setting transit policy on the FIPS node"
+            );
             Arc::new(adapter)
         }
         #[cfg(not(unix))]

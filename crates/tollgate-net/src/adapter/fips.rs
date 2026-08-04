@@ -83,12 +83,21 @@ pub struct Fips {
 }
 
 impl Fips {
-    /// Connect to a FIPS control socket, failing if nothing answers.
+    /// Connect to a FIPS control socket and declare the floor, failing if
+    /// nothing answers.
     ///
     /// Probes rather than trusting the path: an adapter that cannot reach FIPS
     /// would report policies as applied while the mesh carried everything
     /// unshaped, which is worse than not starting.
-    pub fn new(socket: impl Into<PathBuf>) -> Result<Self> {
+    ///
+    /// `minimum_flow` becomes the default policy for peers this node has not
+    /// named — which is every peer, for the moment between its link coming up
+    /// and the first session reaching the point of setting a policy for it.
+    /// Without it that peer would be carried unshaped through exactly the
+    /// window in which it has bought nothing. Setting it once here, rather than
+    /// per peer as they arrive, is what makes the floor hold from the first
+    /// packet instead of the first tick.
+    pub fn new(socket: impl Into<PathBuf>, minimum_flow: u64) -> Result<Self> {
         let adapter = Self {
             socket: socket.into(),
             peers: Mutex::new(HashMap::new()),
@@ -102,6 +111,21 @@ impl Fips {
                     adapter.socket.display()
                 )
             })?;
+
+        // A floor of zero is a node that gives unpaid peers nothing at all,
+        // which is still a floor worth stating: without the default they would
+        // get everything.
+        adapter
+            .request(
+                "set_default_transit_policy",
+                serde_json::json!({
+                    "admitted": true,
+                    "rate_bytes_per_sec": minimum_flow,
+                }),
+            )
+            .context("declare the minimum flow allowance as the FIPS default")?;
+        debug!(minimum_flow, "unnamed peers held at the allowance");
+
         Ok(adapter)
     }
 
