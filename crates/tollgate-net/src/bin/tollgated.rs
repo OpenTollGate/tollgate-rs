@@ -190,6 +190,26 @@ async fn main() -> Result<()> {
         ForwardingMode::Nftables => {
             anyhow::bail!("forwarding.mode: nftables needs Linux")
         }
+        #[cfg(unix)]
+        ForwardingMode::Fips => {
+            let socket = if file.forwarding.fips_socket.is_empty() {
+                tollgate_net::adapter::Fips::default_socket_path()
+            } else {
+                file.forwarding.fips_socket.clone().into()
+            };
+            let adapter = tollgate_net::adapter::Fips::new(&socket).with_context(|| {
+                format!(
+                    "reach the FIPS control socket at {}; is fipsd running?",
+                    socket.display()
+                )
+            })?;
+            info!(socket = %socket.display(), "setting transit policy on the FIPS node");
+            Arc::new(adapter)
+        }
+        #[cfg(not(unix))]
+        ForwardingMode::Fips => {
+            anyhow::bail!("forwarding.mode: fips needs a Unix control socket")
+        }
     };
 
     let node = Node::new(&config, channels, adapter.clone());

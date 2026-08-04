@@ -17,6 +17,9 @@
 //! - [`Nftables`] gates and shapes the kernel's own forwarding path with
 //!   nftables and `tc`. This is the one that carries somebody else's packets,
 //!   and it needs Linux and `CAP_NET_ADMIN`.
+//! - [`Fips`] sets the same two numbers on a FIPS node through its control
+//!   socket, and lets the mesh enforce them. The only one whose peers are
+//!   authenticated before this node hears of them.
 
 use std::net::IpAddr;
 
@@ -24,10 +27,14 @@ use tollgate_core::access::AccessLevel;
 use tollgate_core::meter::Counters;
 use tollgate_protocol::PubKey;
 
+#[cfg(unix)]
+mod fips;
 mod loopback;
 #[cfg(target_os = "linux")]
 mod nftables;
 
+#[cfg(unix)]
+pub use fips::Fips;
 pub use loopback::Loopback;
 #[cfg(target_os = "linux")]
 pub use nftables::Nftables;

@@ -210,15 +210,22 @@ impl Default for NetworkSection {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ForwardingSection {
-    /// `loopback` or `nftables`.
+    /// `loopback`, `nftables` or `fips`.
     ///
     /// `loopback` shapes and meters a socket of its own and forwards nobody's
     /// traffic — right for a demo or a test, and it runs anywhere. `nftables`
     /// gates and shapes the kernel's forwarding path, which is what actually
-    /// sells transit, and needs Linux with `CAP_NET_ADMIN`.
+    /// sells transit, and needs Linux with `CAP_NET_ADMIN`. `fips` sells
+    /// transit across a FIPS mesh instead, leaving the enforcement to the FIPS
+    /// node and reaching it over its control socket.
     pub mode: ForwardingMode,
     /// Interface facing the peers, where their `tc` classes live.
+    ///
+    /// Only `nftables` uses this.
     pub interface: String,
+    /// FIPS control socket to drive. Only `fips` uses this; empty means the
+    /// same default path the FIPS daemon itself resolves.
+    pub fips_socket: String,
 }
 
 impl Default for ForwardingSection {
@@ -229,6 +236,7 @@ impl Default for ForwardingSection {
             // missing config line would be a nasty surprise.
             mode: ForwardingMode::Loopback,
             interface: "eth0".into(),
+            fips_socket: String::new(),
         }
     }
 }
@@ -241,6 +249,8 @@ pub enum ForwardingMode {
     Loopback,
     /// nftables and `tc` on the kernel forwarding path.
     Nftables,
+    /// Per-peer transit policy on a FIPS node, over its control socket.
+    Fips,
 }
 
 /// Per-peer overrides.
