@@ -22,6 +22,19 @@
 //! exhausts its grant sooner and falls to the allowance. No ingress policer is
 //! involved, and that is a design choice rather than an omission.
 //!
+//! And only traffic we **forward**, never traffic that terminates here. The
+//! distinction is load-bearing rather than tidy. A peer whose grant has lapsed
+//! falls to the minimum flow allowance, and the whole point of that allowance is
+//! to leave it able to reach us and buy its way back up. Shaping by destination
+//! address would put the control plane and the mint in the same class as the
+//! bulk transit that just exhausted the grant, so a peer saturating its link
+//! would starve the very messages that would have renewed it — a deadlock that
+//! ends with the session dropped as stale.
+//!
+//! So the forward hook marks what it forwards and `tc` classifies on that mark.
+//! Locally generated traffic never traverses that hook, is never marked, and
+//! falls through to the qdisc's default: unshaped.
+//!
 //! # Requirements
 //!
 //! Linux, `CAP_NET_ADMIN`, and `net.ipv4.ip_forward=1`. Without the capability
@@ -46,10 +59,28 @@ const TABLE: &str = "tollgate";
 
 /// Burst allowed by a peer's class, in milliseconds of its rate.
 ///
-/// Capacity left unused early is not banked, so this stays well under a window.
-/// Some slack is still needed: a class with no burst cannot pass a single
-/// full-sized packet at a low rate.
-const BURST_MS: u64 = 250;
+/// Deliberately tiny, because a grant is a quantity as well as a rate. Burst is
+/// permission to run ahead of the rate, and a peer that runs ahead spends the
+/// quantity before the window that sized it has elapsed — so the grant lapses
+/// early, the class collapses to the allowance with a full window's worth of
+/// packets in flight, and the transfer it was carrying stalls for seconds
+/// recovering. A quarter-second of burst was enough to do that on every few
+/// windows.
+///
+/// It cannot be zero: HTB needs enough to pass one full-sized packet per timer
+/// tick, and a class that cannot is one that never sends. Ten milliseconds
+/// clears that on any plausible tick rate while staying far inside the lead a
+/// buyer renews on.
+const BURST_MS: u64 = 10;
+
+/// High bits of the packet mark this adapter sets, with the peer's class in the
+/// low bits.
+///
+/// The mark is a field the whole box shares, so a bare small integer would be
+/// asking to collide with whatever else marks packets here. This is not a
+/// reservation — nothing enforces one — but it is distinctive enough that a
+/// collision is a deliberate choice rather than an accident.
+const MARK_BASE: u32 = 0x7011_0000;
 
 /// One peer, as the kernel knows it.
 #[derive(Debug, Clone)]
@@ -131,6 +162,11 @@ impl Nftables {
 
         // The root qdisc every peer's class hangs off. `replace` so a restart
         // does not fail on one that already exists.
+        //
+        // The default class is deliberately one that is never created: HTB sends
+        // traffic it cannot classify straight to the device, unshaped. That is
+        // what carries this node's own packets — the control plane, the mint —
+        // and anything else the box is doing, none of which any peer bought.
         tc(&[
             "qdisc",
             "replace",
@@ -188,17 +224,35 @@ impl ResourceAdapter for Nftables {
         for name in [&delivered, &received] {
             let _ = nft(&["add", "counter", "inet", TABLE, name]);
         }
+        // Counting and marking are the same rule: a packet in the forward hook
+        // headed for this peer is exactly the packet its class should shape, so
+        // the classification is made here rather than inferred from addresses
+        // later.
+        let mark = MARK_BASE | classid as u32;
         let _ = nft(&[
-            "add", "rule", "inet", TABLE, "forward", "ip", "daddr", &ip, "counter", "name",
+            "add",
+            "rule",
+            "inet",
+            TABLE,
+            "forward",
+            "ip",
+            "daddr",
+            &ip,
+            "counter",
+            "name",
             &delivered,
+            "meta",
+            "mark",
+            "set",
+            &format!("{mark:#x}"),
         ]);
         let _ = nft(&[
             "add", "rule", "inet", TABLE, "forward", "ip", "saddr", &ip, "counter", "name",
             &received,
         ]);
 
-        // A class and a filter matching traffic toward the peer. Created once;
-        // only the rate is replaced afterwards.
+        // A class, and a filter that selects it by the mark set above. Created
+        // once; only the rate is replaced afterwards.
         let class = format!("1:{classid}");
         let _ = tc(&[
             "class",
@@ -224,11 +278,9 @@ impl ResourceAdapter for Nftables {
             "1:",
             "prio",
             "1",
-            "u32",
-            "match",
-            "ip",
-            "dst",
-            &format!("{ip}/32"),
+            "handle",
+            &format!("{mark:#x}"),
+            "fw",
             "flowid",
             &class,
         ]);

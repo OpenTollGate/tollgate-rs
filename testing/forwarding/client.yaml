@@ -13,8 +13,17 @@ access:
     enabled: true
     bytes_per_second: 4096
 buying:
-  window_ms: 1000
-  renew_lead_ms: 300
+  # A longer window than the other topologies use, because this one carries a
+  # real TCP flow rather than a synthetic one.
+  #
+  # The lead is what the renewal has to spare: miss it and the grant lapses, the
+  # class drops to the allowance with a whole window of packets in flight, and
+  # the transfer spends fifteen seconds in backoff recovering from a gap of a
+  # tenth of a second. The forfeit on renewing early is the ratio of the two, so
+  # scaling both up buys absolute tolerance at no extra cost — 1.2s of slack
+  # here rather than 0.3s, for the same 30% of each grant.
+  window_ms: 4000
+  renew_lead_ms: 1200
 network:
   listen: "0.0.0.0:4747"
 peers:

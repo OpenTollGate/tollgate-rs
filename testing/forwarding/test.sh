@@ -42,17 +42,27 @@ docker compose -f "$COMPOSE" exec -T gateway tc class show dev eth0 | grep -q ht
 # coincidence. An earlier version of this test passed while curl was moving
 # zero bytes.
 echo "  measuring a real download through the gateway ..."
+#
+# The blob is far larger than anything that will arrive in the time allowed, so
+# the transfer is cut off by the deadline rather than by running out of file.
+# That is what makes this a rate measurement: the numerator is fixed and the
+# bytes are whatever the shaper let through. (`curl` reports `200` rather than
+# `206` because the origin serves the whole file; it does not honour Range.)
+DURATION=20
 read -r code bytes speed <<<"$(docker compose -f "$COMPOSE" exec -T client curl -s \
-  --max-time 60 -r 0-9999999 -o /dev/null \
+  --max-time "$DURATION" -o /dev/null \
   -w '%{http_code} %{size_download} %{speed_download}' \
   http://172.29.0.10:8080/blob)"
 
 echo "  http $code, $bytes bytes at $speed B/s"
 
-[[ "$code" == "206" || "$code" == "200" ]] \
+[[ "$code" == "200" ]] \
   || tollgate::fail "the download did not succeed (http $code); nothing crossed the gateway"
-[[ "${bytes:-0}" -ge 9000000 ]] \
-  || tollgate::fail "only $bytes bytes arrived; the transfer did not complete"
+# At the rate bought, well over this arrives in the time allowed. A far smaller
+# number means the flow stalled part way — which is what a grant lapsing under
+# a transfer looks like, and is invisible in an average.
+[[ "${bytes:-0}" -ge $(( DURATION * 1500000 )) ]] \
+  || tollgate::fail "only $bytes bytes arrived in ${DURATION}s; the transfer stalled part way"
 
 # The rate bought was 2.5 MB/s. Generous bounds either side: an unshaped bridge
 # would deliver this an order of magnitude faster, and anything far below would
@@ -60,7 +70,7 @@ echo "  http $code, $bytes bytes at $speed B/s"
 speed=${speed%%.*}
 [[ "$speed" -lt 6000000 ]] \
   || tollgate::fail "$speed B/s is far above the 2.5 MB/s bought; nothing is shaping"
-[[ "$speed" -gt 1000000 ]] \
+[[ "$speed" -gt 1500000 ]] \
   || tollgate::fail "$speed B/s is far below the 2.5 MB/s bought"
 
 # And the gateway counted it in the kernel, which is what draws the grant down.
