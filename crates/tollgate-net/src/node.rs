@@ -32,13 +32,18 @@ use crate::wire::{self, Identify, Wire};
 /// the smallest grant window a payer can ask for.
 const TICK: Duration = Duration::from_millis(100);
 
-/// A peer we dial rather than wait for.
+/// A peer the operator has said something about.
 #[derive(Debug, Clone)]
 pub struct PeerConfig {
-    /// Their identity, known ahead of time — which is what lets us dial them.
+    /// Their identity, known ahead of time.
     pub pubkey: PubKey,
-    /// `host:port` of their control plane. The data plane is the next port up.
-    pub endpoint: String,
+    /// `host:port` of their control plane, if we are the side that dials. The
+    /// data plane is the next port up.
+    ///
+    /// `None` for a peer that dials us. Its policy still applies — refusing a
+    /// peer, or carrying it for free, is a decision about who it is and not
+    /// about who opened the connection.
+    pub endpoint: Option<String>,
     /// Operator overrides for this peer.
     pub policy: PeerPolicy,
 }
@@ -458,12 +463,17 @@ fn log_refusal(peer: PubKey, reject: &TopUpReject, side: Side) {
 ///
 /// A peering is a standing relationship, not a one-shot connection, so a
 /// refused dial is a reason to wait and try again rather than to give up.
+///
+/// A peer with no endpoint is one that dials us; there is nothing to reach out
+/// to, and its policy is already in place for when it does.
 fn spawn_dialer(peer: PeerConfig, wire_tx: mpsc::Sender<Wire>, identify: Identify) {
+    let Some(endpoint) = peer.endpoint.clone() else {
+        return;
+    };
     tokio::spawn(async move {
         loop {
-            if let Err(e) = wire::dial(&peer.endpoint, peer.pubkey, wire_tx.clone(), identify).await
-            {
-                debug!(endpoint = %peer.endpoint, error = %e, "control dial failed");
+            if let Err(e) = wire::dial(&endpoint, peer.pubkey, wire_tx.clone(), identify).await {
+                debug!(%endpoint, error = %e, "control dial failed");
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }

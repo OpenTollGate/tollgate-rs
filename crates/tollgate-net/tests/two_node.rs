@@ -56,7 +56,21 @@ fn buyer_policy() -> BuyerPolicy {
 
 /// Start a node and return its identity and adapter.
 fn spawn_node(port: u16, mint: &str, peers: Vec<PeerConfig>) -> (PubKey, Arc<Loopback>) {
-    let identity = Identity::generate();
+    let (pubkey, adapter, _) = spawn_node_as(Identity::generate(), port, mint, peers);
+    (pubkey, adapter)
+}
+
+/// The same, for a test that has to know a node's key before it starts — a
+/// policy written about a peer names it, so somebody has to be first.
+///
+/// Also hands back what the node publishes, which is where a session either
+/// appears or does not.
+fn spawn_node_as(
+    identity: Identity,
+    port: u16,
+    mint: &str,
+    peers: Vec<PeerConfig>,
+) -> (PubKey, Arc<Loopback>, tollgate_net::control::Published) {
     let pubkey = identity.pubkey();
     let listen: SocketAddr = format!("127.0.0.1:{port}").parse().expect("address");
 
@@ -82,6 +96,7 @@ fn spawn_node(port: u16, mint: &str, peers: Vec<PeerConfig>) -> (PubKey, Arc<Loo
         Arc::new(LocalChannels::new(config.identity.clone())),
         adapter.clone(),
     );
+    let published = node.published();
     spawn_loopback_plane(&config, adapter.clone());
     tokio::spawn(async move {
         if let Err(e) = node.run(config, std::future::pending()).await {
@@ -89,7 +104,7 @@ fn spawn_node(port: u16, mint: &str, peers: Vec<PeerConfig>) -> (PubKey, Arc<Loo
         }
     });
 
-    (pubkey, adapter)
+    (pubkey, adapter, published)
 }
 
 /// Start the loopback data plane for a node: a listener, and a dialer per peer.
@@ -106,12 +121,10 @@ fn spawn_loopback_plane(config: &NodeConfig, adapter: Arc<Loopback>) {
         }
     });
     for peer in &config.peers {
-        tollgate_net::dataplane::keep_dialing(
-            peer.endpoint.clone(),
-            local,
-            peer.pubkey,
-            adapter.clone(),
-        );
+        let Some(endpoint) = peer.endpoint.clone() else {
+            continue;
+        };
+        tollgate_net::dataplane::keep_dialing(endpoint, local, peer.pubkey, adapter.clone());
     }
 }
 
@@ -151,7 +164,7 @@ async fn connected_pair() -> (PubKey, Arc<Loopback>, PubKey, Arc<Loopback>) {
         "https://client.example/mint",
         vec![PeerConfig {
             pubkey: provider,
-            endpoint: format!("127.0.0.1:{provider_port}"),
+            endpoint: Some(format!("127.0.0.1:{provider_port}")),
             policy: PeerPolicy::default(),
         }],
     );
@@ -327,7 +340,7 @@ async fn a_channel_that_fills_up_rolls_over_and_buying_continues() {
         "https://client.example/mint",
         vec![PeerConfig {
             pubkey: provider,
-            endpoint: format!("127.0.0.1:{provider_port}"),
+            endpoint: Some(format!("127.0.0.1:{provider_port}")),
             policy: PeerPolicy::default(),
         }],
     );
@@ -357,5 +370,56 @@ async fn a_channel_that_fills_up_rolls_over_and_buying_continues() {
         provider_adapter.shaping_rate(client),
         2_500_000,
         "the client stopped being able to buy"
+    );
+}
+
+/// A peer the operator refused is refused when it calls in.
+///
+/// The refusal has to survive the fact that there is nothing to dial: a node
+/// does not reach out to a peer it will not talk to, so the entry carrying
+/// `blocked` is exactly the entry with no endpoint. Losing such entries for
+/// want of an address would admit precisely the peer being turned away.
+#[tokio::test]
+async fn a_blocked_peer_that_dials_in_is_refused() {
+    let provider_port = take_port_pair();
+    let client_port = take_port_pair();
+
+    // Somebody has to be named first, and it is the side being refused.
+    let client_identity = Identity::generate();
+    let client = client_identity.pubkey();
+
+    let (provider, _provider_adapter, published) = spawn_node_as(
+        Identity::generate(),
+        provider_port,
+        "https://provider.example/mint",
+        vec![PeerConfig {
+            pubkey: client,
+            endpoint: None,
+            policy: PeerPolicy {
+                blocked: true,
+                ..PeerPolicy::default()
+            },
+        }],
+    );
+
+    let (_client, _client_adapter, _) = spawn_node_as(
+        client_identity,
+        client_port,
+        "https://client.example/mint",
+        vec![PeerConfig {
+            pubkey: provider,
+            endpoint: Some(format!("127.0.0.1:{provider_port}")),
+            policy: PeerPolicy::default(),
+        }],
+    );
+
+    // The client redials every couple of seconds, so this covers several
+    // attempts rather than catching the gap between two of them.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+
+    let peers = &published.load().peers;
+    assert!(
+        peers.is_empty(),
+        "the blocked peer opened a session anyway: {peers:?}"
     );
 }

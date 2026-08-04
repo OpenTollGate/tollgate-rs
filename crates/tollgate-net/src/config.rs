@@ -270,7 +270,8 @@ pub struct PeerSection {
     pub blocked: bool,
     /// Override the node-wide received multiplier.
     pub received_multiplier: Option<u16>,
-    /// Static endpoint to dial. Peers without one have to dial us.
+    /// Static endpoint to dial. Peers without one have to dial us, and
+    /// everything else written here still applies to them when they do.
     pub endpoint: Option<String>,
 }
 
@@ -348,15 +349,15 @@ impl File {
                 blocked: section.blocked,
                 received_multiplier: section.received_multiplier,
             };
-            // A peer with no endpoint is one that dials us; we still hold its
-            // policy, we just never reach out.
-            if let Some(endpoint) = &section.endpoint {
-                peers.push(PeerConfig {
-                    pubkey,
-                    endpoint: endpoint.clone(),
-                    policy,
-                });
-            }
+            // A peer with no endpoint is one that dials us. It is still carried
+            // here, because the policy is the point: `blocked` on a peer that
+            // calls in is exactly the case that matters, and dropping the entry
+            // for want of an address would quietly admit it.
+            peers.push(PeerConfig {
+                pubkey,
+                endpoint: section.endpoint.clone(),
+                policy,
+            });
         }
 
         // Not a knob of its own: what makes an announced key checkable is the
@@ -452,7 +453,22 @@ mod tests {
         let key = "02".to_string() + &"11".repeat(32);
         let yaml = format!("peers:\n  \"{key}\":\n    no_charge: true\n");
         let file: File = serde_yaml::from_str(&yaml).expect("parse");
-        assert!(file.resolve().expect("resolve").peers.is_empty());
+        let peers = file.resolve().expect("resolve").peers;
+        assert_eq!(peers.len(), 1);
+        assert!(peers[0].endpoint.is_none(), "nothing to dial");
+    }
+
+    #[test]
+    fn a_peer_that_dials_us_still_gets_the_policy_written_for_it() {
+        // The case this exists for: a blocked peer has no endpoint, because a
+        // node does not dial one it refuses to talk to. Dropping the entry for
+        // want of an address would admit exactly the peer being turned away.
+        let key = "02".to_string() + &"11".repeat(32);
+        let yaml = format!("peers:\n  \"{key}\":\n    blocked: true\n");
+        let file: File = serde_yaml::from_str(&yaml).expect("parse");
+        let peers = file.resolve().expect("resolve").peers;
+        assert_eq!(peers.len(), 1);
+        assert!(peers[0].policy.blocked);
     }
 
     #[test]
@@ -462,7 +478,7 @@ mod tests {
         let file: File = serde_yaml::from_str(&yaml).expect("parse");
         let peers = file.resolve().expect("resolve").peers;
         assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].endpoint, "10.0.0.1:4747");
+        assert_eq!(peers[0].endpoint.as_deref(), Some("10.0.0.1:4747"));
     }
 
     #[test]

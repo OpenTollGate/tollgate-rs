@@ -167,12 +167,16 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("bind the data plane on {}", config.data_listen()))?;
             tokio::spawn(tollgate_net::dataplane::listen(data, loopback.clone()));
             for peer in &config.peers {
-                tollgate_net::dataplane::keep_dialing(
-                    peer.endpoint.clone(),
-                    config.identity.pubkey(),
-                    peer.pubkey,
-                    loopback.clone(),
-                );
+                // Only toward a peer we dial. One that dials us brings its own
+                // data-plane connection with it.
+                if let Some(endpoint) = &peer.endpoint {
+                    tollgate_net::dataplane::keep_dialing(
+                        endpoint.clone(),
+                        config.identity.pubkey(),
+                        peer.pubkey,
+                        loopback.clone(),
+                    );
+                }
             }
             info!(listen = %config.data_listen(), "loopback data plane");
             loopback
