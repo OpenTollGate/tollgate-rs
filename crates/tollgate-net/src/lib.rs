@@ -26,6 +26,7 @@ pub mod channel;
 pub mod config;
 pub mod control;
 pub mod dataplane;
+pub mod fips;
 pub mod identity;
 pub mod market;
 pub mod mint;

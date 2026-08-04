@@ -37,6 +37,10 @@ pub struct BuyerPolicy {
     pub raise_threshold_pct: u32,
     /// Renew this long before the deadline, so the next grant lands before the
     /// current one lapses and the peer drops to the minimum flow allowance.
+    ///
+    /// This is the one knob measured in absolute time rather than in
+    /// proportion, and it is the one that decides whether a real flow survives.
+    /// See [`BuyerPolicy::MIN_SAFE_LEAD_MS`].
     pub renew_lead_ms: u32,
     /// How long to respect a rate ceiling a provider named before testing
     /// whether capacity has freed up.
@@ -53,14 +57,73 @@ pub struct BuyerPolicy {
     pub max_rate: u64,
 }
 
+impl BuyerPolicy {
+    /// A renewal lead below this is asking for a lapsed grant.
+    ///
+    /// The lead is how late a renewal may be and still land before the grant it
+    /// replaces runs out — an absolute tolerance, in milliseconds, against
+    /// everything between deciding to buy and the provider applying the result:
+    /// a signature, a round trip, the provider's tick, a scheduler that had
+    /// something else to do. A node under load misses a few hundred
+    /// milliseconds without much trying.
+    ///
+    /// Missing it is expensive out of all proportion to the gap. The grant
+    /// lapses, the shaper drops to the minimum flow allowance with a window's
+    /// worth of packets in flight, and a TCP flow crossing that spends seconds
+    /// in backoff recovering from a gap of a tenth of a second. Measured, in
+    /// `testing/forwarding`: a 300 ms lead flaked under load; 1.2 s held.
+    ///
+    /// A thousand is not a fact about the protocol. It is the smallest lead
+    /// that has survived a loaded machine here.
+    pub const MIN_SAFE_LEAD_MS: u32 = 1_000;
+
+    /// The lead this policy can actually use inside a window of `window_ms`.
+    ///
+    /// The window is not entirely the payer's to choose — the provider bounds
+    /// it, and a short bound can leave a configured lead longer than the window
+    /// it renews inside. Taken literally that renews continuously: every grant
+    /// is already inside its own lead the moment it starts.
+    ///
+    /// Half the window is the ceiling. Past that a renewal forfeits more of the
+    /// grant than it keeps, which is a worse answer than renewing late.
+    pub fn lead_within(&self, window_ms: u32) -> u32 {
+        self.renew_lead_ms.min(window_ms / 2)
+    }
+
+    /// What renewing early costs, as a percentage of each grant.
+    ///
+    /// The forfeit is the lead over the window: buying again abandons whatever
+    /// is left of the grant in force. Absolute tolerance is bought with a
+    /// proportion of every grant, which is why scaling both together is free
+    /// and shortening the window is not.
+    pub fn forfeit_pct(&self, window_ms: u32) -> u32 {
+        if window_ms == 0 {
+            return 100;
+        }
+        self.lead_within(window_ms).saturating_mul(100) / window_ms
+    }
+
+    /// Whether the lead is too short to absorb ordinary scheduling jitter.
+    pub fn lead_is_thin(&self) -> bool {
+        self.renew_lead_ms < Self::MIN_SAFE_LEAD_MS
+    }
+}
+
 impl Default for BuyerPolicy {
+    /// A window and a lead that carry a real TCP flow.
+    ///
+    /// 1.2 s of tolerance for 30% of each grant. Both numbers were arrived at
+    /// by measurement rather than by taste: shorter leads lapse under load, and
+    /// the pair scales — a wider window at the same ratio buys more absolute
+    /// slack for the same proportional forfeit, at the cost of reacting to a
+    /// change in demand one window later.
     fn default() -> Self {
         Self {
             headroom_pct: 125,
             raise_threshold_pct: 150,
-            renew_lead_ms: 500,
+            renew_lead_ms: 1_200,
             cap_hold_ms: 10_000,
-            window_ms: 2_000,
+            window_ms: 4_000,
             min_rate: 0,
             max_rate: u64::MAX,
         }
@@ -199,6 +262,9 @@ pub struct Buyer {
     /// cap is refused once per window forever, which walks straight through the
     /// signature-verification budget `min_window_ms` exists to protect.
     pub(super) capped_at: Option<(u64, Millis)>,
+    /// Units bought by the most recent purchase, so a rollover can be started
+    /// before a channel is too small to carry another one.
+    pub(super) last_grant: u64,
     /// State as it stood before the most recent purchase.
     ///
     /// A TopUp is fire-and-forget, so we assume it landed and advance. If a
@@ -221,6 +287,7 @@ impl Buyer {
             deadline: Millis::ZERO,
             started: false,
             capped_at: None,
+            last_grant: 0,
             prior: None,
         }
     }
@@ -288,13 +355,24 @@ impl Buyer {
         }
     }
 
-    /// Whether the channel in use is far enough through its capacity to open a
-    /// replacement.
+    /// Whether to open a replacement for the channel in use.
     ///
     /// Rollover is started by the funder alone — only the party putting up new
     /// funds decides when — so this is only ever asked about our own channel.
     /// It stays false while one is already on the way, or the threshold would
     /// re-trigger on every check and fund a channel each time.
+    ///
+    /// Two triggers, and the second is the one that matters in practice:
+    ///
+    /// 1. **Past the threshold.** The channel is far enough through its
+    ///    capacity to be worth replacing.
+    /// 2. **Not enough headroom for another purchase like the last one.**
+    ///    A threshold alone is reactive, and a purchase is not gradual: a grant
+    ///    can take a channel from empty to full in a single step, and then
+    ///    there is nothing to move onto. The peer falls to the minimum flow
+    ///    allowance while a replacement is funded and verified — a round trip
+    ///    plus a mint swap — which is a visible stall for something entirely
+    ///    predictable.
     pub fn needs_rollover(&self, threshold_pct: u8) -> bool {
         if self.next.is_some() || self.pending.is_some() {
             return false;
@@ -305,6 +383,15 @@ impl Buyer {
         if active.capacity == 0 {
             return false;
         }
+
+        // Room for more than the next purchase and the one after it. Exactly
+        // two is already too late: the replacement has to be funded, sent,
+        // verified and confirmed before the channel in use runs dry, and that
+        // is a round trip plus a mint swap.
+        if active.headroom() <= self.last_grant.saturating_mul(2) {
+            return true;
+        }
+
         // Widened rather than saturated: saturating either side would make a
         // large channel look permanently past its threshold.
         (active.cumulative as u128) * 100 >= (active.capacity as u128) * (threshold_pct as u128)
@@ -347,6 +434,7 @@ impl Buyer {
         self.rate = purchase.rate;
         self.deadline = now + purchase.window_ms as u64;
         self.started = true;
+        self.last_grant = purchase.grant;
 
         // A purchase at or under the cap does not disprove it, so the cap
         // stands until it expires on its own.

@@ -19,12 +19,11 @@ use tollgate_core::{Action, Event, Millis};
 use tollgate_protocol::{ChannelUpdate, Message, PubKey, TopUp, TopUpReject};
 use tracing::{debug, info, warn};
 
-use crate::adapter::Adapter;
+use crate::adapter::ResourceAdapter;
 use crate::channel::ChannelBackend;
 use crate::control;
-use crate::dataplane;
 use crate::identity::Identity;
-use crate::wire::{self, Wire};
+use crate::wire::{self, Identify, Wire};
 
 /// How often the node samples its meters and ticks core.
 ///
@@ -33,13 +32,18 @@ use crate::wire::{self, Wire};
 /// the smallest grant window a payer can ask for.
 const TICK: Duration = Duration::from_millis(100);
 
-/// A peer we dial rather than wait for.
+/// A peer the operator has said something about.
 #[derive(Debug, Clone)]
 pub struct PeerConfig {
-    /// Their identity, known ahead of time — which is what lets us dial them.
+    /// Their identity, known ahead of time.
     pub pubkey: PubKey,
-    /// `host:port` of their control plane. The data plane is the next port up.
-    pub endpoint: String,
+    /// `host:port` of their control plane, if we are the side that dials. The
+    /// data plane is the next port up.
+    ///
+    /// `None` for a peer that dials us. Its policy still applies — refusing a
+    /// peer, or carrying it for free, is a decision about who it is and not
+    /// about who opened the connection.
+    pub endpoint: Option<String>,
     /// Operator overrides for this peer.
     pub policy: PeerPolicy,
 }
@@ -55,6 +59,9 @@ pub struct NodeConfig {
     pub buyer: BuyerPolicy,
     /// Control-plane listen address.
     pub listen: SocketAddr,
+    /// Whether a peer's announced key has to agree with the address it
+    /// connects from.
+    pub identify: Identify,
     /// Where this node serves its own mint.
     pub mint_listen: SocketAddr,
     /// The URL peers reach that mint on, advertised in our Offer.
@@ -64,7 +71,10 @@ pub struct NodeConfig {
 }
 
 impl NodeConfig {
-    /// The data plane sits one port above the control plane.
+    /// Where the loopback data plane listens, one port above the control plane.
+    ///
+    /// Only meaningful for the loopback adapter: a kernel adapter forwards real
+    /// traffic and has no socket of its own.
     pub fn data_listen(&self) -> SocketAddr {
         let mut addr = self.listen;
         addr.set_port(self.listen.port() + 1);
@@ -76,13 +86,10 @@ impl NodeConfig {
 pub struct Node {
     identity: Identity,
     sessions: Sessions,
-    adapter: Arc<Adapter>,
+    adapter: Arc<dyn ResourceAdapter>,
     channels: Arc<dyn ChannelBackend>,
     /// Outbound queue per connected peer.
     links: HashMap<PubKey, mpsc::Sender<Message>>,
-    /// Where the data-plane socket for each peer lives, so we can dial it once
-    /// the control plane has introduced us.
-    endpoints: HashMap<PubKey, String>,
     /// What the node is doing, republished each tick for the control socket.
     published: control::Published,
     started: Instant,
@@ -90,25 +97,26 @@ pub struct Node {
 
 impl Node {
     /// Build a node. Nothing is listening or dialing until [`Self::run`].
-    pub fn new(config: &NodeConfig, channels: Arc<dyn ChannelBackend>) -> Self {
+    pub fn new(
+        config: &NodeConfig,
+        channels: Arc<dyn ChannelBackend>,
+        adapter: Arc<dyn ResourceAdapter>,
+    ) -> Self {
         let mut sessions = Sessions::new(
             config.identity.pubkey(),
             config.policy.clone(),
             config.buyer,
         );
-        let mut endpoints = HashMap::new();
         for peer in &config.peers {
             sessions.set_peer_policy(peer.pubkey, peer.policy);
-            endpoints.insert(peer.pubkey, peer.endpoint.clone());
         }
 
         Self {
             identity: config.identity.clone(),
             sessions,
-            adapter: Arc::new(Adapter::new()),
+            adapter,
             channels,
             links: HashMap::new(),
-            endpoints,
             published: Default::default(),
             started: Instant::now(),
         }
@@ -121,7 +129,7 @@ impl Node {
     }
 
     /// The adapter, so a demo or a test can set demand and read counters.
-    pub fn adapter(&self) -> Arc<Adapter> {
+    pub fn adapter(&self) -> Arc<dyn ResourceAdapter> {
         Arc::clone(&self.adapter)
     }
 
@@ -154,22 +162,26 @@ impl Node {
         let control = TcpListener::bind(config.listen)
             .await
             .with_context(|| format!("bind control plane on {}", config.listen))?;
-        let data = TcpListener::bind(config.data_listen())
-            .await
-            .with_context(|| format!("bind data plane on {}", config.data_listen()))?;
-
         info!(
             pubkey = %self.identity.pubkey(),
             control = %config.listen,
-            data = %config.data_listen(),
+            identify = ?config.identify,
             "node listening"
         );
 
-        tokio::spawn(wire::listen(control, wire_tx.clone()));
-        tokio::spawn(dataplane::listen(data, Arc::clone(&self.adapter)));
+        // Refusing every connection is the correct behaviour here and a baffling
+        // one to debug, so say it once at startup rather than once per peer.
+        if config.identify == Identify::Fips && config.listen.is_ipv4() {
+            warn!(
+                control = %config.listen,
+                "listening on IPv4 while checking mesh identity: no peer on fips0 can reach this"
+            );
+        }
+
+        tokio::spawn(wire::listen(control, wire_tx.clone(), config.identify));
 
         for peer in &config.peers {
-            spawn_dialer(peer.clone(), wire_tx.clone());
+            spawn_dialer(peer.clone(), wire_tx.clone(), config.identify);
         }
 
         let mut ticker = tokio::time::interval(TICK);
@@ -210,20 +222,12 @@ impl Node {
 
     async fn on_wire(&mut self, event: Wire, done: &mpsc::Sender<Event>) {
         match event {
-            Wire::PeerUp { peer, tx } => {
+            Wire::PeerUp { peer, addr, tx } => {
                 self.links.insert(peer, tx);
+                // Tie the key the protocol knows to the address the kernel
+                // knows, before anything is gated or shaped for this peer.
+                self.adapter.register(peer, addr.ip());
                 self.dispatch(Event::PeerConnected { peer }, done).await;
-
-                // The control plane has introduced us, so we know where to find
-                // their data plane: one port above the endpoint we dialed.
-                if let Some(endpoint) = self.endpoints.get(&peer).cloned() {
-                    spawn_data_dialer(
-                        endpoint,
-                        self.identity.pubkey(),
-                        peer,
-                        Arc::clone(&self.adapter),
-                    );
-                }
             }
             Wire::PeerDown { peer } => {
                 self.links.remove(&peer);
@@ -258,7 +262,7 @@ impl Node {
     fn publish(&self, config: &NodeConfig) {
         self.published.store(Arc::new(control::snapshot(
             &self.sessions,
-            &self.adapter,
+            self.adapter.as_ref(),
             &hex::encode(self.identity.pubkey().0),
             &config.mint_url,
             self.started.elapsed().as_millis() as u64,
@@ -375,6 +379,9 @@ impl Node {
             }
 
             Action::SettleChannel { peer, channel_id } => {
+                // Worth logging: a channel settling far sooner than expected is
+                // what a rollover going wrong looks like from outside.
+                debug!(%peer, ?channel_id, "settling a channel");
                 let channels = Arc::clone(&self.channels);
                 tokio::task::spawn_blocking(move || {
                     if let Err(e) = channels.settle(channel_id) {
@@ -456,54 +463,19 @@ fn log_refusal(peer: PubKey, reject: &TopUpReject, side: Side) {
 ///
 /// A peering is a standing relationship, not a one-shot connection, so a
 /// refused dial is a reason to wait and try again rather than to give up.
-fn spawn_dialer(peer: PeerConfig, wire_tx: mpsc::Sender<Wire>) {
+///
+/// A peer with no endpoint is one that dials us; there is nothing to reach out
+/// to, and its policy is already in place for when it does.
+fn spawn_dialer(peer: PeerConfig, wire_tx: mpsc::Sender<Wire>, identify: Identify) {
+    let Some(endpoint) = peer.endpoint.clone() else {
+        return;
+    };
     tokio::spawn(async move {
         loop {
-            if let Err(e) = wire::dial(&peer.endpoint, peer.pubkey, wire_tx.clone()).await {
-                debug!(endpoint = %peer.endpoint, error = %e, "control dial failed");
+            if let Err(e) = wire::dial(&endpoint, peer.pubkey, wire_tx.clone(), identify).await {
+                debug!(%endpoint, error = %e, "control dial failed");
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
-}
-
-/// Keep the data-plane connection to a peer up for as long as it will have us.
-fn spawn_data_dialer(endpoint: String, local: PubKey, peer: PubKey, adapter: Arc<Adapter>) {
-    tokio::spawn(async move {
-        let Some(addr) = data_endpoint(&endpoint) else {
-            warn!(%endpoint, "cannot derive a data-plane address");
-            return;
-        };
-        loop {
-            if let Err(e) = dataplane::dial(&addr, local, peer, Arc::clone(&adapter)).await {
-                debug!(%addr, error = %e, "data dial failed");
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    });
-}
-
-/// The data plane sits one port above the control plane.
-fn data_endpoint(control: &str) -> Option<String> {
-    let (host, port) = control.rsplit_once(':')?;
-    let port: u16 = port.parse().ok()?;
-    Some(format!("{host}:{}", port.checked_add(1)?))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_data_plane_is_one_port_above_the_control_plane() {
-        assert_eq!(
-            data_endpoint("127.0.0.1:4747").as_deref(),
-            Some("127.0.0.1:4748")
-        );
-    }
-
-    #[test]
-    fn a_control_endpoint_without_a_port_has_no_data_plane() {
-        assert_eq!(data_endpoint("127.0.0.1"), None);
-    }
 }

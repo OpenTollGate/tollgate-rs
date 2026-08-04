@@ -3924,6 +3924,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "axum",
+ "bech32",
  "cashu",
  "cdk",
  "cdk-axum",

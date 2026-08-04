@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use tollgate_net::channel::{SpilmanChannels, SpilmanConfig};
-use tollgate_net::config::File;
+use tollgate_net::config::{File, ForwardingMode};
 use tollgate_net::mint::{self, MintConfig};
 use tollgate_net::node::Node;
 use tracing::info;
@@ -153,8 +153,75 @@ async fn main() -> Result<()> {
         .context("build the channel backend")?,
     );
 
-    let node = Node::new(&config, channels);
-    let adapter = node.adapter();
+    // Which thing actually delivers. The loopback shaper carries a socket of
+    // its own and forwards nobody's traffic; the kernel adapter gates and
+    // shapes the real forwarding path.
+    let adapter: Arc<dyn tollgate_net::adapter::ResourceAdapter> = match file.forwarding.mode {
+        ForwardingMode::Loopback => {
+            let loopback = Arc::new(tollgate_net::adapter::Loopback::new());
+
+            // The loopback data plane belongs to the loopback adapter, so it is
+            // started here rather than by the node.
+            let data = tokio::net::TcpListener::bind(config.data_listen())
+                .await
+                .with_context(|| format!("bind the data plane on {}", config.data_listen()))?;
+            tokio::spawn(tollgate_net::dataplane::listen(data, loopback.clone()));
+            for peer in &config.peers {
+                // Only toward a peer we dial. One that dials us brings its own
+                // data-plane connection with it.
+                if let Some(endpoint) = &peer.endpoint {
+                    tollgate_net::dataplane::keep_dialing(
+                        endpoint.clone(),
+                        config.identity.pubkey(),
+                        peer.pubkey,
+                        loopback.clone(),
+                    );
+                }
+            }
+            info!(listen = %config.data_listen(), "loopback data plane");
+            loopback
+        }
+        #[cfg(target_os = "linux")]
+        ForwardingMode::Nftables => {
+            let interface = file.forwarding.interface.clone();
+            let adapter = tollgate_net::adapter::Nftables::new(&interface).with_context(|| {
+                format!("set up nftables and tc on {interface}; CAP_NET_ADMIN is required")
+            })?;
+            info!(%interface, "gating and shaping the kernel forwarding path");
+            Arc::new(adapter)
+        }
+        #[cfg(not(target_os = "linux"))]
+        ForwardingMode::Nftables => {
+            anyhow::bail!("forwarding.mode: nftables needs Linux")
+        }
+        #[cfg(unix)]
+        ForwardingMode::Fips => {
+            let socket = if file.forwarding.fips_socket.is_empty() {
+                tollgate_net::adapter::Fips::default_socket_path()
+            } else {
+                file.forwarding.fips_socket.clone().into()
+            };
+            let adapter = tollgate_net::adapter::Fips::new(&socket, config.policy.minimum_flow)
+                .with_context(|| {
+                    format!(
+                        "reach the FIPS control socket at {}; is fipsd running?",
+                        socket.display()
+                    )
+                })?;
+            info!(
+                socket = %socket.display(),
+                allowance = config.policy.minimum_flow,
+                "setting transit policy on the FIPS node"
+            );
+            Arc::new(adapter)
+        }
+        #[cfg(not(unix))]
+        ForwardingMode::Fips => {
+            anyhow::bail!("forwarding.mode: fips needs a Unix control socket")
+        }
+    };
+
+    let node = Node::new(&config, channels, adapter.clone());
 
     // Anything watching this node reads here. A Unix socket rather than a port:
     // it is operational state for a local tool, not something a peer acts on.

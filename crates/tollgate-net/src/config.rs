@@ -13,9 +13,11 @@ use serde::{Deserialize, Serialize};
 use tollgate_core::buyer::BuyerPolicy;
 use tollgate_core::config::{GrantPolicy, NodePolicy, PeerPolicy};
 use tollgate_protocol::{DEFAULT_PORT, PubKey};
+use tracing::warn;
 
 use crate::identity::Identity;
 use crate::node::{NodeConfig, PeerConfig};
+use crate::wire::Identify;
 
 /// The whole configuration file.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -37,6 +39,8 @@ pub struct File {
     pub buying: BuyingSection,
     /// Where to listen.
     pub network: NetworkSection,
+    /// What actually delivers the resource.
+    pub forwarding: ForwardingSection,
     /// Per-peer overrides, keyed by hex-encoded compressed pubkey.
     pub peers: BTreeMap<String, PeerSection>,
 }
@@ -193,6 +197,10 @@ impl Default for BuyingSection {
 #[serde(deny_unknown_fields, default)]
 pub struct NetworkSection {
     /// Control-plane listen address. The data plane is the next port up.
+    ///
+    /// Under `forwarding.mode: fips` this has to be somewhere mesh peers reach
+    /// — the node's own `fips0` address, or `[::]` — because a connection from
+    /// anywhere else cannot prove whose key it is announcing and is refused.
     pub listen: String,
 }
 
@@ -202,6 +210,55 @@ impl Default for NetworkSection {
             listen: format!("0.0.0.0:{DEFAULT_PORT}"),
         }
     }
+}
+
+/// What actually delivers the resource.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ForwardingSection {
+    /// `loopback`, `nftables` or `fips`.
+    ///
+    /// `loopback` shapes and meters a socket of its own and forwards nobody's
+    /// traffic — right for a demo or a test, and it runs anywhere. `nftables`
+    /// gates and shapes the kernel's forwarding path, which is what actually
+    /// sells transit, and needs Linux with `CAP_NET_ADMIN`. `fips` sells
+    /// transit across a FIPS mesh instead, leaving the enforcement to the FIPS
+    /// node and reaching it over its control socket — and, because a mesh
+    /// address names a key, it is also the only mode in which a peer's
+    /// announced identity is checked rather than believed.
+    pub mode: ForwardingMode,
+    /// Interface facing the peers, where their `tc` classes live.
+    ///
+    /// Only `nftables` uses this.
+    pub interface: String,
+    /// FIPS control socket to drive. Only `fips` uses this; empty means the
+    /// same default path the FIPS daemon itself resolves.
+    pub fips_socket: String,
+}
+
+impl Default for ForwardingSection {
+    fn default() -> Self {
+        Self {
+            // The default has to run everywhere and gate nothing it does not
+            // own: a node that silently installed firewall rules because of a
+            // missing config line would be a nasty surprise.
+            mode: ForwardingMode::Loopback,
+            interface: "eth0".into(),
+            fips_socket: String::new(),
+        }
+    }
+}
+
+/// Which adapter enforces access and rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ForwardingMode {
+    /// A shaper and meter over a dedicated socket.
+    Loopback,
+    /// nftables and `tc` on the kernel forwarding path.
+    Nftables,
+    /// Per-peer transit policy on a FIPS node, over its control socket.
+    Fips,
 }
 
 /// Per-peer overrides.
@@ -214,7 +271,8 @@ pub struct PeerSection {
     pub blocked: bool,
     /// Override the node-wide received multiplier.
     pub received_multiplier: Option<u16>,
-    /// Static endpoint to dial. Peers without one have to dial us.
+    /// Static endpoint to dial. Peers without one have to dial us, and
+    /// everything else written here still applies to them when they do.
     pub endpoint: Option<String>,
 }
 
@@ -275,6 +333,32 @@ impl File {
             max_rate: self.buying.max_rate,
         };
 
+        // A lead at least as long as the window it renews inside is not a
+        // conservative setting, it is a contradiction: every grant starts
+        // already inside its own renewal lead. Core clamps it rather than
+        // looping, but an operator who wrote this meant something else.
+        if self.buying.renew_lead_ms >= self.buying.window_ms {
+            bail!(
+                "buying.renew_lead_ms ({}) must be shorter than buying.window_ms ({})",
+                self.buying.renew_lead_ms,
+                self.buying.window_ms
+            );
+        }
+        // Not an error: a node carrying nothing but small requests can live
+        // with a short lead, and on an idle link it is free. It is a trap for
+        // anything carrying TCP, and the failure — a flow that stalls for
+        // seconds after a gap of a tenth of one — does not look like its cause.
+        if buyer.lead_is_thin() {
+            warn!(
+                renew_lead_ms = self.buying.renew_lead_ms,
+                window_ms = self.buying.window_ms,
+                forfeit_pct = buyer.forfeit_pct(self.buying.window_ms),
+                suggested_lead_ms = BuyerPolicy::MIN_SAFE_LEAD_MS,
+                "a renewal this late lapses the grant under load; scale the \
+                 window and the lead together to buy slack at the same cost"
+            );
+        }
+
         let listen: SocketAddr = self.network.listen.parse().with_context(|| {
             format!("network.listen {:?} is not an address", self.network.listen)
         })?;
@@ -292,22 +376,32 @@ impl File {
                 blocked: section.blocked,
                 received_multiplier: section.received_multiplier,
             };
-            // A peer with no endpoint is one that dials us; we still hold its
-            // policy, we just never reach out.
-            if let Some(endpoint) = &section.endpoint {
-                peers.push(PeerConfig {
-                    pubkey,
-                    endpoint: endpoint.clone(),
-                    policy,
-                });
-            }
+            // A peer with no endpoint is one that dials us. It is still carried
+            // here, because the policy is the point: `blocked` on a peer that
+            // calls in is exactly the case that matters, and dropping the entry
+            // for want of an address would quietly admit it.
+            peers.push(PeerConfig {
+                pubkey,
+                endpoint: section.endpoint.clone(),
+                policy,
+            });
         }
+
+        // Not a knob of its own: what makes an announced key checkable is the
+        // network carrying the control plane, and that is what `forwarding.mode`
+        // already says. A FIPS node therefore verifies from the first
+        // connection, with no second setting to forget.
+        let identify = match self.forwarding.mode {
+            ForwardingMode::Fips => Identify::Fips,
+            ForwardingMode::Loopback | ForwardingMode::Nftables => Identify::Claimed,
+        };
 
         Ok(NodeConfig {
             identity,
             policy,
             buyer,
             listen,
+            identify,
             mint_listen,
             mint_url: self.mint.url.clone(),
             peers,
@@ -354,6 +448,45 @@ mod tests {
     }
 
     #[test]
+    fn a_fips_node_checks_a_peers_key_against_its_address() {
+        let file: File = serde_yaml::from_str("forwarding:\n  mode: fips\n").expect("parse");
+        assert_eq!(file.resolve().expect("resolve").identify, Identify::Fips);
+    }
+
+    #[test]
+    fn a_node_on_plain_ip_has_nothing_to_check_a_key_against() {
+        // Including nftables, which gates by address: there the announced key is
+        // taken on trust, and the operator has to wrap the link itself.
+        for mode in ["loopback", "nftables"] {
+            let yaml = format!("forwarding:\n  mode: {mode}\n");
+            let file: File = serde_yaml::from_str(&yaml).expect("parse");
+            assert_eq!(
+                file.resolve().expect("resolve").identify,
+                Identify::Claimed,
+                "{mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lead_at_least_as_long_as_the_window_is_rejected() {
+        // Not conservatism: every grant would start inside its own renewal
+        // lead, so the operator meant something else.
+        let file: File =
+            serde_yaml::from_str("buying:\n  window_ms: 1000\n  renew_lead_ms: 1000\n")
+                .expect("parse");
+        assert!(file.resolve().is_err());
+    }
+
+    #[test]
+    fn the_default_pair_is_accepted_and_is_not_thin() {
+        let file: File = serde_yaml::from_str("{}").expect("parse");
+        let buyer = file.resolve().expect("resolve").buyer;
+        assert!(!buyer.lead_is_thin());
+        assert_eq!(buyer.forfeit_pct(buyer.window_ms), 30);
+    }
+
+    #[test]
     fn an_inverted_window_range_is_rejected() {
         let file: File =
             serde_yaml::from_str("grants:\n  window_range_ms: [30000, 200]\n").expect("parse");
@@ -365,7 +498,22 @@ mod tests {
         let key = "02".to_string() + &"11".repeat(32);
         let yaml = format!("peers:\n  \"{key}\":\n    no_charge: true\n");
         let file: File = serde_yaml::from_str(&yaml).expect("parse");
-        assert!(file.resolve().expect("resolve").peers.is_empty());
+        let peers = file.resolve().expect("resolve").peers;
+        assert_eq!(peers.len(), 1);
+        assert!(peers[0].endpoint.is_none(), "nothing to dial");
+    }
+
+    #[test]
+    fn a_peer_that_dials_us_still_gets_the_policy_written_for_it() {
+        // The case this exists for: a blocked peer has no endpoint, because a
+        // node does not dial one it refuses to talk to. Dropping the entry for
+        // want of an address would admit exactly the peer being turned away.
+        let key = "02".to_string() + &"11".repeat(32);
+        let yaml = format!("peers:\n  \"{key}\":\n    blocked: true\n");
+        let file: File = serde_yaml::from_str(&yaml).expect("parse");
+        let peers = file.resolve().expect("resolve").peers;
+        assert_eq!(peers.len(), 1);
+        assert!(peers[0].policy.blocked);
     }
 
     #[test]
@@ -375,7 +523,7 @@ mod tests {
         let file: File = serde_yaml::from_str(&yaml).expect("parse");
         let peers = file.resolve().expect("resolve").peers;
         assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].endpoint, "10.0.0.1:4747");
+        assert_eq!(peers[0].endpoint.as_deref(), Some("10.0.0.1:4747"));
     }
 
     #[test]

@@ -1,0 +1,19 @@
+# Do two nodes find each other, fund channels, and reach Active?
+services:
+  gateway:
+    image: tollgate-test:latest
+    command: ["-c", "/etc/tollgate/gateway.yaml", "--control-socket", "/run/tollgate.sock"]
+    volumes:
+      - ./gateway.yaml:/etc/tollgate/gateway.yaml:ro
+    environment:
+      RUST_LOG: "${RUST_LOG:-tollgate_net=debug,info}"
+
+  client:
+    image: tollgate-test:latest
+    command: ["-c", "/etc/tollgate/client.yaml", "--control-socket", "/run/tollgate.sock"]
+    volumes:
+      - ./client.yaml:/etc/tollgate/client.yaml:ro
+    environment:
+      RUST_LOG: "${RUST_LOG:-tollgate_net=debug,info}"
+    depends_on:
+      - gateway
