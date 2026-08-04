@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tollgate_core::buyer::BuyerPolicy;
 use tollgate_core::config::{GrantPolicy, NodePolicy, PeerPolicy};
 use tollgate_protocol::{DEFAULT_PORT, PubKey};
+use tracing::warn;
 
 use crate::identity::Identity;
 use crate::node::{NodeConfig, PeerConfig};
@@ -332,6 +333,32 @@ impl File {
             max_rate: self.buying.max_rate,
         };
 
+        // A lead at least as long as the window it renews inside is not a
+        // conservative setting, it is a contradiction: every grant starts
+        // already inside its own renewal lead. Core clamps it rather than
+        // looping, but an operator who wrote this meant something else.
+        if self.buying.renew_lead_ms >= self.buying.window_ms {
+            bail!(
+                "buying.renew_lead_ms ({}) must be shorter than buying.window_ms ({})",
+                self.buying.renew_lead_ms,
+                self.buying.window_ms
+            );
+        }
+        // Not an error: a node carrying nothing but small requests can live
+        // with a short lead, and on an idle link it is free. It is a trap for
+        // anything carrying TCP, and the failure — a flow that stalls for
+        // seconds after a gap of a tenth of one — does not look like its cause.
+        if buyer.lead_is_thin() {
+            warn!(
+                renew_lead_ms = self.buying.renew_lead_ms,
+                window_ms = self.buying.window_ms,
+                forfeit_pct = buyer.forfeit_pct(self.buying.window_ms),
+                suggested_lead_ms = BuyerPolicy::MIN_SAFE_LEAD_MS,
+                "a renewal this late lapses the grant under load; scale the \
+                 window and the lead together to buy slack at the same cost"
+            );
+        }
+
         let listen: SocketAddr = self.network.listen.parse().with_context(|| {
             format!("network.listen {:?} is not an address", self.network.listen)
         })?;
@@ -439,6 +466,24 @@ mod tests {
                 "{mode}"
             );
         }
+    }
+
+    #[test]
+    fn a_lead_at_least_as_long_as_the_window_is_rejected() {
+        // Not conservatism: every grant would start inside its own renewal
+        // lead, so the operator meant something else.
+        let file: File =
+            serde_yaml::from_str("buying:\n  window_ms: 1000\n  renew_lead_ms: 1000\n")
+                .expect("parse");
+        assert!(file.resolve().is_err());
+    }
+
+    #[test]
+    fn the_default_pair_is_accepted_and_is_not_thin() {
+        let file: File = serde_yaml::from_str("{}").expect("parse");
+        let buyer = file.resolve().expect("resolve").buyer;
+        assert!(!buyer.lead_is_thin());
+        assert_eq!(buyer.forfeit_pct(buyer.window_ms), 30);
     }
 
     #[test]

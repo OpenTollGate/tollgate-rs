@@ -84,7 +84,7 @@ echo "  http $code, $bytes bytes at $speed B/s"
 # At the rate bought, well over this arrives in the time allowed. A far smaller
 # number means the flow stalled part way — which is what a grant lapsing under
 # a transfer looks like, and is invisible in an average.
-[[ "${bytes:-0}" -ge $(( DURATION * 1000000 )) ]] \
+[[ "${bytes:-0}" -ge $(( DURATION * 750000 )) ]] \
   || tollgate::fail "only $bytes bytes arrived in ${DURATION}s; the transfer stalled part way"
 
 # Generous bounds either side of the 2.5 MB/s bought: an unpoliced mesh would
@@ -93,7 +93,12 @@ echo "  http $code, $bytes bytes at $speed B/s"
 speed=${speed%%.*}
 [[ "$speed" -lt 6000000 ]] \
   || tollgate::fail "$speed B/s is far above the 2.5 MB/s bought; nothing is shaping"
-[[ "$speed" -gt 1000000 ]] \
+# The floor is well under what a quiet machine delivers (around 2 MB/s of
+# goodput): the mesh encrypts and re-frames every packet, and a host busy with
+# the rest of the suite shows it. What it still rules out is the failure that
+# matters — a flow that stalls when a grant lapses, which lands an order of
+# magnitude below this rather than a little under it.
+[[ "$speed" -gt 750000 ]] \
   || tollgate::fail "$speed B/s is far below the 2.5 MB/s bought"
 
 # And the gateway counted it where the policy is enforced, which is what draws

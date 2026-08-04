@@ -409,6 +409,27 @@ impl ResourceAdapter for Nftables {
                 &format!("{{ {ip} }}"),
             ]);
         }
+        // The filter first, then the class it points at: a class still selected
+        // by a filter is in use, and the kernel refuses to delete it. Both go,
+        // because a peering that ends and starts again gets a fresh classid —
+        // so a filter left behind is a permanent one, and enough churn fills
+        // the qdisc with filters selecting classes that no longer exist.
+        let mark = MARK_BASE | entry.classid as u32;
+        let _ = tc(&[
+            "filter",
+            "delete",
+            "dev",
+            &self.interface,
+            "parent",
+            "1:",
+            "protocol",
+            "ip",
+            "prio",
+            "1",
+            "handle",
+            &format!("{mark:#x}"),
+            "fw",
+        ]);
         let _ = tc(&[
             "class",
             "delete",

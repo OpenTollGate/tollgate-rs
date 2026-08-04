@@ -49,7 +49,10 @@ pub fn poll(buyer: &Buyer, policy: &BuyerPolicy, demand: Demand, now: Millis) ->
         // The provider named a rate it would take; go straight back with it
         // rather than waiting out a grant we never got.
         Trigger::Rebuy
-    } else if now + policy.renew_lead_ms as u64 >= buyer.deadline {
+    // Against the window actually in force, not the one asked for: a provider
+    // that caps the window shorter than the configured lead would otherwise put
+    // the buyer in a renewal loop.
+    } else if now + policy.lead_within(window_ms) as u64 >= buyer.deadline {
         Trigger::Renewal
     } else if worth_the_forfeit(buyer.rate, target, policy) {
         Trigger::DemandRose

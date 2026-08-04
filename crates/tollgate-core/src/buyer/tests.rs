@@ -488,3 +488,71 @@ fn a_channel_with_plenty_of_room_is_left_alone() {
         "1 M against a 1 GiB channel is no reason to fund another"
     );
 }
+
+/// A provider that caps the window shorter than the configured lead must not
+/// put the buyer in a renewal loop.
+///
+/// Taken literally, a lead longer than the window means every grant begins
+/// already inside its own renewal lead: buy, renew, buy, renew, forfeiting all
+/// of each one. The lead is bounded by the window actually in force instead.
+#[test]
+fn a_lead_longer_than_the_window_does_not_renew_forever() {
+    let policy = BuyerPolicy {
+        renew_lead_ms: 5_000,
+        window_ms: 30_000,
+        ..policy()
+    };
+    // The provider takes nothing longer than a second, so that is the window.
+    let tight = Demand {
+        observed_rate: 400_000,
+        bounds: WindowBounds {
+            min_ms: 200,
+            max_ms: 1_000,
+        },
+    };
+
+    let mut buyer = opened(CAPACITY);
+    let first = poll(&buyer, &policy, tight, Millis(0)).expect("should buy");
+    buyer.record(first, Millis(0));
+    assert_eq!(buyer.deadline, Millis(1_000));
+
+    // Half the window is the ceiling, so nothing is renewed in the first half.
+    assert_eq!(policy.lead_within(1_000), 500);
+    assert!(
+        poll(&buyer, &policy, tight, Millis(1)).is_none(),
+        "a grant one millisecond old is not due for renewal"
+    );
+    assert!(
+        poll(&buyer, &policy, tight, Millis(400)).is_none(),
+        "still not due at 40% of the window"
+    );
+    assert!(
+        poll(&buyer, &policy, tight, Millis(500)).is_some(),
+        "due once the remainder is down to the clamped lead"
+    );
+}
+
+#[test]
+fn the_forfeit_is_the_lead_over_the_window() {
+    // What the default pair costs: 1.2 s of tolerance for 30% of each grant.
+    let d = BuyerPolicy::default();
+    assert_eq!(d.forfeit_pct(d.window_ms), 30);
+    assert!(!d.lead_is_thin(), "the default must not be a trap");
+
+    // Scaling both together buys absolute slack at the same proportional cost,
+    // which is the whole reason the two are configured as a pair.
+    let wider = BuyerPolicy {
+        renew_lead_ms: 2_400,
+        window_ms: 8_000,
+        ..d
+    };
+    assert_eq!(wider.forfeit_pct(wider.window_ms), 30);
+
+    // And a lead short enough to be missed under load is called out as one.
+    let tight = BuyerPolicy {
+        renew_lead_ms: 300,
+        window_ms: 1_000,
+        ..d
+    };
+    assert!(tight.lead_is_thin());
+}
