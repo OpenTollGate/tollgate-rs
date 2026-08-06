@@ -600,6 +600,34 @@ mod tests {
         assert_eq!(peers[0].endpoint.as_deref(), Some("10.0.0.1:4747"));
     }
 
+    /// The configs the packages install have to parse, and they are not
+    /// exercised by anything else — a typo in one is a router that will not
+    /// start, found after it has shipped rather than before.
+    #[test]
+    fn the_configs_the_packages_install_are_valid() {
+        for (name, text) in [
+            (
+                "openwrt",
+                include_str!("../../../packaging/openwrt-ipk/files/etc/tollgate/tollgate.yaml"),
+            ),
+            (
+                "macos",
+                include_str!("../../../packaging/macos/tollgate.yaml"),
+            ),
+        ] {
+            let file: File = serde_yaml::from_str(text)
+                .unwrap_or_else(|e| panic!("the {name} package config does not parse: {e}"));
+            let config = file
+                .resolve()
+                .unwrap_or_else(|e| panic!("the {name} package config does not resolve: {e:#}"));
+
+            // Both ship without an identity, because one is generated at
+            // install time. Anything else in them has to be usable as it is.
+            assert_eq!(config.policy.unit, "byte", "{name}");
+            assert!(config.policy.minimum_flow > 0, "{name}: no allowance");
+        }
+    }
+
     #[test]
     fn a_misspelt_key_is_an_error_rather_than_silently_ignored() {
         // `deny_unknown_fields` is what stops `recieved_multiplier` from
