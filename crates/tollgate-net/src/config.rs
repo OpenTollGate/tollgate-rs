@@ -29,6 +29,8 @@ pub struct File {
     pub mint: MintSection,
     /// Which mints this node takes payment in, and the default surcharge.
     pub vouchers: VouchersSection,
+    /// What this node sells its own vouchers for.
+    pub market: MarketSection,
     /// The minimum flow allowance.
     pub access: AccessSection,
     /// Channel parameters.
@@ -92,6 +94,35 @@ pub struct VouchersSection {
     /// so `2` charges an upload like a download and `k + 1` charges it `k`
     /// times.
     pub received_multiplier: u16,
+}
+
+/// What this node sells its own capacity for.
+///
+/// Not part of the protocol: no TollGate message is denominated in money. This
+/// is what a buyer pays at the mint, before any session exists.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MarketSection {
+    /// Units of capacity one sat buys. Zero closes the market: quotes are
+    /// refused, and peers have to obtain this node's vouchers somewhere else.
+    ///
+    /// Bytes per sat rather than sats per byte because the second is fractional
+    /// for any sane price and rounds to nothing as an integer.
+    pub bytes_per_sat: u64,
+}
+
+impl Default for MarketSection {
+    /// A megabyte for a sat.
+    ///
+    /// A number had to be picked, and this one is memorable, in the right order
+    /// of magnitude for retail transit, and easy to divide in the head. An
+    /// operator selling scarce uplink will raise it and one selling spare
+    /// capacity will lower it; both are one line, or one control-socket call.
+    fn default() -> Self {
+        Self {
+            bytes_per_sat: 1_000_000,
+        }
+    }
 }
 
 /// The minimum flow allowance.

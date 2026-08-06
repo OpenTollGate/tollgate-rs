@@ -19,8 +19,8 @@
 //! is always reachable — it is the peer we are already talking to. So funding a
 //! channel to pay a peer means first holding that peer's vouchers, and how a
 //! peer came to hold vouchers is not the protocol's business, any more than how
-//! it came to hold sats. [`acquire`] is the direct-from-the-issuer route, which
-//! is the only one needed to operate.
+//! it came to hold sats. Buying them is [`crate::market`]'s job, and this layer
+//! only asks it for what a channel needs.
 //!
 //! [`tollgate-vouchers.md`]: https://github.com/OpenTollGate/tollgate-rs/blob/master/docs/design/core/tollgate-vouchers.md
 
@@ -269,7 +269,7 @@ impl ChannelBackend for SpilmanChannels {
         // Which keyset denominates in our unit. A mint may run several — an old
         // one still being redeemed alongside the active one — and only the
         // active one can be funded against.
-        let keyset_id = active_keyset(mint_url, &self.config.unit)?;
+        let keyset_id = crate::market::active_keyset(mint_url, &self.config.unit)?;
         let keyset_info = self
             .client
             .lock()
@@ -279,7 +279,7 @@ impl ChannelBackend for SpilmanChannels {
 
         // Acquiring the peer's vouchers is outside the protocol; a peer arrives
         // holding them or it gets no service.
-        let token = acquire(mint_url, capacity, &self.config.unit, &keyset_info)
+        let token = crate::market::acquire(mint_url, capacity, &self.config.unit, &keyset_info)
             .with_context(|| format!("acquire {capacity} {} from {mint_url}", self.config.unit))?;
 
         let ours = cashu::nuts::SecretKey::from_hex(&self.config.secret_key_hex)
@@ -439,82 +439,6 @@ impl SpilmanNetworking for MintNetworking {
         // Ours, and always current.
         Ok(())
     }
-}
-
-/// A blocking HTTP call, for the paths the synchronous backend trait drives.
-///
-/// The node runs every backend call on a blocking thread, so a blocking client
-/// here does not stall the runtime.
-fn http(method: &str, url: &str, body: &str) -> Result<String, String> {
-    let client = reqwest::blocking::Client::new();
-    let request = match method {
-        "GET" => client.get(url),
-        _ => client
-            .post(url)
-            .header("content-type", "application/json")
-            .body(body.to_owned()),
-    };
-    let response: reqwest::blocking::Response = request.send().map_err(|e| e.to_string())?;
-    response.text().map_err(|e| e.to_string())
-}
-
-/// The id of the mint's active keyset for `unit`.
-///
-/// A channel is funded against one keyset, and it has to be the active one:
-/// a mint keeps older keysets readable so outstanding vouchers stay redeemable,
-/// but it will not sign new ones against them.
-fn active_keyset(mint_url: &str, unit: &str) -> Result<String> {
-    let body = http("GET", &format!("{mint_url}/v1/keysets"), "")
-        .map_err(|e| anyhow!("list keysets at {mint_url}: {e}"))?;
-    let listing: serde_json::Value =
-        serde_json::from_str(&body).with_context(|| format!("keyset listing from {mint_url}"))?;
-
-    listing["keysets"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|k| k["unit"].as_str() == Some(unit) && k["active"].as_bool().unwrap_or(false))
-        .and_then(|k| k["id"].as_str())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow!("{mint_url} has no active {unit} keyset"))
-}
-
-/// Acquire `amount` units of a mint's vouchers.
-///
-/// **Outside the protocol.** A peer arrives holding the vouchers it needs or it
-/// gets no service, and how it got them is the market's business — see
-/// [`crate::market`], which is what serves the other end of this and which
-/// currently gives them away.
-///
-/// This deliberately does *not* go through a Lightning quote. A byte-denominated
-/// keyset cannot be invoiced over bolt11, because bolt11 is denominated in msat
-/// and there is no invoice for 1024 bytes. Pricing bytes in money is exactly
-/// the market layer the design leaves out of the protocol.
-fn acquire(mint_url: &str, amount: u64, unit: &str, keyset_info: &str) -> Result<String> {
-    // Blinded messages for the amount, split into powers of two.
-    let blinded = cdk_spilman::create_plain_blinded_messages(amount, keyset_info)
-        .map_err(|e| anyhow!("blind {amount} {unit}: {e}"))?;
-    let blinded: serde_json::Value = serde_json::from_str(&blinded).context("blinded messages")?;
-    let secrets = blinded["secrets_with_blinding"].to_string();
-
-    let issued = http(
-        "POST",
-        &format!("{mint_url}{}", crate::market::ISSUE_PATH),
-        &serde_json::json!({ "outputs": blinded["blinded_messages"] }).to_string(),
-    )
-    .map_err(|e| anyhow!("buy {amount} {unit} from {mint_url}: {e}"))?;
-
-    let issued: serde_json::Value = serde_json::from_str(&issued).context("issue response")?;
-    let signatures = issued["signatures"]
-        .as_array()
-        .ok_or_else(|| anyhow!("{mint_url} issued nothing for {amount} {unit}: {issued}"))?;
-
-    let proofs =
-        cdk_spilman::construct_proofs(&serde_json::to_string(signatures)?, &secrets, keyset_info)
-            .map_err(|e| anyhow!("unblind {amount} {unit}: {e}"))?;
-
-    cdk_spilman::build_cashu_b_token(mint_url, unit, &proofs)
-        .map_err(|e| anyhow!("build a token: {e}"))
 }
 
 #[cfg(test)]

@@ -3923,6 +3923,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "async-trait",
  "axum",
  "bech32",
  "cashu",
@@ -3934,6 +3935,7 @@ dependencies = [
  "cdk-sqlite",
  "clap",
  "crossterm",
+ "futures",
  "hex",
  "ratatui",
  "reqwest",

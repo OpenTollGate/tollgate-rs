@@ -12,22 +12,21 @@
 //!
 //! # What is simulated
 //!
-//! The payment backend behind the mint is a fake wallet that auto-pays its own
-//! quotes, so vouchers cost nothing to acquire. That is the *market* being
-//! simulated, not the mint: the keysets, blind signatures, DLEQ proofs and
-//! spent-proof set are all real. Selling vouchers for money is a separate
-//! concern the protocol never sees.
+//! The payment backend is [`PricedBolt11`](crate::market::PricedBolt11), which
+//! prices this node's capacity in millisats and settles the invoices with a
+//! fake wallet. That is the *market* being simulated, not the mint: the
+//! keysets, blind signatures, DLEQ proofs and spent-proof set are all real, and
+//! nothing is issued until the quote has been paid.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use cdk::mint::{Mint, MintBuilder, MintMeltLimits};
 use cdk::nuts::nut00::KnownMethod;
 use cdk::nuts::{CurrencyUnit, PaymentMethod};
-use cdk::types::FeeReserve;
 use cdk_common::common::QuoteTTL;
-use cdk_fake_wallet::FakeWallet;
+
+use crate::market::{Price, PricedBolt11};
 
 /// How this node's mint is set up.
 #[derive(Debug, Clone)]
@@ -40,6 +39,8 @@ pub struct MintConfig {
     pub seed: Vec<u8>,
     /// Largest amount a single mint operation may create.
     pub max_amount: u64,
+    /// What this node sells its capacity for, in bytes per sat.
+    pub price: Price,
 }
 
 /// The unit a keyset denominates in.
@@ -71,19 +72,12 @@ pub async fn build(config: &MintConfig) -> Result<Mint> {
         .with_description("Vouchers: claims on this node's capacity".to_string())
         .with_urls(vec![config.url.clone()]);
 
-    // The backend that would take money for vouchers. Nothing about the
-    // protocol depends on it: a node that sells its vouchers some other way,
-    // or gives them away, runs the same mint.
-    let backend = FakeWallet::new(
-        FeeReserve {
-            min_fee_reserve: 0.into(),
-            percent_fee_reserve: 0.0,
-        },
-        HashMap::default(),
-        HashSet::default(),
-        0,
-        unit.clone(),
-    );
+    // The backend that takes money for vouchers. Nothing about the protocol
+    // depends on it: a node that sells its vouchers some other way, or gives
+    // them away, runs the same mint. What it does decide is the price, because
+    // a quote for a quantity of bytes has to become an invoice for an amount of
+    // money somewhere, and this is the only place that knows both.
+    let backend = PricedBolt11::new(unit.clone(), config.price.clone());
 
     builder
         .add_payment_processor(
@@ -127,20 +121,23 @@ pub async fn build(config: &MintConfig) -> Result<Mint> {
 /// talking to.
 pub async fn serve(
     mint: Arc<Mint>,
+    unit: String,
+    price: Price,
     listen: std::net::SocketAddr,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     // The market rides on the same listener as the mint under its own path.
     // It is a separate protocol that happens to be served by the same process;
-    // `market.path` in the configuration schema may point somewhere else
-    // entirely, including at a third party.
+    // a node may point its peers at somebody else's market entirely. All that
+    // is served here is the price signal — selling this node's own vouchers is
+    // the mint API beside it, and needs nothing of its own.
     let router = cdk_axum::create_mint_router(
         Arc::clone(&mint),
         vec![PaymentMethod::Known(KnownMethod::Bolt11).to_string()],
     )
     .await
     .context("build the mint router")?
-    .merge(crate::market::router(Arc::clone(&mint)));
+    .merge(crate::market::router(unit, price));
 
     let listener = tokio::net::TcpListener::bind(listen)
         .await
@@ -182,6 +179,7 @@ mod tests {
             unit: "byte".into(),
             seed: vec![7; 32],
             max_amount: 1_000_000_000,
+            price: Price::new(1_000_000),
         })
         .await
         .expect("build a byte mint");

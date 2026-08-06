@@ -100,6 +100,12 @@ async fn main() -> Result<()> {
         "starting"
     );
 
+    // What this node sells its capacity for. Held here rather than inside the
+    // mint because three things share it: the mint prices its quotes with it,
+    // the market publishes it, and the control socket changes it while the node
+    // runs.
+    let price = tollgate_net::market::Price::new(file.market.bytes_per_sat);
+
     // The mint comes up first. A peer funds its channel against *our* mint, so
     // nothing can be paid for until it is serving.
     let mint = Arc::new(
@@ -110,6 +116,7 @@ async fn main() -> Result<()> {
             // same keys, and two nodes never share a keyset.
             seed: mint_seed(&config.identity.secret_hex())?,
             max_amount: config.policy.initial_channel_capacity.max(1),
+            price: price.clone(),
         })
         .await
         .context("bring up this node's mint")?,
@@ -118,8 +125,10 @@ async fn main() -> Result<()> {
     {
         let mint = Arc::clone(&mint);
         let listen = config.mint_listen;
+        let unit = config.policy.unit.clone();
+        let price = price.clone();
         tokio::spawn(async move {
-            if let Err(e) = mint::serve(mint, listen, std::future::pending()).await {
+            if let Err(e) = mint::serve(mint, unit, price, listen, std::future::pending()).await {
                 tracing::error!(error = %e, "the mint stopped");
             }
         });
@@ -131,14 +140,19 @@ async fn main() -> Result<()> {
         "mint serving"
     );
 
-    // The market sits on the same listener and gives vouchers away to anyone
-    // who asks. That is deliberate — acquisition is outside the protocol and
-    // this stands in for it — but it is only defensible where the people who
-    // can reach it are people you would give capacity to anyway.
+    info!(
+        bytes_per_sat = file.market.bytes_per_sat,
+        "selling capacity"
+    );
+
+    // The mint prices its quotes and will not issue until they are paid — but
+    // what pays them is a simulated Lightning backend that settles its own
+    // invoices. So the price is real and the payment is not, which makes this
+    // a give-away to anyone who can reach it.
     if !config.mint_listen.ip().is_loopback() {
         tracing::warn!(
             listen = %config.mint_listen,
-            "the market is reachable beyond this host and issues vouchers for free"
+            "quotes are settled by a simulated wallet, so vouchers are effectively free to anyone who can reach this"
         );
     }
 
