@@ -38,6 +38,10 @@ ratatui = "0.30"
 crossterm = "0.29"
 # FIPS names peers by npub, so the adapter that drives it has to speak NIP-19.
 bech32 = "0.11"
+# Implementing cdk's payment-processor trait, and rewriting the stream of
+# payments it produces. Both versions follow cdk's own.
+async-trait = "0.1"
+futures = { version = "0.3", default-features = false, features = ["async-await"] }
 
 # --- Cashu: the mint this node runs, and the channels it pays over ---------
 # Pinned to the same cdk tag the reference workspace uses; two different cdk

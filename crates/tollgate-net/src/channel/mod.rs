@@ -22,7 +22,7 @@ mod local;
 mod spilman;
 
 pub use local::LocalChannels;
-pub use spilman::{SpilmanChannels, SpilmanConfig};
+pub use spilman::{SpilmanChannels, SpilmanConfig, Wallet};
 
 /// A channel we funded, ready to tell the peer about.
 #[derive(Debug, Clone, PartialEq, Eq)]

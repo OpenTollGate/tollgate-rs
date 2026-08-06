@@ -22,6 +22,21 @@ SKIP_BUILD=1 testing/purchase/test.sh
 | `forwarding/` | The gateway carries somebody else's packets: the client pulls a large file from a third host, every packet crosses the gateway, and nftables and `tc` hold it to the rate it bought. Asserts bytes, not elapsed time. |
 | `fips/` | The same claim with the enforcement in a FIPS mesh instead of the local kernel — three nodes, all traffic over `fips0`, the gateway the only node the other two can reach. Also asserts what only a mesh can: the peer that gets the grant is the peer that holds the key. |
 
+## Every node pays for what it gets
+
+A peer's vouchers are sold, not given away, so each topology runs a
+**`sat-mint`** — `cashubtc/mintd` with the fake Lightning backend, standing in
+for something like minibits. A node mints sats there, hands them to the peer's
+market, and gets that peer's byte vouchers back.
+
+That is the whole payment mechanism: money in, vouchers out, one call. The
+fake backend pays its own invoices instantly, which is the only simulated
+step — the mint, the keysets, the swap that redeems the payment and the
+spent-proof set behind it are all real.
+
+`testing/mint/mintd.toml` configures it, and `market.accept` in each node's
+config says whose paper it takes and at what price.
+
 ## How a test sees what happened
 
 Through each node's **control socket**, not its logs. The socket serves a JSON
