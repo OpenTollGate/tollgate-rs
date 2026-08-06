@@ -29,6 +29,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
 use tollgate_net::control::{self, PeerSnapshot, Request, Response, Snapshot};
+use tollgate_net::market::Accepted;
 
 #[derive(Parser, Debug)]
 #[command(name = "tolltop", about = "Watch a TollGate node")]
@@ -82,6 +83,8 @@ struct App {
     /// Which peer the cursor is on, and whether its detail is open.
     peers: TableState,
     detail: bool,
+    /// Which accepted issuer the cursor is on, over on the pricing tab.
+    issuers: TableState,
     /// `Some` while a new price is being typed. Editing is modal because a
     /// keystroke that means "quit" in one mode and "9" in the other has to be
     /// told which it is.
@@ -89,6 +92,12 @@ struct App {
 }
 
 impl App {
+    fn selected_issuer(&self) -> Option<&Accepted> {
+        self.issuers
+            .selected()
+            .and_then(|i| self.snapshot.accepts.get(i))
+    }
+
     fn selected(&self) -> Option<&PeerSnapshot> {
         self.peers
             .selected()
@@ -111,6 +120,27 @@ impl App {
             (n, Some(i)) if i >= n => self.peers.select(Some(n - 1)),
             _ => {}
         }
+    }
+
+    /// Keep the pricing cursor on a row that exists, for the same reason.
+    fn clamp_issuers(&mut self) {
+        let count = self.snapshot.accepts.len();
+        match (count, self.issuers.selected()) {
+            (0, _) => self.issuers.select(None),
+            (_, None) => self.issuers.select(Some(0)),
+            (n, Some(i)) if i >= n => self.issuers.select(Some(n - 1)),
+            _ => {}
+        }
+    }
+
+    fn move_issuer(&mut self, delta: isize) {
+        let count = self.snapshot.accepts.len();
+        if count == 0 {
+            return;
+        }
+        let current = self.issuers.selected().unwrap_or(0) as isize;
+        self.issuers
+            .select(Some((current + delta).clamp(0, count as isize - 1) as usize));
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -156,6 +186,7 @@ fn main() -> Result<()> {
         tab: Tab::Peers,
         peers: TableState::default(),
         detail: false,
+        issuers: TableState::default(),
         editing: None,
     };
 
@@ -168,6 +199,7 @@ fn main() -> Result<()> {
             Err(e) => app.error = Some(format!("{e:#}")),
         }
         app.clamp_selection();
+        app.clamp_issuers();
 
         terminal.draw(|frame| draw(frame, &mut app))?;
 
@@ -181,14 +213,15 @@ fn main() -> Result<()> {
                 match key.code {
                     KeyCode::Esc => app.editing = None,
                     KeyCode::Enter => {
-                        app.notice = match text.trim().parse::<u64>() {
-                            Ok(bytes_per_sat) => runtime
-                                .block_on(set_price(&app.socket, bytes_per_sat))
+                        let typed = text.trim().parse::<u64>();
+                        app.notice = match (typed, app.selected_issuer().cloned()) {
+                            (Ok(bytes_per_unit), Some(issuer)) => runtime
+                                .block_on(set_price(&app.socket, &issuer, bytes_per_unit))
                                 .err()
                                 .map(|e| format!("{e:#}")),
                             // Nothing typed is a change of mind, not a price of
-                            // zero: closing the market is worth typing a `0`.
-                            Err(_) => None,
+                            // zero: refusing an issuer is worth typing a `0`.
+                            _ => None,
                         };
                         app.editing = None;
                     }
@@ -223,11 +256,16 @@ fn main() -> Result<()> {
                     app.detail = !app.detail && app.selected().is_some();
                 }
 
+                KeyCode::Up | KeyCode::Char('k') if app.tab == Tab::Pricing => app.move_issuer(-1),
+                KeyCode::Down | KeyCode::Char('j') if app.tab == Tab::Pricing => app.move_issuer(1),
+
                 // On the pricing tab, editing is the only thing to do, so
                 // Enter starts it as well as `e`.
                 KeyCode::Enter | KeyCode::Char('e') if app.tab == Tab::Pricing => {
-                    app.notice = None;
-                    app.editing = Some(app.snapshot.bytes_per_sat.to_string());
+                    if let Some(issuer) = app.selected_issuer() {
+                        app.editing = Some(issuer.bytes_per_unit.to_string());
+                        app.notice = None;
+                    }
                 }
                 _ => {}
             }
@@ -238,9 +276,14 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Tell the node what to charge, and fail loudly if it will not.
-async fn set_price(socket: &std::path::Path, bytes_per_sat: u64) -> Result<()> {
-    match control::send(socket, &Request::SetPrice { bytes_per_sat }).await? {
+/// Tell the node what one issuer's paper buys, and fail loudly if it will not.
+async fn set_price(socket: &std::path::Path, issuer: &Accepted, bytes_per_unit: u64) -> Result<()> {
+    let request = Request::SetPrice {
+        mint: issuer.mint.clone(),
+        unit: issuer.unit.clone(),
+        bytes_per_unit,
+    };
+    match control::send(socket, &request).await? {
         Response::Ok { .. } => Ok(()),
         Response::Error { message } => Err(anyhow::anyhow!(message)),
     }
@@ -257,7 +300,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
     frame.render_widget(tab_bar(app), tabs);
     match app.tab {
         Tab::Peers => peers_tab(frame, app, body),
-        Tab::Pricing => frame.render_widget(pricing(app), body),
+        Tab::Pricing => pricing_tab(frame, app, body),
     }
     frame.render_widget(status(app), footer);
 }
@@ -546,74 +589,103 @@ fn peer_detail(app: &App) -> Paragraph<'_> {
     )
 }
 
-/// What this node charges, and what that means.
-fn pricing(app: &App) -> Paragraph<'_> {
-    let dim = Style::default().fg(Color::DarkGray);
-    let bytes_per_sat = app.snapshot.bytes_per_sat;
-
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(format!("{:<20}", "price"), dim),
-            Span::styled(
-                price(bytes_per_sat),
-                Style::default()
-                    .fg(if bytes_per_sat == 0 {
-                        Color::Red
-                    } else {
-                        Color::Green
-                    })
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(format!("{:<20}", "as configured"), dim),
-            Span::raw(format!("{bytes_per_sat} bytes per sat")),
-        ]),
-        Line::from(vec![
-            Span::styled(format!("{:<20}", "mint"), dim),
-            Span::raw(app.snapshot.mint_url.clone()),
-        ]),
-        Line::from(""),
-    ];
-
-    if bytes_per_sat == 0 {
-        lines.push(Line::from(Span::styled(
-            "The market is closed: quotes are refused, so nobody can buy this",
-            Style::default().fg(Color::Red),
-        )));
-        lines.push(Line::from(Span::styled(
-            "node's vouchers here. Peers that already hold them are unaffected.",
-            Style::default().fg(Color::Red),
-        )));
-    } else {
-        // The numbers an operator actually reasons in. A price per byte is
-        // unreadable; a price per gigabyte is a decision.
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:<20}", "a gigabyte costs"), dim),
-            Span::raw(sats(1_000_000_000, bytes_per_sat)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:<20}", "a megabyte costs"), dim),
-            Span::raw(sats(1_000_000, bytes_per_sat)),
-        ]));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "This is what the next buyer of vouchers pays. It changes nothing",
-            dim,
-        )));
-        lines.push(Line::from(Span::styled(
-            "already sold: a grant in force, a channel funded, a quote handed",
-            dim,
-        )));
-        lines.push(Line::from(Span::styled(
-            "out — all keep the terms they were made on.",
-            dim,
-        )));
+/// What this node takes as payment, and what a unit of it buys.
+///
+/// A list rather than a number, because the price of capacity is not one price:
+/// a sat from a mint you expect to honour its tokens is worth more than a sat
+/// from one you do not, and pricing issuers is how an operator says so.
+fn pricing_tab(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.snapshot.accepts.is_empty() {
+        let empty = Paragraph::new(vec![
+            Line::from(Span::styled(
+                "This node takes no paper as payment.",
+                Style::default().fg(Color::Red),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Nobody can buy its vouchers here, which is a working setting for a",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "node whose capacity is sold somewhere else. Add issuers under",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "`market.accept` to take payment.",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ])
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title(" pricing "));
+        frame.render_widget(empty, area);
+        return;
     }
 
-    Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::ALL).title(" pricing "))
+    let header = Row::new(vec![
+        Cell::from("issuer"),
+        Cell::from("unit"),
+        Cell::from("bytes per unit"),
+        Cell::from("a gigabyte"),
+        Cell::from("a megabyte"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Gray)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let rows: Vec<Row> = app
+        .snapshot
+        .accepts
+        .iter()
+        .map(|a| {
+            Row::new(vec![
+                Cell::from(a.mint.clone()),
+                Cell::from(a.unit.clone()),
+                Cell::from(a.bytes_per_unit.to_string()),
+                Cell::from(costs(1_000_000_000, a)),
+                Cell::from(costs(1_000_000, a)),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Min(24),    // issuer
+            Constraint::Length(6),  // unit
+            Constraint::Length(15), // bytes per unit
+            Constraint::Length(14), // a gigabyte
+            Constraint::Length(14), // a megabyte
+        ],
+    )
+    .header(header)
+    .row_highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" pricing — what this node takes, and what it gives for it "),
+    );
+
+    frame.render_stateful_widget(table, area, &mut app.issuers);
+}
+
+/// What a quantity costs in one issuer's paper.
+fn costs(bytes: u64, issuer: &Accepted) -> String {
+    if issuer.bytes_per_unit == 0 {
+        return "—".into();
+    }
+    let units = bytes as f64 / issuer.bytes_per_unit as f64;
+    if units >= 1.0 {
+        format!("{units:.0} {}", issuer.unit)
+    } else {
+        format!("{units:.3} {}", issuer.unit)
+    }
 }
 
 fn status(app: &App) -> Paragraph<'static> {
@@ -631,7 +703,10 @@ fn status(app: &App) -> Paragraph<'static> {
                 format!("{text}_"),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
-            Span::styled("   enter to set, esc to cancel, 0 to stop selling", dim),
+            Span::styled(
+                "   enter to set, esc to cancel, 0 to stop taking this issuer",
+                dim,
+            ),
         ]))
         .block(Block::default().borders(Borders::ALL));
     }
@@ -647,7 +722,7 @@ fn status(app: &App) -> Paragraph<'static> {
     let hints = match (app.tab, app.detail) {
         (Tab::Peers, false) => "tab switches   ↑↓ selects   enter opens   q quits",
         (Tab::Peers, true) => "esc closes   ↑↓ selects   tab switches   q quits",
-        (Tab::Pricing, _) => "e changes the price   tab switches   q quits",
+        (Tab::Pricing, _) => "↑↓ selects   e changes the price   tab switches   q quits",
     };
 
     // Which node this is, and what it charges, stay visible on every tab: the
@@ -660,8 +735,12 @@ fn status(app: &App) -> Paragraph<'static> {
         ),
         Span::styled("  selling ", dim),
         Span::raw(app.snapshot.unit.clone()),
-        Span::styled(" at ", dim),
-        Span::raw(price(app.snapshot.bytes_per_sat)),
+        Span::styled("  takes ", dim),
+        Span::raw(match app.snapshot.accepts.len() {
+            0 => "nothing".to_string(),
+            1 => "1 issuer".to_string(),
+            n => format!("{n} issuers"),
+        }),
         Span::styled("  up ", dim),
         Span::raw(duration(app.snapshot.uptime_ms)),
         Span::styled("  ", dim),
@@ -735,43 +814,6 @@ fn units(bytes: u64) -> String {
         format!("{:.1} KiB", v / KIB)
     } else {
         format!("{bytes} B")
-    }
-}
-
-/// What a sat buys, in the units an operator thinks in.
-///
-/// Decimal rather than binary, unlike a rate: this is a price, and a price is
-/// quoted against the sat, which has nothing to do with powers of two.
-fn price(bytes_per_sat: u64) -> String {
-    const KB: f64 = 1_000.0;
-    const MB: f64 = KB * 1_000.0;
-    const GB: f64 = MB * 1_000.0;
-    let v = bytes_per_sat as f64;
-    if bytes_per_sat == 0 {
-        "not selling".into()
-    } else if v >= GB {
-        format!("{:.2} GB/sat", v / GB)
-    } else if v >= MB {
-        format!("{:.2} MB/sat", v / MB)
-    } else if v >= KB {
-        format!("{:.1} kB/sat", v / KB)
-    } else {
-        format!("{bytes_per_sat} B/sat")
-    }
-}
-
-/// What a quantity costs at the price in force.
-fn sats(bytes: u64, bytes_per_sat: u64) -> String {
-    if bytes_per_sat == 0 {
-        return "—".into();
-    }
-    let sats = bytes as f64 / bytes_per_sat as f64;
-    if sats >= 1.0 {
-        format!("{sats:.0} sat")
-    } else {
-        // Below a sat the interesting figure is millisats, because that is what
-        // the invoice will actually be written for.
-        format!("{:.0} msat", sats * 1_000.0)
     }
 }
 

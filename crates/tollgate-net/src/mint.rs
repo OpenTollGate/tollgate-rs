@@ -10,23 +10,25 @@
 //! one unit of capacity rather than on money. A `1024` proof is a 1 KiB claim;
 //! two of them make 2 KiB; they split and combine like any other Cashu token.
 //!
-//! # What is simulated
+//! # No Lightning here
 //!
-//! The payment backend is [`PricedBolt11`](crate::market::PricedBolt11), which
-//! prices this node's capacity in millisats and settles the invoices with a
-//! fake wallet. That is the *market* being simulated, not the mint: the
-//! keysets, blind signatures, DLEQ proofs and spent-proof set are all real, and
-//! nothing is issued until the quote has been paid.
+//! This mint has no payment processor at all, which is deliberate rather than
+//! unfinished. Bolt11 is denominated in msat and this keyset is denominated in
+//! bytes, so a mint quote would have to invent an exchange rate; and a peer
+//! that wants to pay in money already has a way to hold money — somebody
+//! else's sat-denominated mint. So the only way capacity is sold is through
+//! [`crate::market`], which takes that paper and signs against it.
+//!
+//! Everything the mint itself does is real: the keysets, the blind signatures,
+//! the DLEQ proofs and the spent-proof set.
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use cdk::mint::{Mint, MintBuilder, MintMeltLimits};
-use cdk::nuts::nut00::KnownMethod;
-use cdk::nuts::{CurrencyUnit, PaymentMethod};
+use axum::Router;
+use cdk::mint::{Mint, MintBuilder};
+use cdk::nuts::CurrencyUnit;
 use cdk_common::common::QuoteTTL;
-
-use crate::market::{Price, PricedBolt11};
 
 /// How this node's mint is set up.
 #[derive(Debug, Clone)]
@@ -37,10 +39,11 @@ pub struct MintConfig {
     pub unit: String,
     /// Seed for the keyset, so a restart keeps issuing against the same keys.
     pub seed: Vec<u8>,
-    /// Largest amount a single mint operation may create.
+    /// Largest amount a single issuance may create.
+    ///
+    /// Not enforced by a payment processor — there is none — but kept as the
+    /// ceiling the market applies to one swap.
     pub max_amount: u64,
-    /// What this node sells its capacity for, in bytes per sat.
-    pub price: Price,
 }
 
 /// The unit a keyset denominates in.
@@ -72,22 +75,14 @@ pub async fn build(config: &MintConfig) -> Result<Mint> {
         .with_description("Vouchers: claims on this node's capacity".to_string())
         .with_urls(vec![config.url.clone()]);
 
-    // The backend that takes money for vouchers. Nothing about the protocol
-    // depends on it: a node that sells its vouchers some other way, or gives
-    // them away, runs the same mint. What it does decide is the price, because
-    // a quote for a quantity of bytes has to become an invoice for an amount of
-    // money somewhere, and this is the only place that knows both.
-    let backend = PricedBolt11::new(unit.clone(), config.price.clone());
-
+    // The unit, and no way to buy it with money. A payment processor is how a
+    // mint sells its own paper for something else, and there is nothing this
+    // mint could quote: an invoice is written in msat and this keyset counts
+    // bytes. Selling happens at the market, against paper from a mint that does
+    // deal in money.
     builder
-        .add_payment_processor(
-            unit.clone(),
-            PaymentMethod::Known(KnownMethod::Bolt11),
-            MintMeltLimits::new(1, config.max_amount),
-            Arc::new(backend),
-        )
-        .await
-        .with_context(|| format!("add a payment processor for {unit}"))?;
+        .configure_unit(unit.clone(), Default::default())
+        .map_err(|e| anyhow!("configure the {unit} keyset: {e}"))?;
 
     // No input fee. A fee would mean a voucher redeemed is worth slightly less
     // than a voucher issued, and delivery is one voucher per unit exactly.
@@ -121,8 +116,7 @@ pub async fn build(config: &MintConfig) -> Result<Mint> {
 /// talking to.
 pub async fn serve(
     mint: Arc<Mint>,
-    unit: String,
-    price: Price,
+    market: Router,
     listen: std::net::SocketAddr,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
@@ -131,13 +125,10 @@ pub async fn serve(
     // a node may point its peers at somebody else's market entirely. All that
     // is served here is the price signal — selling this node's own vouchers is
     // the mint API beside it, and needs nothing of its own.
-    let router = cdk_axum::create_mint_router(
-        Arc::clone(&mint),
-        vec![PaymentMethod::Known(KnownMethod::Bolt11).to_string()],
-    )
-    .await
-    .context("build the mint router")?
-    .merge(crate::market::router(unit, price));
+    let router = cdk_axum::create_mint_router(Arc::clone(&mint), vec![])
+        .await
+        .context("build the mint router")?
+        .merge(market);
 
     let listener = tokio::net::TcpListener::bind(listen)
         .await
@@ -179,7 +170,6 @@ mod tests {
             unit: "byte".into(),
             seed: vec![7; 32],
             max_amount: 1_000_000_000,
-            price: Price::new(1_000_000),
         })
         .await
         .expect("build a byte mint");

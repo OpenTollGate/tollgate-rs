@@ -26,6 +26,17 @@ x-mesh-node: &mesh-node
     RUST_LOG: "${RUST_LOG:-tollgate_net=debug,info}"
 
 services:
+  # The money. A sat-denominated mint standing in for the likes of minibits:
+  # a node buys its paper here and pays a peer with it, because a peer sells
+  # capacity for money it can hold, not for its own vouchers.
+  sat-mint:
+    image: cashubtc/mintd:latest
+    command: ["cdk-mintd", "--config", "/etc/cdk/mintd.toml"]
+    volumes:
+      - ../mint/mintd.toml:/etc/cdk/mintd.toml:ro
+    networks:
+      mesh:
+        ipv4_address: 172.30.0.5
   gateway:
     <<: *mesh-node
     volumes:
@@ -79,6 +90,7 @@ services:
     depends_on:
       - gateway
       - origin
+      - sat-mint
 
 networks:
   # Carries the mesh's UDP transport and nothing else. Fixed addresses because

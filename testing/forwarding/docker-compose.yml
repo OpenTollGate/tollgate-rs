@@ -10,6 +10,19 @@
 #   client ──edge── gateway ──transit── origin
 #    .30             .20 .20             .10
 services:
+  # The money. A sat-denominated mint standing in for the likes of minibits:
+  # a node buys its paper here and pays a peer with it, because a peer sells
+  # capacity for money it can hold, not for its own vouchers.
+  sat-mint:
+    image: cashubtc/mintd:latest
+    command: ["cdk-mintd", "--config", "/etc/cdk/mintd.toml"]
+    volumes:
+      - ../mint/mintd.toml:/etc/cdk/mintd.toml:ro
+    # On the client's segment: the money is bought by whoever is paying, and
+    # here that is the client.
+    networks:
+      edge:
+        ipv4_address: 172.28.0.5
   origin:
     image: python:3-slim
     # Just serves something large enough to measure a rate against. It needs no
@@ -80,6 +93,7 @@ services:
     depends_on:
       - gateway
       - origin
+      - sat-mint
 
 networks:
   # The gateway shapes on the interface facing the client. Which kernel name

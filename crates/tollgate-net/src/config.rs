@@ -29,8 +29,10 @@ pub struct File {
     pub mint: MintSection,
     /// Which mints this node takes payment in, and the default surcharge.
     pub vouchers: VouchersSection,
-    /// What this node sells its own vouchers for.
+    /// What this node takes as payment for its own vouchers.
     pub market: MarketSection,
+    /// Where it holds the money it pays peers with.
+    pub wallet: WalletSection,
     /// The minimum flow allowance.
     pub access: AccessSection,
     /// Channel parameters.
@@ -96,33 +98,74 @@ pub struct VouchersSection {
     pub received_multiplier: u16,
 }
 
-/// What this node sells its own capacity for.
+/// What this node takes as payment for its own vouchers.
 ///
-/// Not part of the protocol: no TollGate message is denominated in money. This
-/// is what a buyer pays at the mint, before any session exists.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// Not part of the protocol: no TollGate message is denominated in money. A
+/// buyer sends one of these mints' tokens and gets vouchers back, before any
+/// session exists.
+///
+/// Empty means this node sells nothing here, which is a working configuration:
+/// its peers have to obtain its vouchers somewhere else.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct MarketSection {
-    /// Units of capacity one sat buys. Zero closes the market: quotes are
-    /// refused, and peers have to obtain this node's vouchers somewhere else.
-    ///
-    /// Bytes per sat rather than sats per byte because the second is fractional
-    /// for any sane price and rounds to nothing as an integer.
-    pub bytes_per_sat: u64,
+    /// One entry per issuer whose paper this node will take.
+    pub accept: Vec<AcceptedSection>,
 }
 
-impl Default for MarketSection {
-    /// A megabyte for a sat.
+/// One issuer's paper, and what a unit of it buys here.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedSection {
+    /// The mint whose tokens this node will take as payment.
+    pub mint: String,
+    /// Which of that mint's keysets. A token in any other unit is refused.
     ///
-    /// A number had to be picked, and this one is memorable, in the right order
-    /// of magnitude for retail transit, and easy to divide in the head. An
-    /// operator selling scarce uplink will raise it and one selling spare
-    /// capacity will lower it; both are one line, or one control-socket call.
-    fn default() -> Self {
-        Self {
-            bytes_per_sat: 1_000_000,
-        }
+    /// Defaults to `sat`, which is what a mint dealing in money issues. It has
+    /// to be stated at all because a mint may run several: "a million bytes per
+    /// unit" means different things against a sat and a cent.
+    #[serde(default = "default_money_unit")]
+    pub unit: String,
+    /// Units of capacity one unit of that paper buys.
+    ///
+    /// Priced per issuer on purpose. A sat from a mint expected to honour its
+    /// tokens is worth more than a sat from one that is not, and that
+    /// difference is the whole point of a market in vouchers.
+    pub bytes_per_unit: u64,
+}
+
+fn default_money_unit() -> String {
+    "sat".into()
+}
+
+impl MarketSection {
+    /// The price list, in the shape the market keeps it.
+    pub fn accepted(&self) -> Vec<crate::market::Accepted> {
+        self.accept
+            .iter()
+            .map(|a| crate::market::Accepted {
+                mint: a.mint.clone(),
+                unit: a.unit.clone(),
+                bytes_per_unit: a.bytes_per_unit,
+            })
+            .collect()
     }
+}
+
+/// Where this node holds money, so it can buy what it pays peers with.
+///
+/// A node that only sells needs none of this: it is paid in its peers' money
+/// and never has to hold any. One that buys transit has to arrive at its
+/// upstream holding paper the upstream accepts, exactly as its own customers
+/// have to arrive holding its.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct WalletSection {
+    /// A mint that sells its paper for money. Empty means this node cannot buy.
+    pub mint: String,
+    /// The unit that mint denominates in.
+    #[serde(default = "default_money_unit")]
+    pub unit: String,
 }
 
 /// The minimum flow allowance.

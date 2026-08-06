@@ -29,7 +29,7 @@ use tollgate_core::session::{Phase, Sessions};
 use tracing::debug;
 
 use crate::adapter::ResourceAdapter;
-use crate::market::Price;
+use crate::market::{Accepted, Prices};
 
 /// Where a control socket might live, best first.
 ///
@@ -125,13 +125,13 @@ pub struct Snapshot {
     pub uptime_ms: u64,
     /// One entry per peer, ordered by key so the display does not jump around.
     pub peers: Vec<PeerSnapshot>,
-    /// What this node sells its own capacity for, in bytes per sat.
+    /// What this node takes as payment, and at what price.
     ///
     /// Filled in where the snapshot is served rather than where it is built:
-    /// the price belongs to the market, and the node's own state machine has
-    /// no opinion about money. A reader wants both in one answer all the same.
+    /// prices belong to the market, and the node's own state machine has no
+    /// opinion about money. A reader wants both in one answer all the same.
     #[serde(default)]
-    pub bytes_per_sat: u64,
+    pub accepts: Vec<Accepted>,
 }
 
 /// One peering, from this node's side.
@@ -272,7 +272,7 @@ pub fn snapshot(
         uptime_ms,
         // Filled in when the snapshot is served: what the node charges is the
         // market's business, not the session layer's.
-        bytes_per_sat: 0,
+        accepts: Vec::new(),
         peers,
     }
 }
@@ -299,13 +299,25 @@ pub enum Request {
     /// Everything the node is doing. The same thing a caller gets by saying
     /// nothing at all.
     Snapshot,
-    /// What the node sells its capacity for.
-    ShowPrice,
-    /// Change what the node sells its capacity for.
+    /// What the node takes as payment, and at what price.
+    ShowPrices,
+    /// Change what one issuer's paper buys here.
+    ///
+    /// Per issuer, because that is what a price is about: paper from a mint an
+    /// operator has stopped trusting is worth less, and zero stops taking it.
     SetPrice {
-        /// Units of capacity one sat buys. Zero closes the market.
-        bytes_per_sat: u64,
+        /// The mint whose paper this is about.
+        mint: String,
+        /// Its unit. Defaults to `sat`, as everywhere else.
+        #[serde(default = "default_unit")]
+        unit: String,
+        /// Units of capacity one unit of that paper buys. Zero refuses it.
+        bytes_per_unit: u64,
     },
+}
+
+fn default_unit() -> String {
+    "sat".into()
 }
 
 /// What came back.
@@ -332,7 +344,7 @@ pub enum Response {
 pub async fn serve(
     path: &Path,
     published: Published,
-    price: Price,
+    prices: Prices,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> Result<()> {
     // A socket left behind by a previous run would make bind fail. Removing it
@@ -353,9 +365,9 @@ pub async fn serve(
                     }
                 };
                 let published = Arc::clone(&published);
-                let price = price.clone();
+                let prices = prices.clone();
                 tokio::spawn(async move {
-                    let _ = answer(stream, published, price).await;
+                    let _ = answer(stream, published, prices).await;
                 });
             }
             _ = &mut shutdown => break,
@@ -371,7 +383,11 @@ pub async fn serve(
 /// The request is optional: a caller that closes its writing half without
 /// sending anything is asking for the snapshot, which is what every reader of
 /// this socket did before it could be asked anything else.
-async fn answer(stream: tokio::net::UnixStream, published: Published, price: Price) -> Result<()> {
+async fn answer(
+    stream: tokio::net::UnixStream,
+    published: Published,
+    prices: Prices,
+) -> Result<()> {
     let (rx, mut tx) = stream.into_split();
     let mut line = String::new();
 
@@ -385,10 +401,10 @@ async fn answer(stream: tokio::net::UnixStream, published: Published, price: Pri
 
     let response = match line.trim() {
         "" => Response::Ok {
-            data: serde_json::to_value(current(&published, &price))?,
+            data: serde_json::to_value(current(&published, &prices))?,
         },
         text => match serde_json::from_str::<Request>(text) {
-            Ok(request) => run(request, &published, &price),
+            Ok(request) => run(request, &published, &prices),
             Err(e) => Response::Error {
                 message: format!("not a request this node understands: {e}"),
             },
@@ -408,33 +424,47 @@ async fn answer(stream: tokio::net::UnixStream, published: Published, price: Pri
     Ok(())
 }
 
-fn run(request: Request, published: &Published, price: &Price) -> Response {
+fn run(request: Request, published: &Published, prices: &Prices) -> Response {
     match request {
-        Request::Snapshot => match serde_json::to_value(current(published, price)) {
+        Request::Snapshot => match serde_json::to_value(current(published, prices)) {
             Ok(data) => Response::Ok { data },
             Err(e) => Response::Error {
                 message: e.to_string(),
             },
         },
-        Request::ShowPrice => Response::Ok {
-            data: serde_json::json!({ "bytes_per_sat": price.bytes_per_sat() }),
+        Request::ShowPrices => match serde_json::to_value(prices.listed()) {
+            Ok(data) => Response::Ok {
+                data: serde_json::json!({ "accepts": data }),
+            },
+            Err(e) => Response::Error {
+                message: e.to_string(),
+            },
         },
-        Request::SetPrice { bytes_per_sat } => {
-            price.set(bytes_per_sat);
+        Request::SetPrice {
+            mint,
+            unit,
+            bytes_per_unit,
+        } => {
+            prices.set(&mint, &unit, bytes_per_unit);
             // Worth a line in the log: it changes what the node charges, and
             // the next operator to read the logs will want to know when.
-            tracing::info!(bytes_per_sat, "the market price was changed");
-            Response::Ok {
-                data: serde_json::json!({ "bytes_per_sat": price.bytes_per_sat() }),
+            tracing::info!(%mint, %unit, bytes_per_unit, "a market price was changed");
+            match serde_json::to_value(prices.listed()) {
+                Ok(data) => Response::Ok {
+                    data: serde_json::json!({ "accepts": data }),
+                },
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
             }
         }
     }
 }
 
-/// The published snapshot, with the price the market is holding right now.
-fn current(published: &Published, price: &Price) -> Snapshot {
+/// The published snapshot, with the prices the market is holding right now.
+fn current(published: &Published, prices: &Prices) -> Snapshot {
     let mut snapshot = (**published.load()).clone();
-    snapshot.bytes_per_sat = price.bytes_per_sat();
+    snapshot.accepts = prices.listed();
     snapshot
 }
 
@@ -482,11 +512,26 @@ async fn exchange(path: &Path, request: Option<String>) -> Result<String> {
 mod tests {
     use super::*;
 
+    const MINT: &str = "https://mint.example/Bitcoin";
+
+    fn priced(bytes_per_unit: u64) -> Prices {
+        Prices::new([Accepted {
+            mint: MINT.into(),
+            unit: "sat".into(),
+            bytes_per_unit,
+        }])
+    }
+
     /// Serve a socket in a temporary directory, and hand back the path.
-    async fn serving(price: Price) -> (PathBuf, tokio::task::JoinHandle<()>) {
+    async fn serving(prices: Prices) -> (PathBuf, tokio::task::JoinHandle<()>) {
+        let seed: u64 = prices
+            .listed()
+            .first()
+            .map(|a| a.bytes_per_unit)
+            .unwrap_or(0);
         let path = std::env::temp_dir().join(format!(
             "tollgate-control-test-{}.sock",
-            std::process::id() as u64 + price.bytes_per_sat()
+            std::process::id() as u64 + seed
         ));
         let published: Published = Arc::new(ArcSwap::from_pointee(Snapshot {
             pubkey: "02aa".into(),
@@ -496,7 +541,7 @@ mod tests {
 
         let serve_path = path.clone();
         let task = tokio::spawn(async move {
-            let _ = serve(&serve_path, published, price, std::future::pending::<()>()).await;
+            let _ = serve(&serve_path, published, prices, std::future::pending::<()>()).await;
         });
 
         // Bound rather than fixed: binding a Unix socket is fast, but a loaded
@@ -544,13 +589,14 @@ mod tests {
     async fn a_caller_that_says_nothing_still_gets_the_snapshot() {
         // Every reader of this socket did exactly this before it could be asked
         // anything, and they must not have to change.
-        let (path, task) = serving(Price::new(1_000_000)).await;
+        let (path, task) = serving(priced(1_000_000)).await;
 
         let snapshot = fetch(&path).await.expect("fetch");
         assert_eq!(snapshot.pubkey, "02aa");
         assert_eq!(
-            snapshot.bytes_per_sat, 1_000_000,
-            "the price is served alongside what the node is doing"
+            snapshot.accepts.first().map(|a| a.bytes_per_unit),
+            Some(1_000_000),
+            "the price list is served alongside what the node is doing"
         );
 
         task.abort();
@@ -558,30 +604,64 @@ mod tests {
 
     #[tokio::test]
     async fn the_price_can_be_changed_through_the_socket() {
-        let price = Price::new(2_000_000);
-        let (path, task) = serving(price.clone()).await;
+        let prices = priced(2_000_000);
+        let (path, task) = serving(prices.clone()).await;
 
         let answer = send(
             &path,
             &Request::SetPrice {
-                bytes_per_sat: 500_000,
+                mint: MINT.into(),
+                unit: "sat".into(),
+                bytes_per_unit: 500_000,
             },
         )
         .await
         .expect("set the price");
         assert!(matches!(answer, Response::Ok { .. }));
 
-        // The market holds the same number, not a copy of it: what the socket
-        // changed is what the mint will quote against.
-        assert_eq!(price.bytes_per_sat(), 500_000);
-        assert_eq!(fetch(&path).await.expect("fetch").bytes_per_sat, 500_000);
+        // The market holds the same list, not a copy of it: what the socket
+        // changed is what the next swap is priced against.
+        assert_eq!(prices.bytes_per_unit(MINT, "sat"), Some(500_000));
+        assert_eq!(
+            fetch(&path)
+                .await
+                .expect("fetch")
+                .accepts
+                .first()
+                .map(|a| a.bytes_per_unit),
+            Some(500_000)
+        );
+
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn an_issuer_can_be_refused_through_the_socket() {
+        // Zero is how an operator stops taking a mint's paper — the entry goes
+        // away rather than becoming a very expensive one.
+        let prices = priced(4_000_000);
+        let (path, task) = serving(prices.clone()).await;
+
+        send(
+            &path,
+            &Request::SetPrice {
+                mint: MINT.into(),
+                unit: "sat".into(),
+                bytes_per_unit: 0,
+            },
+        )
+        .await
+        .expect("refuse the issuer");
+
+        assert!(!prices.is_selling());
+        assert!(fetch(&path).await.expect("fetch").accepts.is_empty());
 
         task.abort();
     }
 
     #[tokio::test]
     async fn a_request_that_makes_no_sense_is_refused_rather_than_guessed_at() {
-        let (path, task) = serving(Price::new(3_000_000)).await;
+        let (path, task) = serving(priced(3_000_000)).await;
 
         let body = exchange(&path, Some("{\"command\":\"drop_everything\"}".into()))
             .await

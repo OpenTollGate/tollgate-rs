@@ -38,6 +38,7 @@ use cdk_spilman::{
     SpilmanClientBridge, SpilmanNetworking,
 };
 use tollgate_protocol::{ChannelId, PubKey, Signature};
+use tracing::debug;
 
 use super::{ChannelBackend, FundedChannel, VerifiedChannel};
 
@@ -84,6 +85,19 @@ pub struct SpilmanConfig {
     pub accepted_mints: Vec<String>,
     /// Secret key this node signs channel state with, hex-encoded.
     pub secret_key_hex: String,
+    /// Where this node holds money, for buying the vouchers it pays peers
+    /// with. `None` for a node that only sells.
+    pub wallet: Option<Wallet>,
+}
+
+/// Where a node's money is, and in what.
+#[derive(Debug, Clone)]
+pub struct Wallet {
+    /// A mint that sells its paper for money — the one a peer has to accept
+    /// before this node can pay it.
+    pub mint: String,
+    /// The unit that mint's paper is denominated in.
+    pub unit: String,
 }
 
 type Client =
@@ -264,6 +278,62 @@ struct FundingBlob {
     funding_proofs: serde_json::Value,
 }
 
+impl SpilmanChannels {
+    /// Buy `capacity` of a peer's vouchers, paying at its market.
+    ///
+    /// Three steps and no negotiation: ask what the peer takes, turn money into
+    /// that issuer's paper, and hand it over for vouchers. The peer prices the
+    /// trade; this side only decides whether to accept the price by going
+    /// through with it.
+    fn buy_vouchers(&self, mint_url: &str, capacity: u64, keyset_info: &str) -> Result<String> {
+        let Some(wallet) = &self.config.wallet else {
+            bail!(
+                "this node holds no money, so it cannot buy the vouchers it would pay {mint_url} with"
+            );
+        };
+
+        // The peer's market is served beside its mint, at the URL it already
+        // advertises.
+        let market = crate::market::info_of(mint_url)?;
+        let price = market
+            .accepts
+            .iter()
+            .find(|a| {
+                a.mint.trim_end_matches('/') == wallet.mint.trim_end_matches('/')
+                    && a.unit == wallet.unit
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "{mint_url} does not take {} from {}; it takes {:?}",
+                    wallet.unit,
+                    wallet.mint,
+                    market
+                        .accepts
+                        .iter()
+                        .map(|a| format!("{} {}", a.unit, a.mint))
+                        .collect::<Vec<_>>()
+                )
+            })?;
+
+        // Rounded up, so a purchase is never short of what it asked for.
+        let owed = (capacity as u128)
+            .div_ceil(price.bytes_per_unit as u128)
+            .max(1) as u64;
+        debug!(
+            capacity,
+            owed,
+            unit = %wallet.unit,
+            mint = %wallet.mint,
+            "buying vouchers"
+        );
+
+        let money = crate::market::mint_money(&wallet.mint, owed, &wallet.unit)
+            .with_context(|| format!("get {owed} {} to pay with", wallet.unit))?;
+
+        crate::market::buy(mint_url, capacity, &self.config.unit, keyset_info, &money)
+    }
+}
+
 impl ChannelBackend for SpilmanChannels {
     fn fund(&self, peer: PubKey, mint_url: &str, capacity: u64) -> Result<FundedChannel> {
         // Which keyset denominates in our unit. A mint may run several — an old
@@ -277,10 +347,12 @@ impl ChannelBackend for SpilmanChannels {
             .fetch_keyset_info(mint_url, &keyset_id)
             .map_err(|e| anyhow!("could not read keyset {keyset_id} from {mint_url}: {e}"))?;
 
-        // Acquiring the peer's vouchers is outside the protocol; a peer arrives
-        // holding them or it gets no service.
-        let token = crate::market::acquire(mint_url, capacity, &self.config.unit, &keyset_info)
-            .with_context(|| format!("acquire {capacity} {} from {mint_url}", self.config.unit))?;
+        // Buying the peer's vouchers is outside the protocol: a peer arrives
+        // holding them or it gets no service, and how it came to hold them is
+        // as much its own business as how it came to hold money.
+        let token = self
+            .buy_vouchers(mint_url, capacity, &keyset_info)
+            .with_context(|| format!("buy {capacity} {} from {mint_url}", self.config.unit))?;
 
         let ours = cashu::nuts::SecretKey::from_hex(&self.config.secret_key_hex)
             .map_err(|e| anyhow!("bad secret: {e}"))?
