@@ -7,6 +7,11 @@
 //! different moments — so they get separate columns rather than one netted
 //! number, because netting them would invent a relationship the protocol does
 //! not have.
+//!
+//! It is also the place an operator changes what the node charges. That is the
+//! one setting worth moving while a node runs — an uplink becomes scarce, or
+//! stops being — and it touches no session, grant or channel: it decides what
+//! the *next* buyer of vouchers pays, and nothing that has already been sold.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -19,7 +24,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use ratatui::{Frame, TerminalOptions, Viewport};
-use tollgate_net::control::{self, PeerSnapshot, Snapshot};
+use tollgate_net::control::{self, PeerSnapshot, Request, Response, Snapshot};
 
 #[derive(Parser, Debug)]
 #[command(name = "tolltop", about = "Watch a TollGate node")]
@@ -48,6 +53,14 @@ fn main() -> Result<()> {
 
     let mut snapshot = Snapshot::default();
     let mut error;
+    // Some(text) while the operator is typing a new price. Editing is modal
+    // rather than a prompt in a corner: a keystroke that means "quit" in one
+    // mode and "9" in the other has to be told which it is.
+    let mut editing: Option<String> = None;
+    // A refusal from the node, kept on screen until the operator does
+    // something else. It cannot share `error` with the fetch loop: that one is
+    // recomputed every refresh, which would wipe this before it was read.
+    let mut notice: Option<String> = None;
 
     loop {
         match runtime.block_on(control::fetch(&socket)) {
@@ -60,14 +73,50 @@ fn main() -> Result<()> {
             Err(e) => error = Some(format!("{e:#}")),
         }
 
-        terminal.draw(|frame| draw(frame, &snapshot, error.as_deref(), &socket))?;
+        terminal.draw(|frame| {
+            draw(
+                frame,
+                &snapshot,
+                notice.as_deref().or(error.as_deref()),
+                &socket,
+                &editing,
+            )
+        })?;
 
         if event::poll(interval)?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
-            && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
         {
-            break;
+            match (&mut editing, key.code) {
+                // --- editing a price ---
+                (Some(_), KeyCode::Esc) => editing = None,
+                (Some(text), KeyCode::Enter) => {
+                    // An empty entry is a change of mind, not a price of zero:
+                    // closing the market is worth typing a `0` for.
+                    notice = match text.trim().parse::<u64>() {
+                        Ok(bytes_per_sat) => runtime
+                            .block_on(set_price(&socket, bytes_per_sat))
+                            .err()
+                            .map(|e| format!("{e:#}")),
+                        // Nothing typed is a change of mind, not a price of
+                        // zero: closing the market is worth typing a `0` for.
+                        Err(_) => None,
+                    };
+                    editing = None;
+                }
+                (Some(text), KeyCode::Backspace) => {
+                    text.pop();
+                }
+                (Some(text), KeyCode::Char(c)) if c.is_ascii_digit() => text.push(c),
+
+                // --- watching ---
+                (None, KeyCode::Char('p')) => {
+                    notice = None;
+                    editing = Some(snapshot.bytes_per_sat.to_string());
+                }
+                (None, KeyCode::Char('q') | KeyCode::Esc) => break,
+                _ => {}
+            }
         }
     }
 
@@ -75,7 +124,21 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn draw(frame: &mut Frame, snapshot: &Snapshot, error: Option<&str>, socket: &std::path::Path) {
+/// Tell the node what to charge, and fail loudly if it will not.
+async fn set_price(socket: &std::path::Path, bytes_per_sat: u64) -> Result<()> {
+    match control::send(socket, &Request::SetPrice { bytes_per_sat }).await? {
+        Response::Ok { .. } => Ok(()),
+        Response::Error { message } => Err(anyhow::anyhow!(message)),
+    }
+}
+
+fn draw(
+    frame: &mut Frame,
+    snapshot: &Snapshot,
+    error: Option<&str>,
+    socket: &std::path::Path,
+    editing: &Option<String>,
+) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(3),
@@ -85,7 +148,7 @@ fn draw(frame: &mut Frame, snapshot: &Snapshot, error: Option<&str>, socket: &st
 
     frame.render_widget(node_header(snapshot), header);
     frame.render_widget(peer_table(snapshot), body);
-    frame.render_widget(status(error, socket, snapshot.peers.len()), footer);
+    frame.render_widget(status(error, socket, snapshot.peers.len(), editing), footer);
 }
 
 fn node_header(snapshot: &Snapshot) -> Paragraph<'_> {
@@ -99,6 +162,8 @@ fn node_header(snapshot: &Snapshot) -> Paragraph<'_> {
         Span::raw(&snapshot.unit),
         Span::styled("   mint ", Style::default().fg(Color::DarkGray)),
         Span::raw(&snapshot.mint_url),
+        Span::styled("   at ", Style::default().fg(Color::DarkGray)),
+        Span::raw(price(snapshot.bytes_per_sat)),
         Span::styled("   up ", Style::default().fg(Color::DarkGray)),
         Span::raw(duration(snapshot.uptime_ms)),
     ]);
@@ -201,21 +266,67 @@ fn peer_row(peer: &PeerSnapshot) -> Row<'_> {
     ])
 }
 
-fn status(error: Option<&str>, socket: &std::path::Path, peers: usize) -> Paragraph<'static> {
-    let line = match error {
-        Some(e) => Line::from(Span::styled(
+fn status(
+    error: Option<&str>,
+    socket: &std::path::Path,
+    peers: usize,
+    editing: &Option<String>,
+) -> Paragraph<'static> {
+    // Editing wins over the error line: the operator is mid-keystroke, and
+    // what they need to see is what they have typed so far.
+    let line = match (editing, error) {
+        (Some(text), _) => Line::from(vec![
+            Span::styled(
+                "price (bytes per sat): ",
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(
+                format!("{text}_"),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "   enter to set, esc to cancel, 0 to stop selling",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        (None, Some(e)) => Line::from(Span::styled(
             format!("{}: {e}", socket.display()),
             Style::default().fg(Color::Red),
         )),
-        None => Line::from(vec![
+        (None, None) => Line::from(vec![
             Span::styled(
                 format!("{peers} peer(s)"),
                 Style::default().fg(Color::Green),
             ),
-            Span::styled("   q to quit", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "   p to price   q to quit",
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
     };
     Paragraph::new(line).block(Block::default().borders(Borders::ALL))
+}
+
+/// What a sat buys, in the units an operator thinks in.
+///
+/// Decimal rather than binary, unlike a rate: this is a price, and a price is
+/// quoted against the sat, which has nothing to do with powers of two.
+fn price(bytes_per_sat: u64) -> String {
+    const KB: f64 = 1_000.0;
+    const MB: f64 = KB * 1_000.0;
+    const GB: f64 = MB * 1_000.0;
+    let v = bytes_per_sat as f64;
+    if bytes_per_sat == 0 {
+        "not selling".into()
+    } else if v >= GB {
+        format!("{:.2} GB/sat", v / GB)
+    } else if v >= MB {
+        format!("{:.2} MB/sat", v / MB)
+    } else if v >= KB {
+        format!("{:.1} kB/sat", v / KB)
+    } else {
+        format!("{bytes_per_sat} B/sat")
+    }
 }
 
 /// How full a channel is. The number that matters is how close it is to needing

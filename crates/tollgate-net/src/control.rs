@@ -1,12 +1,20 @@
-//! What the node will tell a local tool about itself.
+//! What the node will tell a local tool about itself, and the one thing it
+//! will take instructions about.
 //!
 //! A Unix socket serving a JSON snapshot, one per connection. The node
 //! republishes the snapshot on every tick and the socket hands out whatever is
 //! current, so a reader never blocks the event loop and the loop never waits on
 //! a reader.
 //!
-//! Local-only by construction: a Unix socket has no port to expose, and the
-//! snapshot carries operational state rather than anything a peer could act on.
+//! A caller that says nothing gets the snapshot, which is what every reader
+//! did before there was anything to say. A caller that sends a line of JSON
+//! first gets an answer to it instead — see [`Request`]. The only thing that
+//! can be changed this way is the market price: it is the one number an
+//! operator has a reason to move while the node runs, and moving it does not
+//! touch a session, a grant or a channel.
+//!
+//! Local-only by construction: a Unix socket has no port to expose, and
+//! nothing here is reachable by a peer.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,13 +22,14 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tollgate_core::access::AccessLevel;
 use tollgate_core::session::{Phase, Sessions};
 use tracing::debug;
 
 use crate::adapter::ResourceAdapter;
+use crate::market::Price;
 
 /// Where the control socket lives unless the operator says otherwise.
 pub fn default_socket_path() -> PathBuf {
@@ -40,6 +49,13 @@ pub struct Snapshot {
     pub uptime_ms: u64,
     /// One entry per peer, ordered by key so the display does not jump around.
     pub peers: Vec<PeerSnapshot>,
+    /// What this node sells its own capacity for, in bytes per sat.
+    ///
+    /// Filled in where the snapshot is served rather than where it is built:
+    /// the price belongs to the market, and the node's own state machine has
+    /// no opinion about money. A reader wants both in one answer all the same.
+    #[serde(default)]
+    pub bytes_per_sat: u64,
 }
 
 /// One peering, from this node's side.
@@ -178,6 +194,9 @@ pub fn snapshot(
         unit: policy.unit.clone(),
         mint_url: mint_url.into(),
         uptime_ms,
+        // Filled in when the snapshot is served: what the node charges is the
+        // market's business, not the session layer's.
+        bytes_per_sat: 0,
         peers,
     }
 }
@@ -187,14 +206,57 @@ fn short(bytes: &[u8]) -> String {
     hex::encode(&bytes[..4.min(bytes.len())])
 }
 
-/// Serve the current snapshot to anything that connects, until `shutdown`.
+/// How long to wait for a request before assuming there is not going to be one.
 ///
-/// One snapshot per connection, then close: a tool that wants live data
+/// Short: a caller with something to say has already written it by the time the
+/// connection is accepted. This is only the ceiling on how long a caller that
+/// wants the snapshot and says so by staying quiet has to wait for it.
+const REQUEST_WAIT: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// A line of JSON asking the node for something.
+///
+/// Shaped like the FIPS control socket's — a command and its parameters — so
+/// an operator driving both is not learning two conventions.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "command", content = "params", rename_all = "snake_case")]
+pub enum Request {
+    /// Everything the node is doing. The same thing a caller gets by saying
+    /// nothing at all.
+    Snapshot,
+    /// What the node sells its capacity for.
+    ShowPrice,
+    /// Change what the node sells its capacity for.
+    SetPrice {
+        /// Units of capacity one sat buys. Zero closes the market.
+        bytes_per_sat: u64,
+    },
+}
+
+/// What came back.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum Response {
+    /// The command was carried out.
+    Ok {
+        /// Whatever it produced.
+        data: serde_json::Value,
+    },
+    /// It was not.
+    Error {
+        /// Why.
+        message: String,
+    },
+}
+
+/// Serve the snapshot, and the few commands, until `shutdown`.
+///
+/// One exchange per connection, then close: a tool that wants live data
 /// reconnects, which keeps this side stateless and means a stalled reader can
 /// never hold anything up.
 pub async fn serve(
     path: &Path,
     published: Published,
+    price: Price,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> Result<()> {
     // A socket left behind by a previous run would make bind fail. Removing it
@@ -207,20 +269,17 @@ pub async fn serve(
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (mut stream, _) = match accepted {
+                let (stream, _) = match accepted {
                     Ok(pair) => pair,
                     Err(e) => {
                         debug!(error = %e, "control connection failed to accept");
                         continue;
                     }
                 };
-                let current = published.load_full();
+                let published = Arc::clone(&published);
+                let price = price.clone();
                 tokio::spawn(async move {
-                    if let Ok(mut body) = serde_json::to_vec(&*current) {
-                        body.push(b'\n');
-                        let _ = stream.write_all(&body).await;
-                        let _ = stream.shutdown().await;
-                    }
+                    let _ = answer(stream, published, price).await;
                 });
             }
             _ = &mut shutdown => break,
@@ -231,17 +290,202 @@ pub async fn serve(
     Ok(())
 }
 
+/// Read at most one request and write exactly one answer.
+///
+/// The request is optional: a caller that closes its writing half without
+/// sending anything is asking for the snapshot, which is what every reader of
+/// this socket did before it could be asked anything else.
+async fn answer(stream: tokio::net::UnixStream, published: Published, price: Price) -> Result<()> {
+    let (rx, mut tx) = stream.into_split();
+    let mut line = String::new();
+
+    // Bounded, because "says nothing" has two shapes. A caller that closes its
+    // writing half ends the read immediately; one that simply connects and
+    // waits to be told something — which is what `nc` does, and what every
+    // reader of this socket did before it could be asked anything — would
+    // otherwise leave both sides waiting on each other until a timeout kills
+    // the connection and the reader gets nothing at all.
+    let _ = tokio::time::timeout(REQUEST_WAIT, BufReader::new(rx).read_line(&mut line)).await;
+
+    let response = match line.trim() {
+        "" => Response::Ok {
+            data: serde_json::to_value(current(&published, &price))?,
+        },
+        text => match serde_json::from_str::<Request>(text) {
+            Ok(request) => run(request, &published, &price),
+            Err(e) => Response::Error {
+                message: format!("not a request this node understands: {e}"),
+            },
+        },
+    };
+
+    // A caller that said nothing gets the snapshot bare, exactly as before.
+    // One that asked gets the answer wrapped, so that a failure is a failure
+    // rather than a suspiciously empty snapshot.
+    let mut body = match (&response, line.trim().is_empty()) {
+        (Response::Ok { data }, true) => serde_json::to_vec(data)?,
+        _ => serde_json::to_vec(&response)?,
+    };
+    body.push(b'\n');
+    tx.write_all(&body).await?;
+    tx.shutdown().await?;
+    Ok(())
+}
+
+fn run(request: Request, published: &Published, price: &Price) -> Response {
+    match request {
+        Request::Snapshot => match serde_json::to_value(current(published, price)) {
+            Ok(data) => Response::Ok { data },
+            Err(e) => Response::Error {
+                message: e.to_string(),
+            },
+        },
+        Request::ShowPrice => Response::Ok {
+            data: serde_json::json!({ "bytes_per_sat": price.bytes_per_sat() }),
+        },
+        Request::SetPrice { bytes_per_sat } => {
+            price.set(bytes_per_sat);
+            // Worth a line in the log: it changes what the node charges, and
+            // the next operator to read the logs will want to know when.
+            tracing::info!(bytes_per_sat, "the market price was changed");
+            Response::Ok {
+                data: serde_json::json!({ "bytes_per_sat": price.bytes_per_sat() }),
+            }
+        }
+    }
+}
+
+/// The published snapshot, with the price the market is holding right now.
+fn current(published: &Published, price: &Price) -> Snapshot {
+    let mut snapshot = (**published.load()).clone();
+    snapshot.bytes_per_sat = price.bytes_per_sat();
+    snapshot
+}
+
 /// Read one snapshot from a node's control socket.
 pub async fn fetch(path: &Path) -> Result<Snapshot> {
+    let body = exchange(path, None).await?;
+    serde_json::from_str(&body).context("parse the snapshot")
+}
+
+/// Send one request to a node's control socket and return what it answered.
+pub async fn send(path: &Path, request: &Request) -> Result<Response> {
+    let body = exchange(path, Some(serde_json::to_string(request)?)).await?;
+    serde_json::from_str(&body).with_context(|| format!("parse the answer: {body}"))
+}
+
+/// One connection, one optional request, one answer.
+///
+/// The writing half is closed either way, which is what tells a node that says
+/// nothing that nothing is coming: the server reads a line, and a half-closed
+/// socket ends that read rather than leaving both sides waiting on each other.
+async fn exchange(path: &Path, request: Option<String>) -> Result<String> {
     use tokio::io::AsyncReadExt;
 
-    let mut stream = tokio::net::UnixStream::connect(path)
+    let stream = tokio::net::UnixStream::connect(path)
         .await
         .with_context(|| format!("connect to {}", path.display()))?;
+    let (mut rx, mut tx) = stream.into_split();
+
+    if let Some(request) = request {
+        tx.write_all(request.as_bytes())
+            .await
+            .context("write the request")?;
+        tx.write_all(b"\n").await.context("write the request")?;
+    }
+    tx.shutdown().await.context("finish writing")?;
+
     let mut body = String::new();
-    stream
-        .read_to_string(&mut body)
+    rx.read_to_string(&mut body)
         .await
-        .context("read the snapshot")?;
-    serde_json::from_str(&body).context("parse the snapshot")
+        .context("read the answer")?;
+    Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serve a socket in a temporary directory, and hand back the path.
+    async fn serving(price: Price) -> (PathBuf, tokio::task::JoinHandle<()>) {
+        let path = std::env::temp_dir().join(format!(
+            "tollgate-control-test-{}.sock",
+            std::process::id() as u64 + price.bytes_per_sat()
+        ));
+        let published: Published = Arc::new(ArcSwap::from_pointee(Snapshot {
+            pubkey: "02aa".into(),
+            unit: "byte".into(),
+            ..Snapshot::default()
+        }));
+
+        let serve_path = path.clone();
+        let task = tokio::spawn(async move {
+            let _ = serve(&serve_path, published, price, std::future::pending::<()>()).await;
+        });
+
+        // Bound rather than fixed: binding a Unix socket is fast, but a loaded
+        // machine is a loaded machine.
+        for _ in 0..100 {
+            if path.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        (path, task)
+    }
+
+    #[tokio::test]
+    async fn a_caller_that_says_nothing_still_gets_the_snapshot() {
+        // Every reader of this socket did exactly this before it could be asked
+        // anything, and they must not have to change.
+        let (path, task) = serving(Price::new(1_000_000)).await;
+
+        let snapshot = fetch(&path).await.expect("fetch");
+        assert_eq!(snapshot.pubkey, "02aa");
+        assert_eq!(
+            snapshot.bytes_per_sat, 1_000_000,
+            "the price is served alongside what the node is doing"
+        );
+
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn the_price_can_be_changed_through_the_socket() {
+        let price = Price::new(2_000_000);
+        let (path, task) = serving(price.clone()).await;
+
+        let answer = send(
+            &path,
+            &Request::SetPrice {
+                bytes_per_sat: 500_000,
+            },
+        )
+        .await
+        .expect("set the price");
+        assert!(matches!(answer, Response::Ok { .. }));
+
+        // The market holds the same number, not a copy of it: what the socket
+        // changed is what the mint will quote against.
+        assert_eq!(price.bytes_per_sat(), 500_000);
+        assert_eq!(fetch(&path).await.expect("fetch").bytes_per_sat, 500_000);
+
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_request_that_makes_no_sense_is_refused_rather_than_guessed_at() {
+        let (path, task) = serving(Price::new(3_000_000)).await;
+
+        let body = exchange(&path, Some("{\"command\":\"drop_everything\"}".into()))
+            .await
+            .expect("exchange");
+        let answer: Response = serde_json::from_str(&body).expect("an answer");
+        assert!(
+            matches!(answer, Response::Error { .. }),
+            "an unknown command must not read as success: {body}"
+        );
+
+        task.abort();
+    }
 }

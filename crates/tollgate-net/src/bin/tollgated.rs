@@ -245,9 +245,10 @@ async fn main() -> Result<()> {
             .control_socket
             .clone()
             .unwrap_or_else(tollgate_net::control::default_socket_path);
+        let price = price.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                tollgate_net::control::serve(&path, published, std::future::pending()).await
+                tollgate_net::control::serve(&path, published, price, std::future::pending()).await
             {
                 tracing::warn!(error = %format!("{e:#}"), "the control socket stopped");
             }
