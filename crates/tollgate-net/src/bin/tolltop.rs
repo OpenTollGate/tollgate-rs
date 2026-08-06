@@ -23,11 +23,11 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
-use ratatui::{Frame, TerminalOptions, Viewport};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
 use tollgate_net::control::{self, PeerSnapshot, Request, Response, Snapshot};
 
 #[derive(Parser, Debug)]
@@ -140,9 +140,13 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
 
-    let mut terminal = ratatui::init_with_options(TerminalOptions {
-        viewport: Viewport::Fullscreen,
-    });
+    let mut terminal = ratatui::init();
+    // A full repaint of a known-blank screen before the first draw. Entering
+    // the alternate screen does not clear it, and the first draw only emits
+    // cells that differ from an assumed-blank buffer — so on a terminal that
+    // hands back an alternate buffer with something already in it (tmux, and
+    // most things over ssh) the old contents show through the gaps.
+    let _ = terminal.clear();
 
     let mut app = App {
         socket,
@@ -243,41 +247,26 @@ async fn set_price(socket: &std::path::Path, bytes_per_sat: u64) -> Result<()> {
 }
 
 fn draw(frame: &mut Frame, app: &mut App) {
-    let [header, body, footer] = Layout::vertical([
+    let [tabs, body, footer] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(3),
         Constraint::Length(3),
     ])
     .areas(frame.area());
 
-    frame.render_widget(node_header(app), header);
-    match (app.tab, app.detail) {
-        (Tab::Peers, false) => peer_table(frame, app, body),
-        (Tab::Peers, true) => frame.render_widget(peer_detail(app), body),
-        (Tab::Pricing, _) => frame.render_widget(pricing(app), body),
+    frame.render_widget(tab_bar(app), tabs);
+    match app.tab {
+        Tab::Peers => peers_tab(frame, app, body),
+        Tab::Pricing => frame.render_widget(pricing(app), body),
     }
     frame.render_widget(status(app), footer);
 }
 
-/// The node, and the tabs, on one line: which node this is never stops being
-/// the first thing worth knowing.
-fn node_header(app: &App) -> Paragraph<'_> {
+/// The tabs, and nothing else. What the node *is* belongs in the status bar,
+/// where it stays visible whichever tab is open.
+fn tab_bar(app: &App) -> Paragraph<'_> {
     let dim = Style::default().fg(Color::DarkGray);
-    let mut spans = vec![
-        Span::styled("node ", dim),
-        Span::styled(
-            short(&app.snapshot.pubkey),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("   selling ", dim),
-        Span::raw(&app.snapshot.unit),
-        Span::styled("   at ", dim),
-        Span::raw(price(app.snapshot.bytes_per_sat)),
-        Span::styled("   up ", dim),
-        Span::raw(duration(app.snapshot.uptime_ms)),
-        Span::styled("      ", dim),
-    ];
-
+    let mut spans = Vec::new();
     for (i, tab) in Tab::ALL.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(" | ", dim));
@@ -298,34 +287,46 @@ fn node_header(app: &App) -> Paragraph<'_> {
         .block(Block::default().borders(Borders::ALL).title(" tolltop "))
 }
 
-fn peer_table(frame: &mut Frame, app: &mut App, area: Rect) {
-    let header = Row::new(vec![
-        Cell::from("peer"),
-        Cell::from("access"),
-        // What they bought from us.
-        Cell::from("sold"),
-        Cell::from("left"),
-        Cell::from("in"),
-        Cell::from("up"),
-        // What we bought from them.
-        Cell::from("bought"),
-        Cell::from("want"),
-        Cell::from("m"),
-        Cell::from("out"),
-        Cell::from("down"),
-    ])
-    .style(
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Gray)
-            .add_modifier(Modifier::BOLD),
-    );
+/// The peers table, with the detail beside it rather than instead of it.
+///
+/// Split rather than swapped: the row a detail belongs to is context for
+/// reading it, and losing the table to open one peering means losing sight of
+/// how it compares to the others.
+fn peers_tab(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.detail {
+        let [left, right] =
+            Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+                .areas(area);
+        // Half the width cannot hold eleven columns, so the table drops to
+        // the five that say whether this peering is working. The rest of them
+        // are in the panel beside it anyway.
+        peer_table(frame, app, left, true);
+        frame.render_widget(peer_detail(app), right);
+    } else {
+        peer_table(frame, app, area, false);
+    }
+}
 
-    let rows: Vec<Row> = app.snapshot.peers.iter().map(peer_row).collect();
-
-    let table = Table::new(
-        rows,
-        [
+fn peer_table(frame: &mut Frame, app: &mut App, area: Rect, compact: bool) {
+    let titles: &[&str] = if compact {
+        &["peer", "access", "sold", "left", "bought"]
+    } else {
+        &[
+            "peer", "access", // what they bought from us
+            "sold", "left", "in", "up", // what we bought from them
+            "bought", "want", "m", "out", "down",
+        ]
+    };
+    let widths: &[Constraint] = if compact {
+        &[
+            Constraint::Length(10), // peer
+            Constraint::Length(11), // access
+            Constraint::Length(12), // sold
+            Constraint::Length(7),  // left
+            Constraint::Length(12), // bought
+        ]
+    } else {
+        &[
             Constraint::Length(10), // peer
             Constraint::Length(11), // access
             Constraint::Length(12), // sold
@@ -337,37 +338,88 @@ fn peer_table(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(3),  // m
             Constraint::Length(14), // out (channel)
             Constraint::Length(12), // down
-        ],
-    )
-    .header(header)
-    .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" peers — left of the divide is what they bought from us, right is what we bought from them "),
+        ]
+    };
+
+    let header = Row::new(titles.iter().map(|t| Cell::from(*t))).style(
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Gray)
+            .add_modifier(Modifier::BOLD),
     );
+
+    let rows: Vec<Row> = app
+        .snapshot
+        .peers
+        .iter()
+        .map(|peer| {
+            let full = peer_row(peer);
+            if compact { full.clone() } else { full }
+        })
+        .collect();
+    let rows: Vec<Row> = if compact {
+        app.snapshot.peers.iter().map(compact_peer_row).collect()
+    } else {
+        rows
+    };
+
+    let title = if compact {
+        " peers ".to_string()
+    } else {
+        " peers — left of the divide is what they bought from us, right is what we bought from them "
+            .to_string()
+    };
+
+    let table = Table::new(rows, widths.to_vec())
+        .header(header)
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(Block::default().borders(Borders::ALL).title(title));
 
     frame.render_stateful_widget(table, area, &mut app.peers);
 }
 
-fn peer_row(peer: &PeerSnapshot) -> Row<'_> {
-    // Colour carries the one thing worth noticing at a glance: whether traffic
-    // is flowing for this peer at all.
-    let access_style = access_style(&peer.access);
+/// The five columns that say whether a peering is working, for when the detail
+/// panel has taken the rest of the width.
+fn compact_peer_row(peer: &PeerSnapshot) -> Row<'_> {
+    Row::new(vec![
+        Cell::from(short(&peer.pubkey)),
+        Cell::from(Span::styled(
+            peer.access.clone(),
+            access_style(&peer.access),
+        )),
+        Cell::from(rate(peer.shaped_rate)),
+        Cell::from(grant_left(peer)),
+        Cell::from(rate(peer.bought_rate)),
+    ])
+}
 
-    // A grant that has lapsed leaves the peer on the allowance, which is a
-    // normal resting state rather than a fault — so it is dimmed, not red.
-    let left = if peer.grant_expires_in_ms == 0 {
+/// How long the grant in force has left.
+///
+/// A grant that has lapsed leaves the peer on the allowance, which is a normal
+/// resting state rather than a fault — so it is dimmed, not red.
+fn grant_left(peer: &PeerSnapshot) -> Span<'static> {
+    if peer.grant_expires_in_ms == 0 {
         Span::styled("lapsed", Style::default().fg(Color::DarkGray))
     } else {
         Span::raw(format!("{:.1}s", peer.grant_expires_in_ms as f64 / 1000.0))
-    };
+    }
+}
 
+fn peer_row(peer: &PeerSnapshot) -> Row<'_> {
     Row::new(vec![
         Cell::from(short(&peer.pubkey)),
-        Cell::from(Span::styled(peer.access.clone(), access_style)),
+        // Colour carries the one thing worth noticing at a glance: whether
+        // traffic is flowing for this peer at all.
+        Cell::from(Span::styled(
+            peer.access.clone(),
+            access_style(&peer.access),
+        )),
         Cell::from(rate(peer.shaped_rate)),
-        Cell::from(left),
+        Cell::from(grant_left(peer)),
         Cell::from(channels(&peer.incoming_channels)),
         Cell::from(rate(peer.upload_rate)),
         Cell::from(rate(peer.bought_rate)),
@@ -406,7 +458,7 @@ fn peer_detail(app: &App) -> Paragraph<'_> {
     let dim = Style::default().fg(Color::DarkGray);
     let field = |name: &'static str, value: String| {
         Line::from(vec![
-            Span::styled(format!("{name:<22}"), dim),
+            Span::styled(format!("{name:<20}"), dim),
             Span::raw(value),
         ])
     };
@@ -420,7 +472,7 @@ fn peer_detail(app: &App) -> Paragraph<'_> {
             ),
         ]),
         Line::from(vec![
-            Span::styled(format!("{:<22}", "access"), dim),
+            Span::styled(format!("{:<20}", "access"), dim),
             Span::styled(peer.access.clone(), access_style(&peer.access)),
             Span::styled("   phase ", dim),
             Span::raw(peer.phase.clone()),
@@ -447,10 +499,10 @@ fn peer_detail(app: &App) -> Paragraph<'_> {
     ];
 
     if peer.incoming_channels.is_empty() {
-        lines.push(field("channels they pay on", "none".into()));
+        lines.push(field("channels on", "none".into()));
     } else {
         lines.push(Line::from(Span::styled(
-            format!("{:<22}", "channels they pay on"),
+            format!("{:<20}", "channels on"),
             dim,
         )));
         for c in &peer.incoming_channels {
@@ -487,7 +539,7 @@ fn peer_detail(app: &App) -> Paragraph<'_> {
         },
     ));
 
-    Paragraph::new(lines).block(
+    Paragraph::new(lines).wrap(Wrap { trim: false }).block(
         Block::default()
             .borders(Borders::ALL)
             .title(format!(" peer {} ", short(&peer.pubkey))),
@@ -501,7 +553,7 @@ fn pricing(app: &App) -> Paragraph<'_> {
 
     let mut lines = vec![
         Line::from(vec![
-            Span::styled(format!("{:<22}", "price"), dim),
+            Span::styled(format!("{:<20}", "price"), dim),
             Span::styled(
                 price(bytes_per_sat),
                 Style::default()
@@ -514,11 +566,11 @@ fn pricing(app: &App) -> Paragraph<'_> {
             ),
         ]),
         Line::from(vec![
-            Span::styled(format!("{:<22}", "as configured"), dim),
+            Span::styled(format!("{:<20}", "as configured"), dim),
             Span::raw(format!("{bytes_per_sat} bytes per sat")),
         ]),
         Line::from(vec![
-            Span::styled(format!("{:<22}", "mint"), dim),
+            Span::styled(format!("{:<20}", "mint"), dim),
             Span::raw(app.snapshot.mint_url.clone()),
         ]),
         Line::from(""),
@@ -537,11 +589,11 @@ fn pricing(app: &App) -> Paragraph<'_> {
         // The numbers an operator actually reasons in. A price per byte is
         // unreadable; a price per gigabyte is a decision.
         lines.push(Line::from(vec![
-            Span::styled(format!("{:<22}", "a gigabyte costs"), dim),
+            Span::styled(format!("{:<20}", "a gigabyte costs"), dim),
             Span::raw(sats(1_000_000_000, bytes_per_sat)),
         ]));
         lines.push(Line::from(vec![
-            Span::styled(format!("{:<22}", "a megabyte costs"), dim),
+            Span::styled(format!("{:<20}", "a megabyte costs"), dim),
             Span::raw(sats(1_000_000, bytes_per_sat)),
         ]));
         lines.push(Line::from(""));
@@ -559,7 +611,9 @@ fn pricing(app: &App) -> Paragraph<'_> {
         )));
     }
 
-    Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" pricing "))
+    Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title(" pricing "))
 }
 
 fn status(app: &App) -> Paragraph<'static> {
@@ -591,12 +645,26 @@ fn status(app: &App) -> Paragraph<'static> {
     }
 
     let hints = match (app.tab, app.detail) {
-        (Tab::Peers, false) => "tab to switch   ↑↓ to select   enter for detail   q to quit",
-        (Tab::Peers, true) => "esc to go back   tab to switch   q to quit",
-        (Tab::Pricing, _) => "e to change the price   tab to switch   q to quit",
+        (Tab::Peers, false) => "tab switches   ↑↓ selects   enter opens   q quits",
+        (Tab::Peers, true) => "esc closes   ↑↓ selects   tab switches   q quits",
+        (Tab::Pricing, _) => "e changes the price   tab switches   q quits",
     };
 
+    // Which node this is, and what it charges, stay visible on every tab: the
+    // tab bar above says what is being looked at, not what is being looked at
+    // *on*.
     Paragraph::new(Line::from(vec![
+        Span::styled(
+            short(&app.snapshot.pubkey),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  selling ", dim),
+        Span::raw(app.snapshot.unit.clone()),
+        Span::styled(" at ", dim),
+        Span::raw(price(app.snapshot.bytes_per_sat)),
+        Span::styled("  up ", dim),
+        Span::raw(duration(app.snapshot.uptime_ms)),
+        Span::styled("  ", dim),
         Span::styled(
             format!("{} peer(s)", app.snapshot.peers.len()),
             Style::default().fg(Color::Green),
