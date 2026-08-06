@@ -31,9 +31,85 @@ use tracing::debug;
 use crate::adapter::ResourceAdapter;
 use crate::market::Price;
 
-/// Where the control socket lives unless the operator says otherwise.
+/// Where a control socket might live, best first.
+///
+/// Three places, for three ways of running a node. `/run` is where a service
+/// manager puts it — systemd's `RuntimeDirectory=`, and the path the container
+/// images use — and it is the only one of the three that is not writable by an
+/// ordinary user, which is what makes it a good signal rather than a guess.
+/// `XDG_RUNTIME_DIR` is where a node run by a person on their own machine
+/// belongs. `/tmp` is the fallback that exists everywhere.
+///
+/// The daemon creates the first of these it can, and a reader looks for the
+/// first that is already there. That asymmetry is the point: a tool should find
+/// a running node without being told where it put its socket.
+fn socket_candidates() -> Vec<PathBuf> {
+    let mut paths = vec![PathBuf::from("/run/tollgate.sock")];
+    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR")
+        && !xdg.is_empty()
+    {
+        paths.push(PathBuf::from(format!("{xdg}/tollgate.sock")));
+    }
+    paths.push(PathBuf::from("/tmp/tollgated.sock"));
+    paths
+}
+
+/// Where this node should put its control socket unless told otherwise.
+///
+/// The first candidate whose directory we can actually write to. A daemon that
+/// picked a path it could not create would fail at startup over something an
+/// operator never asked for.
 pub fn default_socket_path() -> PathBuf {
+    for path in socket_candidates() {
+        let Some(dir) = path.parent() else {
+            continue;
+        };
+        // Writability is asked of the directory rather than assumed from the
+        // user id: a container runs as root and a laptop does not, and both are
+        // ordinary ways to run this.
+        if dir
+            .metadata()
+            .map(|m| !m.permissions().readonly())
+            .unwrap_or(false)
+            && std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(dir.join(".tollgate-write-test"))
+                .map(|_| {
+                    let _ = std::fs::remove_file(dir.join(".tollgate-write-test"));
+                })
+                .is_ok()
+        {
+            return path;
+        }
+    }
     PathBuf::from("/tmp/tollgated.sock")
+}
+
+/// Where a running node's control socket already is.
+///
+/// Returns the first candidate that exists, so `tolltop` with no arguments
+/// finds a node started with no arguments — and finds one inside a container,
+/// where the socket is in `/run` because that is where a service manager puts
+/// it.
+pub fn find_socket() -> Result<PathBuf> {
+    let candidates = socket_candidates();
+    for path in &candidates {
+        // Existence, not connectability: a socket that is there but not
+        // answering is a node that is starting or has just died, and saying so
+        // is more useful than moving on to a stale path somewhere else.
+        if path.exists() {
+            return Ok(path.clone());
+        }
+    }
+
+    let looked: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
+    anyhow::bail!(
+        "no control socket found; looked in {}. Is a node running, and did it \
+         put its socket somewhere else? Pass --socket if so.",
+        looked.join(", ")
+    )
 }
 
 /// Everything one node is currently doing.
@@ -432,6 +508,36 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         (path, task)
+    }
+
+    #[test]
+    fn a_service_managed_socket_is_looked_for_first() {
+        // /run is where a service manager puts it and is not writable by an
+        // ordinary user, which is what makes finding one there meaningful.
+        let candidates = socket_candidates();
+        assert_eq!(
+            candidates.first().unwrap(),
+            &PathBuf::from("/run/tollgate.sock")
+        );
+        assert_eq!(
+            candidates.last().unwrap(),
+            &PathBuf::from("/tmp/tollgated.sock"),
+            "the fallback that exists everywhere goes last"
+        );
+    }
+
+    #[test]
+    fn a_socket_that_is_not_anywhere_says_where_it_looked() {
+        // The old failure was "/tmp/tollgated.sock: No such file or directory",
+        // which told an operator nothing about the two other places a node
+        // might have put it.
+        let Err(e) = find_socket() else {
+            // A node really is running on this machine; nothing to assert.
+            return;
+        };
+        let message = format!("{e}");
+        assert!(message.contains("/run/tollgate.sock"), "{message}");
+        assert!(message.contains("--socket"), "{message}");
     }
 
     #[tokio::test]
