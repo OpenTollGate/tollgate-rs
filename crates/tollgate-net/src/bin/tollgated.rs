@@ -57,6 +57,20 @@ struct Args {
     control_socket: Option<PathBuf>,
 }
 
+/// Derive the wallet's seed from the node's identity.
+///
+/// Same reasoning as the mint's, and a different domain string so the two are
+/// unrelated: a wallet derived from the node's key is restored by restoring the
+/// config, rather than being a second thing to back up.
+fn wallet_seed(secret_hex: &str) -> Result<[u8; 64]> {
+    use sha2::{Digest, Sha512};
+    let secret = hex::decode(secret_hex).context("identity key is not hex")?;
+    let mut hasher = Sha512::new();
+    hasher.update(b"tollgate-wallet-seed");
+    hasher.update(&secret);
+    Ok(hasher.finalize().into())
+}
+
 /// Derive the mint's keyset seed from the node's identity.
 ///
 /// Deterministic, so a restart keeps issuing against the same keys and the
@@ -105,6 +119,45 @@ async fn main() -> Result<()> {
     // it while the node runs, and the display shows it.
     let prices = tollgate_net::market::Prices::new(file.market.accepted());
 
+    // What it holds. The market pays into it, channels are funded out of it,
+    // and it is derived from the node's own secret so that restoring a config
+    // restores the balance with it.
+    let wallet_path = if file.wallet.file.is_empty() {
+        tollgate_net::wallet::default_path()
+    } else {
+        file.wallet.file.clone().into()
+    };
+    let wallet = tollgate_net::wallet::Wallet::open(
+        &wallet_path,
+        wallet_seed(&config.identity.secret_hex())?,
+        // What this node sells, so a holding denominated in it can be told
+        // apart from money: it is capacity bought from an upstream.
+        config.policy.unit.clone(),
+    )
+    .await
+    .context("open this node's wallet")?;
+    info!(wallet = %wallet_path.display(), "holding");
+
+    // Whatever the last run left half-done, finished or rolled back, and
+    // anything already paid for collected. A node killed mid-mint leaves its
+    // quote reserved, and the money behind it is only claimable once that is
+    // settled — so this is a startup step rather than something to discover
+    // later. It talks to a mint, so it happens off the critical path and its
+    // failure is a log line, not a refusal to start.
+    if !file.wallet.mint.is_empty() {
+        let wallet = wallet.clone();
+        let (mint, unit) = (file.wallet.mint.clone(), file.wallet.unit.clone());
+        tokio::spawn(async move {
+            match wallet.claim_pending(&mint, &unit).await {
+                Ok(0) => {}
+                Ok(claimed) => info!(claimed, %unit, "collected what was already paid for"),
+                Err(e) => {
+                    tracing::debug!(error = %format!("{e:#}"), "nothing collectable at startup")
+                }
+            }
+        });
+    }
+
     // The mint comes up first. A peer funds its channel against *our* mint, so
     // nothing can be paid for until it is serving.
     let mint = Arc::new(
@@ -126,6 +179,7 @@ async fn main() -> Result<()> {
             config.policy.unit.clone(),
             config.mint_url.clone(),
             prices.clone(),
+            wallet.clone(),
             config.policy.initial_channel_capacity.max(1),
         );
         let mint = Arc::clone(&mint);
@@ -155,6 +209,28 @@ async fn main() -> Result<()> {
         tracing::warn!("this node takes no paper as payment, so nobody can buy its vouchers here");
     }
 
+    // A byte source on the mesh. Off unless asked for: it is an instrument, and
+    // an unauthenticated one, so a node that was never told to serve it should
+    // not be.
+    if file.speedtest.enabled {
+        let (listen, settings) = file
+            .speedtest
+            .resolve()
+            .context("resolve the speedtest configuration")?;
+        tokio::spawn(async move {
+            if let Err(e) =
+                tollgate_net::speedtest::serve(settings, listen, std::future::pending()).await
+            {
+                tracing::error!(error = %format!("{e:#}"), "the speedtest stopped");
+            }
+        });
+        info!(
+            %listen,
+            streams = file.speedtest.streams,
+            "speedtest serving"
+        );
+    }
+
     let channels = Arc::new(
         SpilmanChannels::new(SpilmanConfig {
             mint: Arc::clone(&mint),
@@ -162,9 +238,10 @@ async fn main() -> Result<()> {
             unit: config.policy.unit.clone(),
             accepted_mints: config.policy.accepted_mints.clone(),
             secret_key_hex: config.identity.secret_hex(),
-            // A node with no wallet configured can still sell; it just cannot
-            // buy, and says so when something asks it to.
-            wallet: (!file.wallet.mint.is_empty()).then(|| tollgate_net::channel::Wallet {
+            wallet: wallet.clone(),
+            // A node with no money mint configured can still sell; it just
+            // cannot buy, and says so when something asks it to.
+            money: (!file.wallet.mint.is_empty()).then(|| tollgate_net::channel::Money {
                 mint: file.wallet.mint.clone(),
                 unit: file.wallet.unit.clone(),
             }),
@@ -251,20 +328,43 @@ async fn main() -> Result<()> {
             .clone()
             .unwrap_or_else(tollgate_net::control::default_socket_path);
         let prices = prices.clone();
+        let wallet = wallet.clone();
+        let money = (!file.wallet.mint.is_empty()).then(|| tollgate_net::channel::Money {
+            mint: file.wallet.mint.clone(),
+            unit: file.wallet.unit.clone(),
+        });
         tokio::spawn(async move {
-            if let Err(e) =
-                tollgate_net::control::serve(&path, published, prices, std::future::pending()).await
+            if let Err(e) = tollgate_net::control::serve(
+                &path,
+                published,
+                prices,
+                wallet,
+                money,
+                std::future::pending(),
+            )
+            .await
             {
                 tracing::warn!(error = %format!("{e:#}"), "the control socket stopped");
             }
         });
     }
 
-    // The traffic generator. Demand is what we want to pull from a peer, which
-    // is what the buyer reacts to; the shaper decides how much of it arrives.
-    if args.demand > 0 || args.ramp > 0 {
+    // Demand is what we want to pull from a peer, which is what the buyer
+    // reacts to; the shaper decides how much of it arrives.
+    //
+    // The flag wins over the file so that a run can be told to want something
+    // else without editing what the service starts with — but the file is where
+    // a node that should keep a link paid for says so, because the alternative
+    // is editing a launchd plist or an init script to buy anything at all.
+    let demand = if args.demand > 0 {
+        args.demand
+    } else {
+        file.buying.demand
+    };
+    if demand > 0 || args.ramp > 0 {
+        info!(demand, "wanting");
         let adapter = Arc::clone(&adapter);
-        let (base, ramp, interval) = (args.demand, args.ramp, args.ramp_interval.max(1));
+        let (base, ramp, interval) = (demand, args.ramp, args.ramp_interval.max(1));
         tokio::spawn(async move {
             let mut steps = 0u64;
             loop {

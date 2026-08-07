@@ -45,6 +45,8 @@ pub struct File {
     pub network: NetworkSection,
     /// What actually delivers the resource.
     pub forwarding: ForwardingSection,
+    /// A byte source clients can measure this node against.
+    pub speedtest: SpeedtestSection,
     /// Per-peer overrides, keyed by hex-encoded compressed pubkey.
     pub peers: BTreeMap<String, PeerSection>,
 }
@@ -158,14 +160,32 @@ impl MarketSection {
 /// and never has to hold any. One that buys transit has to arrive at its
 /// upstream holding paper the upstream accepts, exactly as its own customers
 /// have to arrive holding its.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct WalletSection {
     /// A mint that sells its paper for money. Empty means this node cannot buy.
+    ///
+    /// Defaults to a public one, because a node that buys transit has to hold
+    /// somebody's money and this is a working answer rather than a preference.
     pub mint: String,
     /// The unit that mint denominates in.
     #[serde(default = "default_money_unit")]
     pub unit: String,
+    /// Where the wallet database lives. Empty picks the state directory the
+    /// packages keep across an upgrade.
+    ///
+    /// It holds bearer tokens: the file *is* the balance.
+    pub file: String,
+}
+
+impl Default for WalletSection {
+    fn default() -> Self {
+        Self {
+            mint: "https://mint.minibits.cash/Bitcoin".into(),
+            unit: default_money_unit(),
+            file: String::new(),
+        }
+    }
 }
 
 /// The minimum flow allowance.
@@ -249,6 +269,19 @@ pub struct BuyingSection {
     pub min_rate: u64,
     /// Never buy above this rate — the operator's spending ceiling.
     pub max_rate: u64,
+    /// Units per second to want from every peer, whether or not anything is
+    /// asking for them.
+    ///
+    /// Zero — the default — means this node buys only what something observes
+    /// demand for, which for a node that forwards is what its own customers
+    /// pull through it. A node at the edge has no such signal: nothing measures
+    /// how much of its own traffic it would like to be able to send, so an
+    /// operator who wants it to keep a link paid for says how much here.
+    ///
+    /// It is a standing order, and it spends money: at 2 MB/s against a
+    /// gateway charging 1550 sat/GiB, a day costs about 250,000 sat whether or
+    /// not the link is used. `--demand` overrides it for one run.
+    pub demand: u64,
 }
 
 impl Default for BuyingSection {
@@ -262,6 +295,7 @@ impl Default for BuyingSection {
             window_ms: d.window_ms,
             min_rate: d.min_rate,
             max_rate: d.max_rate,
+            demand: 0,
         }
     }
 }
@@ -333,6 +367,74 @@ pub enum ForwardingMode {
     Nftables,
     /// Per-peer transit policy on a FIPS node, over its control socket.
     Fips,
+}
+
+/// A byte source clients can measure this node against.
+///
+/// Off unless an operator turns it on. The endpoints are unauthenticated, and
+/// on a node that is not gating transit they are a free firehose — see
+/// [`crate::speedtest`] for why that is the right default even though the
+/// intended deployment, behind a FIPS transit policy, is not one.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SpeedtestSection {
+    /// Whether to serve it at all.
+    pub enabled: bool,
+    /// Where to serve it.
+    ///
+    /// Defaults to every interface on both families, because the client this is
+    /// for arrives over `fips0` on an IPv6 address and `0.0.0.0` would not hear
+    /// it.
+    pub listen: String,
+    /// Ceiling on a single request, in either direction.
+    pub max_bytes: u64,
+    /// How many flows the page opens at once.
+    pub streams: u8,
+    /// How long the page discards before it starts counting.
+    pub warmup_ms: u32,
+    /// How long it counts for, after the warm-up.
+    pub duration_ms: u32,
+}
+
+impl Default for SpeedtestSection {
+    fn default() -> Self {
+        let defaults = crate::speedtest::Config::default();
+        Self {
+            enabled: false,
+            listen: "[::]:3339".into(),
+            max_bytes: defaults.max_bytes,
+            streams: defaults.streams,
+            warmup_ms: defaults.warmup_ms,
+            duration_ms: defaults.duration_ms,
+        }
+    }
+}
+
+impl SpeedtestSection {
+    /// The address to serve on, and how.
+    pub fn resolve(&self) -> Result<(SocketAddr, crate::speedtest::Config)> {
+        let listen: SocketAddr = self
+            .listen
+            .parse()
+            .with_context(|| format!("speedtest.listen {:?} is not an address", self.listen))?;
+        // A test with no flows measures nothing, and one with no window divides
+        // by zero on the page rather than here.
+        if self.streams == 0 {
+            bail!("speedtest.streams must be at least one");
+        }
+        if self.duration_ms == 0 {
+            bail!("speedtest.duration_ms must be above zero");
+        }
+        Ok((
+            listen,
+            crate::speedtest::Config {
+                max_bytes: self.max_bytes,
+                streams: self.streams,
+                warmup_ms: self.warmup_ms,
+                duration_ms: self.duration_ms,
+            },
+        ))
+    }
 }
 
 /// Per-peer overrides.
@@ -598,6 +700,34 @@ mod tests {
         let peers = file.resolve().expect("resolve").peers;
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].endpoint.as_deref(), Some("10.0.0.1:4747"));
+    }
+
+    /// The configs the packages install have to parse, and they are not
+    /// exercised by anything else — a typo in one is a router that will not
+    /// start, found after it has shipped rather than before.
+    #[test]
+    fn the_configs_the_packages_install_are_valid() {
+        for (name, text) in [
+            (
+                "openwrt",
+                include_str!("../../../packaging/openwrt-ipk/files/etc/tollgate/tollgate.yaml"),
+            ),
+            (
+                "macos",
+                include_str!("../../../packaging/macos/tollgate.yaml"),
+            ),
+        ] {
+            let file: File = serde_yaml::from_str(text)
+                .unwrap_or_else(|e| panic!("the {name} package config does not parse: {e}"));
+            let config = file
+                .resolve()
+                .unwrap_or_else(|e| panic!("the {name} package config does not resolve: {e:#}"));
+
+            // Both ship without an identity, because one is generated at
+            // install time. Anything else in them has to be usable as it is.
+            assert_eq!(config.policy.unit, "byte", "{name}");
+            assert!(config.policy.minimum_flow > 0, "{name}: no allowance");
+        }
     }
 
     #[test]
