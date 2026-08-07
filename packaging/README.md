@@ -68,10 +68,11 @@ useless to it — opens 4747 and 3338 on the lan zone, and turns on forwarding.
 The service starts at `START=96`, after the firewall. fw4 flushing on a later
 start would take the adapter's own table and classes with it.
 
-It ships selling at **1550 sat/GiB** (`bytes_per_unit: 692736`), taking
-minibits paper. That is a price, not a law: change it in the config, or on a
-running router from `tolltop`'s pricing tab, where it binds the next buyer and
-nothing already sold.
+It ships selling at **1000 sat for about an hour at 5 MB/s** — 18 GB, so
+`bytes_per_unit: 18000000`, around 60 sat/GiB — taking minibits paper. That is
+a price, not a law: change it in the config, or on a running router from
+`tolltop`'s pricing tab, where it binds the next buyer and nothing already
+sold.
 
 ## macOS
 
@@ -103,8 +104,11 @@ Three of them are one config edit each; none can be guessed for you.
 
 2. **The Mac has to want something.** `buying.demand` is a standing order in
    bytes per second; at zero the node buys nothing, because nothing on a Mac
-   measures how much transit it would like. 2 MB/s against 1550 sat/GiB is
-   roughly 250,000 sat a day, spent whether the link is used or not.
+   measures how much transit it would like. What is bought is `demand` times
+   `headroom_pct`, so at the default 125 a demand of 2000000 buys 2.5 MB/s —
+   set the headroom to 100 to buy exactly what is asked for. Against the
+   packaged price that is about 9,600 sat a day at 2 MB/s and 24,000 at
+   5 MB/s, spent whether the link is used or not.
 
 3. **The Mac has to hold money.** `tolltop`, wallet tab, `t`, scan the QR. This
    is the step that cannot be automated: minibits wants a real Lightning

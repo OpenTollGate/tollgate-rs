@@ -38,14 +38,16 @@ market:
   accept:
     - mint: "https://mint.minibits.cash/Bitcoin"
       unit: sat
-      # 692736 bytes per sat is 1550 sat per GiB — about 1444 sat per GB, if
-      # you think in those. Raise the number to sell more cheaply and lower it
-      # to charge more, or set it to zero to stop taking this issuer's paper.
+      # Priced so that 1000 sat buys about an hour at 5 MB/s: that is 18 GB, so
+      # 18,000,000 bytes to the sat — around 60 sat per GiB.
       #
-      # This is a live setting: `tolltop`'s pricing tab changes it on a running
-      # router, and the change binds the next buyer rather than anything
-      # already sold.
-      bytes_per_unit: 692736
+      # Bytes, not bits. If you meant 5 Mbit/s, the number is 2250000.
+      #
+      # Raise it to sell more cheaply and lower it to charge more, or set it to
+      # zero to stop taking this issuer's paper. It is a live setting:
+      # `tolltop`'s pricing tab changes it on a running router, and the change
+      # binds the next buyer rather than anything already sold.
+      bytes_per_unit: 18000000
 
 wallet:
   # Where this node buys the money it pays *its* upstream with, and where it

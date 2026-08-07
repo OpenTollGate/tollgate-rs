@@ -46,8 +46,13 @@ buying:
   #
   # This is what makes a Mac pay a router automatically: set it, and the node
   # keeps a grant in force at that rate for as long as it holds money. It is a
-  # standing order and it spends — 2 MB/s against a router charging 1550
-  # sat/GiB is roughly 250,000 sat a day, used or not.
+  # standing order and it spends: against a router at the packaged price —
+  # 1000 sat for an hour at 5 MB/s — 2 MB/s costs about 9,600 sat a day and
+  # 5 MB/s about 24,000, used or not.
+  #
+  # What is bought is `demand` times `headroom_pct`, so at the default 125 a
+  # demand of 2000000 buys 2.5 MB/s. Set the headroom to 100 to buy exactly
+  # what is asked for.
   #
   # demand: 2000000
 
