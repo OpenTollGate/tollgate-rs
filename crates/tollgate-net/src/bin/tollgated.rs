@@ -329,11 +329,22 @@ async fn main() -> Result<()> {
         });
     }
 
-    // The traffic generator. Demand is what we want to pull from a peer, which
-    // is what the buyer reacts to; the shaper decides how much of it arrives.
-    if args.demand > 0 || args.ramp > 0 {
+    // Demand is what we want to pull from a peer, which is what the buyer
+    // reacts to; the shaper decides how much of it arrives.
+    //
+    // The flag wins over the file so that a run can be told to want something
+    // else without editing what the service starts with — but the file is where
+    // a node that should keep a link paid for says so, because the alternative
+    // is editing a launchd plist or an init script to buy anything at all.
+    let demand = if args.demand > 0 {
+        args.demand
+    } else {
+        file.buying.demand
+    };
+    if demand > 0 || args.ramp > 0 {
+        info!(demand, "wanting");
         let adapter = Arc::clone(&adapter);
-        let (base, ramp, interval) = (args.demand, args.ramp, args.ramp_interval.max(1));
+        let (base, ramp, interval) = (demand, args.ramp, args.ramp_interval.max(1));
         tokio::spawn(async move {
             let mut steps = 0u64;
             loop {

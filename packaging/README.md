@@ -68,6 +68,11 @@ useless to it — opens 4747 and 3338 on the lan zone, and turns on forwarding.
 The service starts at `START=96`, after the firewall. fw4 flushing on a later
 start would take the adapter's own table and classes with it.
 
+It ships selling at **1550 sat/GiB** (`bytes_per_unit: 692736`), taking
+minibits paper. That is a price, not a law: change it in the config, or on a
+running router from `tolltop`'s pricing tab, where it binds the next buyer and
+nothing already sold.
+
 ## macOS
 
 ```sh
@@ -83,6 +88,41 @@ protocol, the payments and the shaping are all real; the traffic is the node's
 own rather than somebody else's. That makes it right for developing against,
 for watching with `tolltop`, and for a node that buys transit rather than
 selling it — and wrong for actually selling a Mac's uplink.
+
+## A Mac buying from a router, automatically
+
+Flash the router, install on the Mac, and then four things have to be true.
+Three of them are one config edit each; none can be guessed for you.
+
+1. **The Mac has to know the router.** A peer is named by its public key, so
+   read it off the router and put it in `peers:` with the router's LAN address:
+
+   ```sh
+   ssh root@192.168.1.1 tollgated --config /etc/tollgate/tollgate.yaml --show-identity
+   ```
+
+2. **The Mac has to want something.** `buying.demand` is a standing order in
+   bytes per second; at zero the node buys nothing, because nothing on a Mac
+   measures how much transit it would like. 2 MB/s against 1550 sat/GiB is
+   roughly 250,000 sat a day, spent whether the link is used or not.
+
+3. **The Mac has to hold money.** `tolltop`, wallet tab, `t`, scan the QR. This
+   is the step that cannot be automated: minibits wants a real Lightning
+   payment, and nothing in the node can make one. Top up generously — when the
+   balance runs out the node tries to buy more, produces an invoice nobody
+   pays, and channel funding starts failing with it in the log.
+
+4. **Both have to agree on the money.** They do by default: the router takes
+   minibits sats and the Mac holds them. Change one and change the other.
+
+Then it runs itself: the Mac funds a channel, keeps a grant in force at the
+demand rate, renews before each one lapses, and rolls channels over as they
+fill. The router gates and shapes its LAN address to what it bought.
+
+What this does *not* do is meter the Mac's actual usage. `buying.demand` is a
+declared rate, not a measured one — the loopback adapter has no view of what
+the machine is really pulling through the router. So the Mac buys a constant
+rate rather than what it happens to need.
 
 ## What is not packaged yet
 

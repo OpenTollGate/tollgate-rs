@@ -32,13 +32,20 @@ access:
     bytes_per_second: 4096
 
 market:
-  # What this node takes as payment for its own vouchers, and what a unit of
-  # it buys. Nothing is sold until at least one issuer is listed here.
-  #
-  # accept:
-  #   - mint: "https://mint.minibits.cash/Bitcoin"
-  #     unit: sat
-  #     bytes_per_unit: 1000000
+  # What this router takes as payment for its own vouchers, and what a unit of
+  # it buys. Priced per issuer: paper from a mint you trust less is worth less,
+  # and adding an issuer here is how you say you will take it at all.
+  accept:
+    - mint: "https://mint.minibits.cash/Bitcoin"
+      unit: sat
+      # 692736 bytes per sat is 1550 sat per GiB — about 1444 sat per GB, if
+      # you think in those. Raise the number to sell more cheaply and lower it
+      # to charge more, or set it to zero to stop taking this issuer's paper.
+      #
+      # This is a live setting: `tolltop`'s pricing tab changes it on a running
+      # router, and the change binds the next buyer rather than anything
+      # already sold.
+      bytes_per_unit: 692736
 
 wallet:
   # Where this node buys the money it pays *its* upstream with, and where it

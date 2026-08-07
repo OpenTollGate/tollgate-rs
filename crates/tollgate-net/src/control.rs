@@ -34,18 +34,22 @@ use crate::wallet::{Holding, TopUp, Wallet};
 
 /// Where a control socket might live, best first.
 ///
-/// Three places, for three ways of running a node. `/run` is where a service
-/// manager puts it — systemd's `RuntimeDirectory=`, and the path the container
-/// images use — and it is the only one of the three that is not writable by an
-/// ordinary user, which is what makes it a good signal rather than a guess.
-/// `XDG_RUNTIME_DIR` is where a node run by a person on their own machine
-/// belongs. `/tmp` is the fallback that exists everywhere.
+/// Four places, for four ways of running a node. `/run` is where a Linux
+/// service manager puts it — systemd's `RuntimeDirectory=`, and the path the
+/// container images and the OpenWrt package use. `/usr/local/var/run` is the
+/// macOS package's equivalent, since `/run` there is neither writable nor
+/// something launchd populates. `XDG_RUNTIME_DIR` is where a node run by a
+/// person on their own machine belongs, and `/tmp` is the fallback that exists
+/// everywhere.
 ///
 /// The daemon creates the first of these it can, and a reader looks for the
 /// first that is already there. That asymmetry is the point: a tool should find
 /// a running node without being told where it put its socket.
 fn socket_candidates() -> Vec<PathBuf> {
-    let mut paths = vec![PathBuf::from("/run/tollgate.sock")];
+    let mut paths = vec![
+        PathBuf::from("/run/tollgate.sock"),
+        PathBuf::from("/usr/local/var/run/tollgate.sock"),
+    ];
     if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR")
         && !xdg.is_empty()
     {

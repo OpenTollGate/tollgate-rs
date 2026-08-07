@@ -459,7 +459,8 @@ fn peer_table(frame: &mut Frame, app: &mut App, area: Rect, compact: bool) {
         &[
             "peer", "access", // what they bought from us
             "sold", "left", "in", "up", // what we bought from them
-            "bought", "want", "m", "out", "down",
+            "bought", "want", "m", "out", // and what has actually moved
+            "taken",
         ]
     };
     let widths: &[Constraint] = if compact {
@@ -482,7 +483,7 @@ fn peer_table(frame: &mut Frame, app: &mut App, area: Rect, compact: bool) {
             Constraint::Length(12), // want
             Constraint::Length(3),  // m
             Constraint::Length(14), // out (channel)
-            Constraint::Length(12), // down
+            Constraint::Length(12), // taken (a total)
         ]
     };
 
@@ -587,7 +588,11 @@ fn peer_row(peer: &PeerSnapshot) -> Row<'_> {
                 })
                 .unwrap_or_else(|| "—".into()),
         ),
-        Cell::from(rate(peer.received)),
+        // A total, not a rate. Nothing measures a receive rate the way
+        // `upload_rate` measures the sending one, and formatting a cumulative
+        // counter with a `/s` on the end made it read as one — a peering that
+        // had taken 178 KiB looked like it was taking 178 KiB every second.
+        Cell::from(units(peer.received)),
     ])
 }
 

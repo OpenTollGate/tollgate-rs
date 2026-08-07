@@ -269,6 +269,19 @@ pub struct BuyingSection {
     pub min_rate: u64,
     /// Never buy above this rate — the operator's spending ceiling.
     pub max_rate: u64,
+    /// Units per second to want from every peer, whether or not anything is
+    /// asking for them.
+    ///
+    /// Zero — the default — means this node buys only what something observes
+    /// demand for, which for a node that forwards is what its own customers
+    /// pull through it. A node at the edge has no such signal: nothing measures
+    /// how much of its own traffic it would like to be able to send, so an
+    /// operator who wants it to keep a link paid for says how much here.
+    ///
+    /// It is a standing order, and it spends money: at 2 MB/s against a
+    /// gateway charging 1550 sat/GiB, a day costs about 250,000 sat whether or
+    /// not the link is used. `--demand` overrides it for one run.
+    pub demand: u64,
 }
 
 impl Default for BuyingSection {
@@ -282,6 +295,7 @@ impl Default for BuyingSection {
             window_ms: d.window_ms,
             min_rate: d.min_rate,
             max_rate: d.max_rate,
+            demand: 0,
         }
     }
 }
