@@ -45,6 +45,8 @@ pub struct File {
     pub network: NetworkSection,
     /// What actually delivers the resource.
     pub forwarding: ForwardingSection,
+    /// A byte source clients can measure this node against.
+    pub speedtest: SpeedtestSection,
     /// Per-peer overrides, keyed by hex-encoded compressed pubkey.
     pub peers: BTreeMap<String, PeerSection>,
 }
@@ -158,14 +160,32 @@ impl MarketSection {
 /// and never has to hold any. One that buys transit has to arrive at its
 /// upstream holding paper the upstream accepts, exactly as its own customers
 /// have to arrive holding its.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct WalletSection {
     /// A mint that sells its paper for money. Empty means this node cannot buy.
+    ///
+    /// Defaults to a public one, because a node that buys transit has to hold
+    /// somebody's money and this is a working answer rather than a preference.
     pub mint: String,
     /// The unit that mint denominates in.
     #[serde(default = "default_money_unit")]
     pub unit: String,
+    /// Where the wallet database lives. Empty picks the state directory the
+    /// packages keep across an upgrade.
+    ///
+    /// It holds bearer tokens: the file *is* the balance.
+    pub file: String,
+}
+
+impl Default for WalletSection {
+    fn default() -> Self {
+        Self {
+            mint: "https://mint.minibits.cash/Bitcoin".into(),
+            unit: default_money_unit(),
+            file: String::new(),
+        }
+    }
 }
 
 /// The minimum flow allowance.

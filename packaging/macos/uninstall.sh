@@ -1,8 +1,9 @@
 #!/bin/sh
 # Remove a TollGate installation from macOS.
 #
-# Leaves the config alone unless --purge is given: it holds the node's identity,
-# and every voucher a peer is holding is a claim on that identity.
+# Leaves the config and the wallet alone unless --purge is given: one holds the
+# node's identity, which every voucher a peer holds is a claim on, and the other
+# holds bearer tokens that exist nowhere else.
 set -e
 
 PURGE=0
@@ -21,9 +22,11 @@ rm -f /usr/local/var/run/tollgate.sock
 pkgutil --forget com.tollgate.pkg 2>/dev/null || true
 
 if [ "$PURGE" -eq 1 ]; then
-    rm -rf /usr/local/etc/tollgate
-    echo "Removed, including the node's identity."
+    rm -rf /usr/local/etc/tollgate /usr/local/var/lib/tollgate
+    echo "Removed, including the node's identity and whatever it was holding."
 else
-    echo "Removed. /usr/local/etc/tollgate kept — it holds this node's identity."
-    echo "Pass --purge to delete it too."
+    echo "Removed. Kept:"
+    echo "  /usr/local/etc/tollgate      this node's identity"
+    echo "  /usr/local/var/lib/tollgate  its wallet, which is money"
+    echo "Pass --purge to delete those too."
 fi

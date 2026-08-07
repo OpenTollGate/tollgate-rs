@@ -45,6 +45,8 @@ use axum::{Json, Router};
 use cdk::mint::Mint;
 use cdk::nuts::{BlindSignature, BlindedMessage};
 use cdk_common::nuts::{KeySetInfo, Token};
+
+use crate::wallet::Wallet;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -176,6 +178,9 @@ struct Market {
     unit: String,
     mint_url: String,
     prices: Prices,
+    /// Where the money taken goes. Custody is not the market's job — it
+    /// prices, takes payment, and hands it straight over.
+    wallet: Wallet,
     /// Ceiling on a single swap, from the mint's own limit.
     max_amount: u64,
 }
@@ -186,6 +191,7 @@ pub fn router(
     unit: String,
     mint_url: String,
     prices: Prices,
+    wallet: Wallet,
     max_amount: u64,
 ) -> Router {
     Router::new()
@@ -196,6 +202,7 @@ pub fn router(
             unit,
             mint_url,
             prices,
+            wallet,
             max_amount,
         })
 }
@@ -268,16 +275,16 @@ async fn swap(
         )));
     }
 
-    // Take the money first. A swap at the issuing mint moves the proofs to
-    // secrets only this node knows, which both proves they were good and stops
-    // the payer spending them again while this request is in flight.
-    let held = tokio::task::spawn_blocking({
-        let token = request.token.clone();
-        move || redeem(&token)
-    })
-    .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .map_err(|e| bad_request(format!("that payment did not clear: {e:#}")))?;
+    // Take the money first, and take it properly: depositing swaps the proofs
+    // at the issuing mint, which both proves they were good and stops the payer
+    // spending them again while this request is in flight. It is also what
+    // makes this payment rather than a receipt — a balance is what a node has
+    // actually been paid.
+    let held = market
+        .wallet
+        .deposit(&request.token)
+        .await
+        .map_err(|e| bad_request(format!("that payment did not clear: {e:#}")))?;
 
     match market.mint.blind_sign(request.outputs).await {
         Ok(signatures) => {
@@ -288,7 +295,7 @@ async fn swap(
                 sold = bought,
                 "sold capacity"
             );
-            debug!(held = %held, "payment redeemed");
+            debug!(banked = held.amount, unit = %held.unit, "payment banked");
             Ok(Json(SwapResponse { signatures }))
         }
         Err(e) => {
@@ -304,71 +311,6 @@ async fn swap(
             Err(bad_request(e.to_string()))
         }
     }
-}
-
-/// Redeem somebody else's token at its own mint, and return what we now hold.
-///
-/// This is the payment landing. It is a plain NUT-03 swap: their proofs in,
-/// blinded outputs of ours out, so the value ends up under secrets only this
-/// node knows.
-fn redeem(token: &str) -> Result<String> {
-    let parsed = Token::from_str(token.trim()).map_err(|e| anyhow!("parse the token: {e}"))?;
-    let mint_url = parsed
-        .mint_url()
-        .map_err(|e| anyhow!("read the token's mint: {e}"))?
-        .to_string();
-    let unit = parsed
-        .unit()
-        .map(|u| u.to_string())
-        .unwrap_or_else(|| "sat".into());
-    let amount: u64 = parsed
-        .value()
-        .map_err(|e| anyhow!("read the token's value: {e}"))?
-        .into();
-
-    let keysets = keysets(&mint_url)?;
-    let keyset_id = active_keyset_from(&keysets, &unit)
-        .ok_or_else(|| anyhow!("{mint_url} has no active {unit} keyset"))?;
-    let keyset_info = keyset_info(&mint_url, &keyset_id)?;
-
-    let blinded = cdk_spilman::create_plain_blinded_messages(amount, &keyset_info)
-        .map_err(|e| anyhow!("blind {amount} {unit}: {e}"))?;
-    let blinded: serde_json::Value = serde_json::from_str(&blinded).context("blinded messages")?;
-    let secrets = blinded["secrets_with_blinding"].to_string();
-
-    // The keyset list is what turns the short keyset ids inside a token into
-    // the long ones a swap request carries.
-    let inputs = serde_json::to_value(
-        parsed
-            .proofs(&keysets)
-            .map_err(|e| anyhow!("read the token's proofs: {e}"))?,
-    )?;
-
-    let swapped = http(
-        "POST",
-        &format!("{mint_url}/v1/swap"),
-        &serde_json::json!({
-            "inputs": inputs,
-            "outputs": blinded["blinded_messages"],
-        })
-        .to_string(),
-    )
-    .map_err(|e| anyhow!("swap at {mint_url}: {e}"))?;
-
-    let swapped: serde_json::Value = serde_json::from_str(&swapped).context("swap response")?;
-    let signatures = swapped["signatures"].as_array().ok_or_else(|| {
-        anyhow!("{mint_url} did not honour the proofs offered as payment: {swapped}")
-    })?;
-
-    let proofs =
-        cdk_spilman::construct_proofs(&serde_json::to_string(signatures)?, &secrets, &keyset_info)
-            .map_err(|e| anyhow!("unblind: {e}"))?;
-
-    // Held rather than banked: what a node does with the money it takes —
-    // hold it, melt it, spend it upstream — is the operator's business, and
-    // nothing in the protocol depends on the answer.
-    cdk_spilman::build_cashu_b_token(&mint_url, &unit, &proofs)
-        .map_err(|e| anyhow!("build a token for what we were paid: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -423,64 +365,13 @@ pub fn info_of(market_url: &str) -> Result<Info> {
     serde_json::from_str(&body).with_context(|| format!("market info from {market_url}: {body}"))
 }
 
-/// Mint `amount` of money at a mint that sells for Lightning.
-///
-/// Ordinary NUT-04: quote, pay the invoice, hand over blinded outputs. This is
-/// where a node turns money into the paper it pays peers with, and the paying
-/// step is the one thing here that a real deployment does differently — a test
-/// mint settles its own invoices.
-pub fn mint_money(mint_url: &str, amount: u64, unit: &str) -> Result<String> {
-    let quote = http(
-        "POST",
-        &format!("{mint_url}/v1/mint/quote/bolt11"),
-        &serde_json::json!({ "amount": amount, "unit": unit }).to_string(),
-    )
-    .map_err(|e| anyhow!("ask {mint_url} for {amount} {unit}: {e}"))?;
-    let quote: serde_json::Value =
-        serde_json::from_str(&quote).with_context(|| format!("mint quote: {quote}"))?;
-    let quote_id = quote["quote"]
-        .as_str()
-        .ok_or_else(|| anyhow!("{mint_url} returned no quote: {quote}"))?;
-
-    wait_until_paid(mint_url, quote_id)?;
-
-    let keyset_id = active_keyset(mint_url, unit)?;
-    let keyset_info = keyset_info(mint_url, &keyset_id)?;
-    let blinded = cdk_spilman::create_plain_blinded_messages(amount, &keyset_info)
-        .map_err(|e| anyhow!("blind {amount} {unit}: {e}"))?;
-    let blinded: serde_json::Value = serde_json::from_str(&blinded).context("blinded messages")?;
-    let secrets = blinded["secrets_with_blinding"].to_string();
-
-    let issued = http(
-        "POST",
-        &format!("{mint_url}/v1/mint/bolt11"),
-        &serde_json::json!({
-            "quote": quote_id,
-            "outputs": blinded["blinded_messages"],
-        })
-        .to_string(),
-    )
-    .map_err(|e| anyhow!("mint {amount} {unit} at {mint_url}: {e}"))?;
-    let issued: serde_json::Value = serde_json::from_str(&issued).context("mint response")?;
-    let signatures = issued["signatures"]
-        .as_array()
-        .ok_or_else(|| anyhow!("{mint_url} issued nothing: {issued}"))?;
-
-    let proofs =
-        cdk_spilman::construct_proofs(&serde_json::to_string(signatures)?, &secrets, &keyset_info)
-            .map_err(|e| anyhow!("unblind {amount} {unit}: {e}"))?;
-
-    cdk_spilman::build_cashu_b_token(mint_url, unit, &proofs)
-        .map_err(|e| anyhow!("build a token: {e}"))
-}
-
-/// How long to wait for an invoice to be paid.
+/// Wait until a mint says one of its quotes has been paid.
 ///
 /// Bounded, because nothing downstream can start until it lands and a caller
-/// retrying the whole purchase is better than one blocked forever.
-const PAYMENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-fn wait_until_paid(mint_url: &str, quote: &str) -> Result<()> {
+/// retrying the whole purchase is better than one blocked forever. Where the
+/// money mint settles its own invoices this returns at once; where a human has
+/// to pay one, it gives up and the operator pays it from `tolltop`.
+pub fn wait_until_paid(mint_url: &str, quote: &str) -> Result<()> {
     let deadline = std::time::Instant::now() + PAYMENT_TIMEOUT;
     let url = format!("{mint_url}/v1/mint/quote/bolt11/{quote}");
 
@@ -498,8 +389,11 @@ fn wait_until_paid(mint_url: &str, quote: &str) -> Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
-    bail!("{mint_url} did not see payment for quote {quote} in time")
+    bail!("{mint_url} has not seen payment for quote {quote}")
 }
+
+/// How long to wait for an invoice to be paid.
+const PAYMENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Every keyset a mint has, active or not.
 ///
@@ -529,41 +423,6 @@ fn active_keyset_from(keysets: &[KeySetInfo], unit: &str) -> Option<String> {
 pub fn active_keyset(mint_url: &str, unit: &str) -> Result<String> {
     active_keyset_from(&keysets(mint_url)?, unit)
         .ok_or_else(|| anyhow!("{mint_url} has no active {unit} keyset"))
-}
-
-/// The keys of one keyset, in the shape the blinding helpers want.
-///
-/// Two calls rather than one: `/v1/keysets` says what a keyset is denominated
-/// in and what it charges, `/v1/keys/{id}` gives the keys themselves, and the
-/// blinding helpers want one object carrying both — under its own field names,
-/// which are not the ones either endpoint uses.
-fn keyset_info(mint_url: &str, keyset_id: &str) -> Result<String> {
-    let listing = http("GET", &format!("{mint_url}/v1/keysets"), "")
-        .map_err(|e| anyhow!("list keysets at {mint_url}: {e}"))?;
-    let listing: serde_json::Value = serde_json::from_str(&listing).context("keyset listing")?;
-    let entry = listing["keysets"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|k| k["id"].as_str() == Some(keyset_id))
-        .ok_or_else(|| anyhow!("{mint_url} does not list keyset {keyset_id}"))?;
-
-    let keys = http("GET", &format!("{mint_url}/v1/keys/{keyset_id}"), "")
-        .map_err(|e| anyhow!("read keyset {keyset_id} from {mint_url}: {e}"))?;
-    let keys: serde_json::Value = serde_json::from_str(&keys).context("keyset")?;
-    let keys = keys["keysets"]
-        .as_array()
-        .and_then(|k| k.first())
-        .and_then(|k| k.get("keys"))
-        .ok_or_else(|| anyhow!("{mint_url} returned no keys for {keyset_id}: {keys}"))?;
-
-    Ok(serde_json::json!({
-        "keysetId": keyset_id,
-        "unit": entry["unit"],
-        "keys": keys,
-        "inputFeePpk": entry["input_fee_ppk"].as_u64().unwrap_or(0),
-    })
-    .to_string())
 }
 
 /// A blocking HTTP call, for the paths the synchronous channel backend drives.

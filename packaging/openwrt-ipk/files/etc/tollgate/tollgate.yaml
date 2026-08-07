@@ -41,10 +41,14 @@ market:
   #     bytes_per_unit: 1000000
 
 wallet:
-  # Where this node holds the money it pays *its* upstream with. Only needed
-  # if this router buys transit as well as selling it.
-  mint: ""
+  # Where this node buys the money it pays *its* upstream with, and where it
+  # keeps what it is paid. Top it up from `tolltop`, on the wallet tab.
+  mint: "https://mint.minibits.cash/Bitcoin"
   unit: sat
+  # The balance is bearer tokens: this file *is* the money. It lives beside
+  # the config so that whatever backs one up backs up the other, and
+  # /lib/upgrade/keep.d carries both across a sysupgrade.
+  file: "/etc/tollgate/wallet.sqlite"
 
 forwarding:
   # The real thing on a router: the kernel forwards, nftables gates, tc shapes.

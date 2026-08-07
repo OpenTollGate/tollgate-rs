@@ -30,6 +30,7 @@ use tracing::debug;
 
 use crate::adapter::ResourceAdapter;
 use crate::market::{Accepted, Prices};
+use crate::wallet::{Holding, TopUp, Wallet};
 
 /// Where a control socket might live, best first.
 ///
@@ -132,6 +133,9 @@ pub struct Snapshot {
     /// opinion about money. A reader wants both in one answer all the same.
     #[serde(default)]
     pub accepts: Vec<Accepted>,
+    /// What it is holding, money first.
+    #[serde(default)]
+    pub holdings: Vec<Holding>,
 }
 
 /// One peering, from this node's side.
@@ -270,9 +274,11 @@ pub fn snapshot(
         unit: policy.unit.clone(),
         mint_url: mint_url.into(),
         uptime_ms,
-        // Filled in when the snapshot is served: what the node charges is the
-        // market's business, not the session layer's.
+        // Filled in when the snapshot is served: what the node charges and what
+        // it holds are the market's business and the wallet's, not the session
+        // layer's.
         accepts: Vec::new(),
+        holdings: Vec::new(),
         peers,
     }
 }
@@ -314,6 +320,24 @@ pub enum Request {
         /// Units of capacity one unit of that paper buys. Zero refuses it.
         bytes_per_unit: u64,
     },
+    /// What this node is holding.
+    ShowWallet,
+    /// Buy money, and hand back the invoice that pays for it.
+    ///
+    /// The node claims what it bought as soon as the invoice is paid, so the
+    /// caller's job is to pay it and watch the balance — there is nothing to
+    /// confirm afterwards.
+    TopUp {
+        /// How much to buy.
+        amount: u64,
+        /// Where to buy it. Defaults to the mint this node already holds its
+        /// money at, which is the answer nearly every time.
+        #[serde(default)]
+        mint: Option<String>,
+        /// In what. Defaults to `sat`.
+        #[serde(default = "default_unit")]
+        unit: String,
+    },
 }
 
 fn default_unit() -> String {
@@ -345,6 +369,8 @@ pub async fn serve(
     path: &Path,
     published: Published,
     prices: Prices,
+    wallet: Wallet,
+    money: Option<crate::channel::Money>,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> Result<()> {
     // A socket left behind by a previous run would make bind fail. Removing it
@@ -366,8 +392,10 @@ pub async fn serve(
                 };
                 let published = Arc::clone(&published);
                 let prices = prices.clone();
+                let wallet = wallet.clone();
+                let money = money.clone();
                 tokio::spawn(async move {
-                    let _ = answer(stream, published, prices).await;
+                    let _ = answer(stream, published, prices, wallet, money).await;
                 });
             }
             _ = &mut shutdown => break,
@@ -387,6 +415,8 @@ async fn answer(
     stream: tokio::net::UnixStream,
     published: Published,
     prices: Prices,
+    wallet: Wallet,
+    money: Option<crate::channel::Money>,
 ) -> Result<()> {
     let (rx, mut tx) = stream.into_split();
     let mut line = String::new();
@@ -401,10 +431,10 @@ async fn answer(
 
     let response = match line.trim() {
         "" => Response::Ok {
-            data: serde_json::to_value(current(&published, &prices))?,
+            data: serde_json::to_value(current(&published, &prices, &wallet).await)?,
         },
         text => match serde_json::from_str::<Request>(text) {
-            Ok(request) => run(request, &published, &prices),
+            Ok(request) => run(request, &published, &prices, &wallet, money.as_ref()).await,
             Err(e) => Response::Error {
                 message: format!("not a request this node understands: {e}"),
             },
@@ -424,9 +454,37 @@ async fn answer(
     Ok(())
 }
 
-fn run(request: Request, published: &Published, prices: &Prices) -> Response {
+async fn run(
+    request: Request,
+    published: &Published,
+    prices: &Prices,
+    wallet: &Wallet,
+    money: Option<&crate::channel::Money>,
+) -> Response {
     match request {
-        Request::Snapshot => match serde_json::to_value(current(published, prices)) {
+        Request::ShowWallet => match serde_json::to_value(wallet.balances().await) {
+            Ok(data) => Response::Ok {
+                data: serde_json::json!({ "holdings": data }),
+            },
+            Err(e) => Response::Error {
+                message: e.to_string(),
+            },
+        },
+        Request::TopUp { amount, mint, unit } => {
+            // Defaulting to the node's own money mint is the whole point: an
+            // operator topping up is topping up *their* wallet, and should not
+            // have to know a URL to do it.
+            let Some((mint, unit)) = mint
+                .map(|mint| (mint, unit.clone()))
+                .or_else(|| money.map(|m| (m.mint.clone(), m.unit.clone())))
+            else {
+                return Response::Error {
+                    message: "this node has no money mint configured; name one".into(),
+                };
+            };
+            top_up(wallet.clone(), mint, unit, amount).await
+        }
+        Request::Snapshot => match serde_json::to_value(current(published, prices, wallet).await) {
             Ok(data) => Response::Ok { data },
             Err(e) => Response::Error {
                 message: e.to_string(),
@@ -461,12 +519,64 @@ fn run(request: Request, published: &Published, prices: &Prices) -> Response {
     }
 }
 
-/// The published snapshot, with the prices the market is holding right now.
-fn current(published: &Published, prices: &Prices) -> Snapshot {
+/// The published snapshot, with what the market and the wallet hold right now.
+async fn current(published: &Published, prices: &Prices, wallet: &Wallet) -> Snapshot {
     let mut snapshot = (**published.load()).clone();
     snapshot.accepts = prices.listed();
+    snapshot.holdings = wallet.balances().await;
     snapshot
 }
+
+/// Buy money, and collect it in the background once the invoice is paid.
+///
+/// The invoice comes back immediately because somebody has to pay it, and that
+/// somebody is a person with a Lightning wallet. Claiming what it bought is the
+/// node's job, so the caller has nothing to confirm: pay, and watch the
+/// balance.
+async fn top_up(wallet: Wallet, mint: String, unit: String, amount: u64) -> Response {
+    let top_up = match wallet.top_up(&mint, &unit, amount).await {
+        Ok(top_up) => top_up,
+        Err(e) => {
+            return Response::Error {
+                message: format!("{e:#}"),
+            };
+        }
+    };
+
+    tokio::spawn({
+        let wallet = wallet.clone();
+        let top_up: TopUp = top_up.clone();
+        async move {
+            // Poll rather than subscribe: a mint that supports neither
+            // websockets nor long polling is still a mint, and this costs one
+            // request a second against a machine that has just been asked for
+            // money.
+            for _ in 0..TOP_UP_ATTEMPTS {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if let Ok(minted) = wallet.collect(&top_up).await {
+                    tracing::info!(minted, unit = %top_up.unit, "top-up collected");
+                    return;
+                }
+            }
+            tracing::warn!(
+                amount = top_up.amount,
+                unit = %top_up.unit,
+                quote = %top_up.quote,
+                "a top-up was never paid"
+            );
+        }
+    });
+
+    match serde_json::to_value(&top_up) {
+        Ok(data) => Response::Ok { data },
+        Err(e) => Response::Error {
+            message: e.to_string(),
+        },
+    }
+}
+
+/// How long a top-up waits to be paid: a person, a phone, an invoice.
+const TOP_UP_ATTEMPTS: u32 = 300;
 
 /// Read one snapshot from a node's control socket.
 pub async fn fetch(path: &Path) -> Result<Snapshot> {
@@ -539,9 +649,23 @@ mod tests {
             ..Snapshot::default()
         }));
 
+        // A wallet of its own per test, in the same temporary place, so nothing
+        // here touches a real balance.
+        let wallet = Wallet::open(path.with_extension("wallet"), [3u8; 64])
+            .await
+            .expect("open a wallet");
+
         let serve_path = path.clone();
         let task = tokio::spawn(async move {
-            let _ = serve(&serve_path, published, prices, std::future::pending::<()>()).await;
+            let _ = serve(
+                &serve_path,
+                published,
+                prices,
+                wallet,
+                None,
+                std::future::pending::<()>(),
+            )
+            .await;
         });
 
         // Bound rather than fixed: binding a Unix socket is fast, but a loaded

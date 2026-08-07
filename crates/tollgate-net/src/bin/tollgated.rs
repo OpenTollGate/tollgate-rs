@@ -57,6 +57,20 @@ struct Args {
     control_socket: Option<PathBuf>,
 }
 
+/// Derive the wallet's seed from the node's identity.
+///
+/// Same reasoning as the mint's, and a different domain string so the two are
+/// unrelated: a wallet derived from the node's key is restored by restoring the
+/// config, rather than being a second thing to back up.
+fn wallet_seed(secret_hex: &str) -> Result<[u8; 64]> {
+    use sha2::{Digest, Sha512};
+    let secret = hex::decode(secret_hex).context("identity key is not hex")?;
+    let mut hasher = Sha512::new();
+    hasher.update(b"tollgate-wallet-seed");
+    hasher.update(&secret);
+    Ok(hasher.finalize().into())
+}
+
 /// Derive the mint's keyset seed from the node's identity.
 ///
 /// Deterministic, so a restart keeps issuing against the same keys and the
@@ -105,6 +119,22 @@ async fn main() -> Result<()> {
     // it while the node runs, and the display shows it.
     let prices = tollgate_net::market::Prices::new(file.market.accepted());
 
+    // What it holds. The market pays into it, channels are funded out of it,
+    // and it is derived from the node's own secret so that restoring a config
+    // restores the balance with it.
+    let wallet_path = if file.wallet.file.is_empty() {
+        tollgate_net::wallet::default_path()
+    } else {
+        file.wallet.file.clone().into()
+    };
+    let wallet = tollgate_net::wallet::Wallet::open(
+        &wallet_path,
+        wallet_seed(&config.identity.secret_hex())?,
+    )
+    .await
+    .context("open this node's wallet")?;
+    info!(wallet = %wallet_path.display(), "holding");
+
     // The mint comes up first. A peer funds its channel against *our* mint, so
     // nothing can be paid for until it is serving.
     let mint = Arc::new(
@@ -126,6 +156,7 @@ async fn main() -> Result<()> {
             config.policy.unit.clone(),
             config.mint_url.clone(),
             prices.clone(),
+            wallet.clone(),
             config.policy.initial_channel_capacity.max(1),
         );
         let mint = Arc::clone(&mint);
@@ -162,9 +193,10 @@ async fn main() -> Result<()> {
             unit: config.policy.unit.clone(),
             accepted_mints: config.policy.accepted_mints.clone(),
             secret_key_hex: config.identity.secret_hex(),
-            // A node with no wallet configured can still sell; it just cannot
-            // buy, and says so when something asks it to.
-            wallet: (!file.wallet.mint.is_empty()).then(|| tollgate_net::channel::Wallet {
+            wallet: wallet.clone(),
+            // A node with no money mint configured can still sell; it just
+            // cannot buy, and says so when something asks it to.
+            money: (!file.wallet.mint.is_empty()).then(|| tollgate_net::channel::Money {
                 mint: file.wallet.mint.clone(),
                 unit: file.wallet.unit.clone(),
             }),
@@ -251,9 +283,21 @@ async fn main() -> Result<()> {
             .clone()
             .unwrap_or_else(tollgate_net::control::default_socket_path);
         let prices = prices.clone();
+        let wallet = wallet.clone();
+        let money = (!file.wallet.mint.is_empty()).then(|| tollgate_net::channel::Money {
+            mint: file.wallet.mint.clone(),
+            unit: file.wallet.unit.clone(),
+        });
         tokio::spawn(async move {
-            if let Err(e) =
-                tollgate_net::control::serve(&path, published, prices, std::future::pending()).await
+            if let Err(e) = tollgate_net::control::serve(
+                &path,
+                published,
+                prices,
+                wallet,
+                money,
+                std::future::pending(),
+            )
+            .await
             {
                 tracing::warn!(error = %format!("{e:#}"), "the control socket stopped");
             }

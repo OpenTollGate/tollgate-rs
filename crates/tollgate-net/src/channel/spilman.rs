@@ -85,16 +85,17 @@ pub struct SpilmanConfig {
     pub accepted_mints: Vec<String>,
     /// Secret key this node signs channel state with, hex-encoded.
     pub secret_key_hex: String,
-    /// Where this node holds money, for buying the vouchers it pays peers
-    /// with. `None` for a node that only sells.
-    pub wallet: Option<Wallet>,
+    /// What this node holds, and what it pays peers out of.
+    pub wallet: crate::wallet::Wallet,
+    /// Which of its holdings is the money — the paper a peer has to accept
+    /// before this node can pay it. `None` for a node that only sells.
+    pub money: Option<Money>,
 }
 
 /// Where a node's money is, and in what.
 #[derive(Debug, Clone)]
-pub struct Wallet {
-    /// A mint that sells its paper for money — the one a peer has to accept
-    /// before this node can pay it.
+pub struct Money {
+    /// A mint that sells its paper for money.
     pub mint: String,
     /// The unit that mint's paper is denominated in.
     pub unit: String,
@@ -106,6 +107,9 @@ type Client =
 /// Cashu Spilman channels.
 pub struct SpilmanChannels {
     config: SpilmanConfig,
+    /// The wallet is async and this backend is not, so its calls are handed
+    /// back to the runtime rather than run on a worker.
+    runtime: tokio::runtime::Handle,
     /// Our side of channels we fund to pay peers.
     ///
     /// Behind a mutex because the client host keeps its storage in a `RefCell`
@@ -178,6 +182,7 @@ impl SpilmanChannels {
 
         Ok(Self {
             config,
+            runtime: tokio::runtime::Handle::current(),
             client: Mutex::new(client),
             server: SpilmanBridge::new(host),
         })
@@ -286,7 +291,7 @@ impl SpilmanChannels {
     /// trade; this side only decides whether to accept the price by going
     /// through with it.
     fn buy_vouchers(&self, mint_url: &str, capacity: u64, keyset_info: &str) -> Result<String> {
-        let Some(wallet) = &self.config.wallet else {
+        let Some(money) = &self.config.money else {
             bail!(
                 "this node holds no money, so it cannot buy the vouchers it would pay {mint_url} with"
             );
@@ -299,14 +304,14 @@ impl SpilmanChannels {
             .accepts
             .iter()
             .find(|a| {
-                a.mint.trim_end_matches('/') == wallet.mint.trim_end_matches('/')
-                    && a.unit == wallet.unit
+                a.mint.trim_end_matches('/') == money.mint.trim_end_matches('/')
+                    && a.unit == money.unit
             })
             .ok_or_else(|| {
                 anyhow!(
                     "{mint_url} does not take {} from {}; it takes {:?}",
-                    wallet.unit,
-                    wallet.mint,
+                    money.unit,
+                    money.mint,
                     market
                         .accepts
                         .iter()
@@ -322,15 +327,55 @@ impl SpilmanChannels {
         debug!(
             capacity,
             owed,
-            unit = %wallet.unit,
-            mint = %wallet.mint,
+            unit = %money.unit,
+            mint = %money.mint,
             "buying vouchers"
         );
 
-        let money = crate::market::mint_money(&wallet.mint, owed, &wallet.unit)
-            .with_context(|| format!("get {owed} {} to pay with", wallet.unit))?;
+        let payment = self.take_from_wallet(money, owed)?;
+        crate::market::buy(mint_url, capacity, &self.config.unit, keyset_info, &payment)
+    }
 
-        crate::market::buy(mint_url, capacity, &self.config.unit, keyset_info, &money)
+    /// Take `owed` out of the wallet, topping it up if it is short.
+    ///
+    /// Spending what is already held is the normal path and is local
+    /// arithmetic. The top-up is the exception, and it is deliberately in-line
+    /// rather than a background chore: a node that has run out of money has
+    /// stopped being able to buy transit, and the operator wants that to show
+    /// up as a slow purchase rather than a silent one.
+    ///
+    /// Where the money mint settles its own invoices this is invisible. Where a
+    /// human has to pay one, it fails with the invoice in the log, and the
+    /// operator tops up from `tolltop` instead.
+    fn take_from_wallet(&self, money: &Money, owed: u64) -> Result<String> {
+        let wallet = self.config.wallet.clone();
+        let handle = self.runtime.clone();
+
+        tokio::task::block_in_place(|| {
+            handle.block_on(async move {
+                if let Ok(token) = wallet.spend(&money.mint, &money.unit, owed).await {
+                    return Ok(token);
+                }
+
+                let held = wallet.balance_of(&money.mint, &money.unit).await;
+                debug!(held, owed, "topping up to cover a purchase");
+                let top_up = wallet
+                    .top_up(
+                        &money.mint,
+                        &money.unit,
+                        owed.saturating_sub(held).max(owed),
+                    )
+                    .await?;
+                crate::market::wait_until_paid(&money.mint, &top_up.quote)
+                    .with_context(|| format!("pay {}", top_up.request))?;
+                wallet.collect(&top_up).await?;
+
+                wallet
+                    .spend(&money.mint, &money.unit, owed)
+                    .await
+                    .with_context(|| format!("pay {owed} {} after topping up", money.unit))
+            })
+        })
     }
 }
 

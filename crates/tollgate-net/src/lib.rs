@@ -31,6 +31,7 @@ pub mod identity;
 pub mod market;
 pub mod mint;
 pub mod node;
+pub mod wallet;
 pub mod wire;
 
 pub use identity::Identity;

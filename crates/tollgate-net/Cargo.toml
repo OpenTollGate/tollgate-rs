@@ -56,11 +56,11 @@ futures = { version = "0.3", default-features = false, features = ["async-await"
 # reading copies of other projects and is not checked in, so depending on it
 # would break a fresh clone and the container build.
 cdk-spilman = { git = "https://github.com/Origami74/cashu_spilman_channels.git", branch = "fix/custom-currency-units", package = "cdk-spilman", features = ["wallet", "configurable-host-reqwest"] }
-cdk = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk", default-features = false, features = ["mint"] }
+cdk = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk", default-features = false, features = ["mint", "wallet"] }
 cdk-axum = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk-axum", default-features = false }
 cdk-common = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk-common", default-features = false }
 cdk-fake-wallet = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk-fake-wallet" }
-cdk-sqlite = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk-sqlite", default-features = false, features = ["mint"] }
+cdk-sqlite = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cdk-sqlite", default-features = false, features = ["mint", "wallet"] }
 cashu = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package = "cashu", default-features = false }
 axum = { version = "0.8" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }

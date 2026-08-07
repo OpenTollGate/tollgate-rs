@@ -30,6 +30,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
 use tollgate_net::control::{self, PeerSnapshot, Request, Response, Snapshot};
 use tollgate_net::market::Accepted;
+use tollgate_net::wallet::{Holding, TopUp};
 
 #[derive(Parser, Debug)]
 #[command(name = "tolltop", about = "Watch a TollGate node")]
@@ -48,22 +49,33 @@ struct Args {
 enum Tab {
     Peers,
     Pricing,
+    Wallet,
 }
 
 impl Tab {
-    const ALL: [Tab; 2] = [Tab::Peers, Tab::Pricing];
+    const ALL: [Tab; 3] = [Tab::Peers, Tab::Pricing, Tab::Wallet];
 
     fn label(self) -> &'static str {
         match self {
             Tab::Peers => "peers",
             Tab::Pricing => "pricing",
+            Tab::Wallet => "wallet",
         }
     }
 
     fn next(self) -> Self {
         match self {
             Tab::Peers => Tab::Pricing,
+            Tab::Pricing => Tab::Wallet,
+            Tab::Wallet => Tab::Peers,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Tab::Peers => Tab::Wallet,
             Tab::Pricing => Tab::Peers,
+            Tab::Wallet => Tab::Pricing,
         }
     }
 }
@@ -85,10 +97,13 @@ struct App {
     detail: bool,
     /// Which accepted issuer the cursor is on, over on the pricing tab.
     issuers: TableState,
-    /// `Some` while a new price is being typed. Editing is modal because a
-    /// keystroke that means "quit" in one mode and "9" in the other has to be
-    /// told which it is.
+    /// `Some` while a number is being typed — a price, or an amount to top up
+    /// by. Editing is modal because a keystroke that means "quit" in one mode
+    /// and "9" in the other has to be told which it is.
     editing: Option<String>,
+    /// An invoice waiting to be paid, held on screen until it is or the
+    /// operator dismisses it. The node collects what it bought by itself.
+    invoice: Option<TopUp>,
 }
 
 impl App {
@@ -188,6 +203,7 @@ fn main() -> Result<()> {
         detail: false,
         issuers: TableState::default(),
         editing: None,
+        invoice: None,
     };
 
     loop {
@@ -214,15 +230,29 @@ fn main() -> Result<()> {
                     KeyCode::Esc => app.editing = None,
                     KeyCode::Enter => {
                         let typed = text.trim().parse::<u64>();
-                        app.notice = match (typed, app.selected_issuer().cloned()) {
-                            (Ok(bytes_per_unit), Some(issuer)) => runtime
-                                .block_on(set_price(&app.socket, &issuer, bytes_per_unit))
-                                .err()
-                                .map(|e| format!("{e:#}")),
-                            // Nothing typed is a change of mind, not a price of
-                            // zero: refusing an issuer is worth typing a `0`.
-                            _ => None,
-                        };
+                        match (app.tab, typed) {
+                            (Tab::Pricing, Ok(bytes_per_unit)) => {
+                                app.notice = match app.selected_issuer().cloned() {
+                                    Some(issuer) => runtime
+                                        .block_on(set_price(&app.socket, &issuer, bytes_per_unit))
+                                        .err()
+                                        .map(|e| format!("{e:#}")),
+                                    None => None,
+                                };
+                            }
+                            (Tab::Wallet, Ok(amount)) => {
+                                match runtime.block_on(top_up(&app.socket, amount)) {
+                                    Ok(invoice) => {
+                                        app.invoice = Some(invoice);
+                                        app.notice = None;
+                                    }
+                                    Err(e) => app.notice = Some(format!("{e:#}")),
+                                }
+                            }
+                            // Nothing typed is a change of mind, not a zero:
+                            // refusing an issuer is worth typing a `0` for.
+                            _ => app.notice = None,
+                        }
                         app.editing = None;
                     }
                     KeyCode::Backspace => {
@@ -241,10 +271,11 @@ fn main() -> Result<()> {
                     app.notice = None;
                 }
                 KeyCode::BackTab | KeyCode::Left => {
-                    app.tab = app.tab.next();
+                    app.tab = app.tab.previous();
                     app.notice = None;
                 }
                 // Esc backs out of whatever is open, and quits from the top.
+                KeyCode::Esc if app.invoice.is_some() => app.invoice = None,
                 KeyCode::Esc if app.detail => app.detail = false,
                 KeyCode::Esc => break,
 
@@ -267,6 +298,14 @@ fn main() -> Result<()> {
                         app.notice = None;
                     }
                 }
+
+                // Topping up is the only thing to do on the wallet tab, so
+                // Enter starts it as well as `t`.
+                KeyCode::Enter | KeyCode::Char('t') if app.tab == Tab::Wallet => {
+                    app.editing = Some(String::new());
+                    app.invoice = None;
+                    app.notice = None;
+                }
                 _ => {}
             }
         }
@@ -274,6 +313,21 @@ fn main() -> Result<()> {
 
     ratatui::restore();
     Ok(())
+}
+
+/// Ask the node to buy money, and hand back the invoice that pays for it.
+async fn top_up(socket: &std::path::Path, amount: u64) -> Result<TopUp> {
+    let request = Request::TopUp {
+        amount,
+        // The node's own money mint. An operator topping up is topping up
+        // *their* wallet and should not have to know a URL to do it.
+        mint: None,
+        unit: "sat".into(),
+    };
+    match control::send(socket, &request).await? {
+        Response::Ok { data } => Ok(serde_json::from_value(data)?),
+        Response::Error { message } => Err(anyhow::anyhow!(message)),
+    }
 }
 
 /// Tell the node what one issuer's paper buys, and fail loudly if it will not.
@@ -301,6 +355,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
     match app.tab {
         Tab::Peers => peers_tab(frame, app, body),
         Tab::Pricing => pricing_tab(frame, app, body),
+        Tab::Wallet => wallet_tab(frame, app, body),
     }
     frame.render_widget(status(app), footer);
 }
@@ -675,6 +730,173 @@ fn pricing_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(table, area, &mut app.issuers);
 }
 
+/// What this node is holding.
+///
+/// Money first, then other people's vouchers, because they are not the same
+/// kind of thing: money is what this node can pay with, and a peer's vouchers
+/// are what it has been paid — a claim on that peer's capacity that nobody but
+/// that peer will honour.
+fn wallet_tab(frame: &mut Frame, app: &mut App, area: Rect) {
+    // An invoice takes the whole tab while it is unpaid: it is the one thing on
+    // screen the operator has to act on, and a bolt11 string is long.
+    if let Some(invoice) = &app.invoice {
+        frame.render_widget(invoice_panel(invoice), area);
+        return;
+    }
+
+    if app.snapshot.holdings.is_empty() {
+        let empty = Paragraph::new(vec![
+            Line::from(Span::styled(
+                "This node holds nothing.",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "It can still sell — it is paid in its peers' money — but it cannot buy",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "transit from an upstream until it holds some. Press t to top up.",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ])
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title(" wallet "));
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    let money: Vec<&Holding> = app
+        .snapshot
+        .holdings
+        .iter()
+        .filter(|h| h.spendable)
+        .collect();
+    let vouchers: Vec<&Holding> = app
+        .snapshot
+        .holdings
+        .iter()
+        .filter(|h| !h.spendable)
+        .collect();
+
+    // Two tables rather than one with a column saying which is which: they are
+    // different questions, and an operator reading the top one is asking "can I
+    // buy?" while the bottom one answers "what have I been paid?".
+    let [top, bottom] = Layout::vertical([
+        Constraint::Length(money.len() as u16 + 3),
+        Constraint::Min(3),
+    ])
+    .areas(area);
+
+    frame.render_widget(
+        holdings_table(
+            &money,
+            " money — what this node can pay peers with ",
+            Color::Green,
+        ),
+        top,
+    );
+    frame.render_widget(
+        holdings_table(
+            &vouchers,
+            " vouchers — what peers have paid this node, in their own paper ",
+            Color::Cyan,
+        ),
+        bottom,
+    );
+}
+
+fn holdings_table<'a>(holdings: &[&'a Holding], title: &'a str, colour: Color) -> Table<'a> {
+    let header = Row::new(vec![
+        Cell::from("issuer"),
+        Cell::from("unit"),
+        Cell::from("held"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Gray)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let rows: Vec<Row> = if holdings.is_empty() {
+        vec![Row::new(vec![Cell::from(Span::styled(
+            "—",
+            Style::default().fg(Color::DarkGray),
+        ))])]
+    } else {
+        holdings
+            .iter()
+            .map(|h| {
+                Row::new(vec![
+                    Cell::from(h.mint.clone()),
+                    Cell::from(h.unit.clone()),
+                    Cell::from(Span::styled(
+                        held(h),
+                        Style::default().fg(colour).add_modifier(Modifier::BOLD),
+                    )),
+                ])
+            })
+            .collect()
+    };
+
+    Table::new(
+        rows,
+        [
+            Constraint::Min(24),    // issuer
+            Constraint::Length(6),  // unit
+            Constraint::Length(16), // held
+        ],
+    )
+    .header(header)
+    .block(Block::default().borders(Borders::ALL).title(title))
+}
+
+/// A holding, in the units its own kind is read in.
+fn held(holding: &Holding) -> String {
+    if holding.spendable {
+        format!("{} {}", holding.amount, holding.unit)
+    } else {
+        units(holding.amount)
+    }
+}
+
+/// The invoice for a top-up, and nothing else on screen.
+fn invoice_panel(invoice: &TopUp) -> Paragraph<'_> {
+    let dim = Style::default().fg(Color::DarkGray);
+    Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled("buying ", dim),
+            Span::styled(
+                format!("{} {}", invoice.amount, invoice.unit),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" at ", dim),
+            Span::raw(invoice.mint.clone()),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Pay this invoice. The node collects what it buys by itself, and the",
+            dim,
+        )),
+        Line::from(Span::styled(
+            "balance above appears when it lands — there is nothing to confirm.",
+            dim,
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            invoice.request.clone(),
+            Style::default().fg(Color::Yellow),
+        )),
+    ])
+    .wrap(Wrap { trim: false })
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" top up — esc to dismiss "),
+    )
+}
+
 /// What a quantity costs in one issuer's paper.
 fn costs(bytes: u64, issuer: &Accepted) -> String {
     if issuer.bytes_per_unit == 0 {
@@ -694,19 +916,21 @@ fn status(app: &App) -> Paragraph<'static> {
     // Editing wins over everything: the operator is mid-keystroke, and what
     // they need to see is what they have typed so far.
     if let Some(text) = &app.editing {
-        return Paragraph::new(Line::from(vec![
-            Span::styled(
-                "price (bytes per sat): ",
-                Style::default().fg(Color::Yellow),
+        // What a number means depends on which tab asked for it.
+        let (prompt, help) = match app.tab {
+            Tab::Wallet => ("top up by (sat): ", "   enter to buy, esc to cancel"),
+            _ => (
+                "bytes per unit: ",
+                "   enter to set, esc to cancel, 0 to stop taking this issuer",
             ),
+        };
+        return Paragraph::new(Line::from(vec![
+            Span::styled(prompt, Style::default().fg(Color::Yellow)),
             Span::styled(
                 format!("{text}_"),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                "   enter to set, esc to cancel, 0 to stop taking this issuer",
-                dim,
-            ),
+            Span::styled(help, dim),
         ]))
         .block(Block::default().borders(Borders::ALL));
     }
@@ -719,10 +943,12 @@ fn status(app: &App) -> Paragraph<'static> {
         .block(Block::default().borders(Borders::ALL));
     }
 
-    let hints = match (app.tab, app.detail) {
-        (Tab::Peers, false) => "tab switches   ↑↓ selects   enter opens   q quits",
-        (Tab::Peers, true) => "esc closes   ↑↓ selects   tab switches   q quits",
-        (Tab::Pricing, _) => "↑↓ selects   e changes the price   tab switches   q quits",
+    let hints = match (app.tab, app.detail, app.invoice.is_some()) {
+        (Tab::Peers, false, _) => "tab switches   ↑↓ selects   enter opens   q quits",
+        (Tab::Peers, true, _) => "esc closes   ↑↓ selects   tab switches   q quits",
+        (Tab::Pricing, _, _) => "↑↓ selects   e changes the price   tab switches   q quits",
+        (Tab::Wallet, _, true) => "esc dismisses   tab switches   q quits",
+        (Tab::Wallet, _, false) => "t tops up   tab switches   q quits",
     };
 
     // Which node this is, and what it charges, stay visible on every tab: the

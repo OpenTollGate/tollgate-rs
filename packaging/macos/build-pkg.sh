@@ -77,6 +77,9 @@ mkdir -p "${STAGING_DIR}/usr/local/bin"
 mkdir -p "${STAGING_DIR}/usr/local/etc/tollgate"
 mkdir -p "${STAGING_DIR}/usr/local/var/log/tollgate"
 mkdir -p "${STAGING_DIR}/usr/local/var/run"
+# The wallet's directory, but never the wallet: an upgrade that replaced a
+# balance with an empty one would be spending somebody's money for them.
+mkdir -p "${STAGING_DIR}/usr/local/var/lib/tollgate"
 mkdir -p "${STAGING_DIR}/Library/LaunchDaemons"
 
 for bin in tollgated tolltop; do

@@ -33,9 +33,12 @@ market:
   #     bytes_per_unit: 1000000
 
 wallet:
-  # Where this node holds the money it pays its own upstream with.
-  mint: ""
+  # Where this node buys the money it pays its own upstream with, and where it
+  # keeps what it is paid. Top it up from `tolltop`, on the wallet tab.
+  mint: "https://mint.minibits.cash/Bitcoin"
   unit: sat
+  # The balance is bearer tokens: this file *is* the money.
+  file: "/usr/local/var/lib/tollgate/wallet.sqlite"
 
 forwarding:
   # macOS has no nftables and no tc, so the kernel forwarding path cannot be
