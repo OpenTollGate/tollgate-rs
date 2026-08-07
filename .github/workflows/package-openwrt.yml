@@ -101,8 +101,14 @@ jobs:
           sudo ln -sf "/opt/zig-linux-x86_64-${ZIG_VERSION}/zig" /usr/local/bin/zig
           zig version
 
-      - name: Install llvm-strip
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends llvm
+      # llvm for `llvm-strip`, which strips a cross-compiled binary that the
+      # host's own `strip` will not touch. protobuf-compiler because cdk's
+      # signatory reaches gRPC through prost, whose build script shells out to
+      # protoc — the same reason the test image installs it.
+      - name: Install llvm-strip and protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm protobuf-compiler
 
       - name: Build
         run: |

@@ -76,6 +76,11 @@ jobs:
         with:
           key: macos-${{ matrix.arch }}
 
+      # cdk's signatory reaches gRPC through prost, whose build script shells
+      # out to protoc.
+      - name: Install protoc
+        run: brew install protobuf
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} --bin tollgated --bin tolltop
 
