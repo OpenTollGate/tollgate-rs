@@ -67,7 +67,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [detect, bootstrap, exhaust, metering, drift]
+        # Every topology under testing/ except `fips`, which needs a second
+        # image built from a FIPS checkout this repository does not carry —
+        # see testing/README.md. Run that one by hand.
+        suite: [peering, purchase, refusal, rollover, allowance, forwarding]
     steps:
       - uses: actions/checkout@v5
       - name: Download image artifact
