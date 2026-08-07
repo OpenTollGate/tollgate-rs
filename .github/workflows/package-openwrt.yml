@@ -1,0 +1,215 @@
+name: OpenWrt Package
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  PACKAGE_NAME: tollgate
+
+jobs:
+  # Every job is gated on the packaging tree being present on the ref being
+  # built. The workflow itself has to live on the default branch for the "Run
+  # workflow" button to exist at all, and it got there before `packaging/` did;
+  # on a ref without it these skip rather than failing on a missing script.
+  # Harmless to leave once both are everywhere — it says what the workflow
+  # needs.
+  version:
+    runs-on: ubuntu-latest
+    if: hashFiles('packaging/openwrt-ipk/build-ipk.sh') != ''
+    outputs:
+      package_version: ${{ steps.version.outputs.package_version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Derive a package version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A tag is the version. Anything else gets branch, commit height and
+          # hash, so two builds of the same branch are ordered and a package
+          # can be traced back to what produced it.
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "package_version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            BRANCH=$(echo "$GITHUB_REF_NAME" | sed 's|/|-|g')
+            echo "package_version=${BRANCH}.$(git rev-list --count HEAD).$(git rev-parse --short HEAD)" \
+              >> "$GITHUB_OUTPUT"
+          fi
+
+  # Cross-compiling and packaging are separate jobs because the .ipk packager
+  # takes prebuilt binaries: the Rust build runs once per architecture rather
+  # than once per package format, which matters the moment a second format
+  # (.apk, for OpenWrt 25+) is added.
+  compile:
+    name: Cross-compile (${{ matrix.openwrt_arch }})
+    runs-on: ubuntu-latest
+    needs: [version]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - openwrt_arch: aarch64_cortex-a53
+            rust_target: aarch64-unknown-linux-musl
+            # GL.iNet MT3000/MT6000, RPi 3/4/5, most modern routers
+          - openwrt_arch: x86_64
+            rust_target: x86_64-unknown-linux-musl
+            # x86 routers and VMs
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+          targets: ${{ matrix.rust_target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: openwrt-${{ matrix.rust_target }}
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --version 0.19.8 --locked
+
+      - name: Install zig
+        run: |
+          set -euo pipefail
+          ZIG_VERSION="0.13.0"
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" \
+            | sudo tar xJ -C /opt
+          sudo ln -sf "/opt/zig-linux-x86_64-${ZIG_VERSION}/zig" /usr/local/bin/zig
+          zig version
+
+      - name: Install llvm-strip
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends llvm
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          cargo zigbuild --release --target ${{ matrix.rust_target }} \
+            --bin tollgated --bin tolltop
+          mkdir -p out
+          for b in tollgated tolltop; do
+            cp "target/${{ matrix.rust_target }}/release/$b" "out/$b"
+            llvm-strip "out/$b" || true
+          done
+          ls -lh out/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tollgate-bins-${{ matrix.openwrt_arch }}
+          path: out/
+          retention-days: 1
+
+  package:
+    name: Build .ipk (${{ matrix.openwrt_arch }})
+    runs-on: ubuntu-latest
+    needs: [version, compile]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - build_arch: aarch64
+            openwrt_arch: aarch64_cortex-a53
+          - build_arch: x86_64
+            openwrt_arch: x86_64
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # Reproducible archives: the packager stamps every entry with this rather
+      # than with the time the job happened to run.
+      - name: Set SOURCE_DATE_EPOCH from git
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: tollgate-bins-${{ matrix.openwrt_arch }}
+          path: bins
+
+      - name: Build .ipk
+        env:
+          PKG_VERSION: ${{ needs.version.outputs.package_version }}
+        run: |
+          chmod +x bins/*
+          packaging/openwrt-ipk/build-ipk.sh \
+            --arch ${{ matrix.build_arch }} \
+            --bin-dir "$PWD/bins"
+
+      # An .ipk that opkg cannot read is worse than no .ipk: it installs
+      # nothing and says something unhelpful about the archive. Check the shape
+      # here, where the failure is attributable, rather than on a router.
+      - name: Verify the package
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG=$(ls deploy/${{ env.PACKAGE_NAME }}_*_${{ matrix.openwrt_arch }}.ipk)
+          echo "==> $PKG"
+
+          WORK=$(mktemp -d)
+          tar xzf "$PKG" -C "$WORK"
+          for member in debian-binary control.tar.gz data.tar.gz; do
+            [ -f "$WORK/$member" ] || { echo "FAIL: missing $member"; exit 1; }
+          done
+
+          mkdir -p "$WORK/c" "$WORK/d"
+          tar xzf "$WORK/control.tar.gz" -C "$WORK/c"
+          tar xzf "$WORK/data.tar.gz" -C "$WORK/d"
+
+          grep -q "^Architecture: ${{ matrix.openwrt_arch }}$" "$WORK/c/control"
+          grep -q "^Version: ${{ needs.version.outputs.package_version }}$" "$WORK/c/control"
+          # The conffile is what keeps an operator's identity, price and wallet
+          # across an upgrade.
+          grep -q "^/etc/tollgate/tollgate.yaml$" "$WORK/c/conffiles"
+
+          for f in usr/bin/tollgated usr/bin/tolltop etc/init.d/tollgate \
+                   etc/tollgate/tollgate.yaml etc/uci-defaults/90-tollgate-setup; do
+            [ -f "$WORK/d/$f" ] || { echo "FAIL: missing $f"; exit 1; }
+          done
+
+          file "$WORK/d/usr/bin/tollgated" | grep -q "statically linked" \
+            || { echo "FAIL: not a static binary"; exit 1; }
+
+          echo "PASS"
+          ls -lh "$PKG"
+
+      - name: Checksum
+        run: |
+          cd deploy
+          for f in *.ipk; do sha256sum "$f" > "$f.sha256"; done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tollgate-ipk-${{ matrix.openwrt_arch }}
+          path: |
+            deploy/*.ipk
+            deploy/*.sha256
+          retention-days: 14
+
+  release:
+    name: Publish to the GitHub release
+    runs-on: ubuntu-latest
+    needs: [package]
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Attach the packages
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.ipk
+            dist/*.sha256
