@@ -17,6 +17,11 @@ jobs:
           toolchain: "1.94.1"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # cdk's signatory reaches gRPC through prost, whose build script shells
+      # out to protoc. The test image installs it for the same reason; anything
+      # that compiles this workspace outside a container has to as well.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
