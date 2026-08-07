@@ -2,7 +2,6 @@ name: OpenWrt Package
 
 on:
   push:
-    branches: [master]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
@@ -12,8 +11,15 @@ env:
   PACKAGE_NAME: tollgate
 
 jobs:
+  # Every job is gated on the packaging tree being present on the ref being
+  # built. The workflow itself has to live on the default branch for the "Run
+  # workflow" button to exist at all, and it got there before `packaging/` did;
+  # on a ref without it these skip rather than failing on a missing script.
+  # Harmless to leave once both are everywhere — it says what the workflow
+  # needs.
   version:
     runs-on: ubuntu-latest
+    if: hashFiles('packaging/openwrt-ipk/build-ipk.sh') != ''
     outputs:
       package_version: ${{ steps.version.outputs.package_version }}
     steps:

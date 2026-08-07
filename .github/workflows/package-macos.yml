@@ -2,7 +2,6 @@ name: macOS Package
 
 on:
   push:
-    branches: [master]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
@@ -11,8 +10,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Gated on the packaging tree being present — see the note in
+  # package-openwrt.yml. The workflow has to be on the default branch for the
+  # "Run workflow" button to exist; `packaging/` arrives with the branch that
+  # built it.
   version:
     runs-on: ubuntu-latest
+    if: hashFiles('packaging/macos/build-pkg.sh') != ''
     outputs:
       package_version: ${{ steps.version.outputs.package_version }}
     steps:
