@@ -244,9 +244,16 @@
 
       // One buffer, filled once and posted repeatedly. Random rather than zeroed
       // so nothing along the path can claim credit for compressing it.
+      // Filled in 64 KiB passes because `getRandomValues` refuses anything
+      // longer in one call — a single call for the whole megabyte throws
+      // QuotaExceededError, and throwing here would take the whole script with
+      // it before a single handler is bound.
       const OUTBOUND = (() => {
         const bytes = new Uint8Array(1024 * 1024);
-        crypto.getRandomValues(bytes);
+        const limit = 65536;
+        for (let at = 0; at < bytes.length; at += limit) {
+          crypto.getRandomValues(bytes.subarray(at, Math.min(at + limit, bytes.length)));
+        }
         return bytes;
       })();
 

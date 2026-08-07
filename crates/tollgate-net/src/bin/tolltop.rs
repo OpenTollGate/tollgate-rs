@@ -102,6 +102,9 @@ struct App {
     detail: bool,
     /// Which accepted issuer the cursor is on, over on the pricing tab.
     issuers: TableState,
+    /// And which of the money holdings, over on the wallet tab. Only the money
+    /// takes a cursor: it is the half that can be topped up.
+    holdings: TableState,
     /// `Some` while a number is being typed — a price, or an amount to top up
     /// by. Editing is modal because a keystroke that means "quit" in one mode
     /// and "9" in the other has to be told which it is.
@@ -142,36 +145,64 @@ impl App {
         }
     }
 
-    /// Keep the pricing cursor on a row that exists, for the same reason.
+    /// Keep the pricing and wallet cursors on rows that exist, for the same
+    /// reason: an issuer stops being accepted, a balance is spent to nothing.
     fn clamp_issuers(&mut self) {
-        let count = self.snapshot.accepts.len();
-        match (count, self.issuers.selected()) {
-            (0, _) => self.issuers.select(None),
-            (_, None) => self.issuers.select(Some(0)),
-            (n, Some(i)) if i >= n => self.issuers.select(Some(n - 1)),
-            _ => {}
-        }
+        let (issuers, money) = (self.snapshot.accepts.len(), self.money().len());
+        clamp(&mut self.issuers, issuers);
+        clamp(&mut self.holdings, money);
+    }
+
+    /// The holdings the wallet cursor moves over — the spendable ones.
+    fn money(&self) -> Vec<&Holding> {
+        self.snapshot
+            .holdings
+            .iter()
+            .filter(|h| h.spendable)
+            .collect()
+    }
+
+    /// The money issuer under the cursor, if there is one to top up.
+    fn selected_money(&self) -> Option<Holding> {
+        self.holdings
+            .selected()
+            .and_then(|i| self.money().get(i).map(|h| (*h).clone()))
     }
 
     fn move_issuer(&mut self, delta: isize) {
-        let count = self.snapshot.accepts.len();
-        if count == 0 {
-            return;
-        }
-        let current = self.issuers.selected().unwrap_or(0) as isize;
-        self.issuers
-            .select(Some((current + delta).clamp(0, count as isize - 1) as usize));
+        move_cursor(&mut self.issuers, self.snapshot.accepts.len(), delta);
+    }
+
+    fn move_holding(&mut self, delta: isize) {
+        let count = self.money().len();
+        move_cursor(&mut self.holdings, count, delta);
     }
 
     fn move_selection(&mut self, delta: isize) {
-        let count = self.snapshot.peers.len();
-        if count == 0 {
-            return;
-        }
-        let current = self.peers.selected().unwrap_or(0) as isize;
-        let next = (current + delta).clamp(0, count as isize - 1);
-        self.peers.select(Some(next as usize));
+        move_cursor(&mut self.peers, self.snapshot.peers.len(), delta);
     }
+}
+
+/// Point a cursor at a row that exists, or at nothing when there are none.
+fn clamp(state: &mut TableState, count: usize) {
+    match (count, state.selected()) {
+        (0, _) => state.select(None),
+        (_, None) => state.select(Some(0)),
+        (n, Some(i)) if i >= n => state.select(Some(n - 1)),
+        _ => {}
+    }
+}
+
+/// Move a cursor, stopping at either end rather than wrapping.
+///
+/// Wrapping in a list this short reads as the cursor jumping rather than as
+/// reaching the end.
+fn move_cursor(state: &mut TableState, count: usize, delta: isize) {
+    if count == 0 {
+        return;
+    }
+    let current = state.selected().unwrap_or(0) as isize;
+    state.select(Some((current + delta).clamp(0, count as isize - 1) as usize));
 }
 
 fn main() -> Result<()> {
@@ -207,6 +238,7 @@ fn main() -> Result<()> {
         peers: TableState::default(),
         detail: false,
         issuers: TableState::default(),
+        holdings: TableState::default(),
         editing: None,
         invoice: None,
     };
@@ -246,7 +278,11 @@ fn main() -> Result<()> {
                                 };
                             }
                             (Tab::Wallet, Ok(amount)) => {
-                                match runtime.block_on(top_up(&app.socket, amount)) {
+                                // Top up the issuer under the cursor, or the
+                                // node's own money mint when nothing is held
+                                // yet and there is no cursor to be under.
+                                let at = app.selected_money();
+                                match runtime.block_on(top_up(&app.socket, amount, at.as_ref())) {
                                     Ok(invoice) => {
                                         app.invoice = Some(invoice);
                                         app.notice = None;
@@ -292,6 +328,9 @@ fn main() -> Result<()> {
                     app.detail = !app.detail && app.selected().is_some();
                 }
 
+                KeyCode::Up | KeyCode::Char('k') if app.tab == Tab::Wallet => app.move_holding(-1),
+                KeyCode::Down | KeyCode::Char('j') if app.tab == Tab::Wallet => app.move_holding(1),
+
                 KeyCode::Up | KeyCode::Char('k') if app.tab == Tab::Pricing => app.move_issuer(-1),
                 KeyCode::Down | KeyCode::Char('j') if app.tab == Tab::Pricing => app.move_issuer(1),
 
@@ -321,13 +360,15 @@ fn main() -> Result<()> {
 }
 
 /// Ask the node to buy money, and hand back the invoice that pays for it.
-async fn top_up(socket: &std::path::Path, amount: u64) -> Result<TopUp> {
+///
+/// `at` is the holding under the cursor. Without one — a wallet that holds
+/// nothing yet — the node uses its own money mint, so that an operator topping
+/// up for the first time does not have to know a URL to do it.
+async fn top_up(socket: &std::path::Path, amount: u64, at: Option<&Holding>) -> Result<TopUp> {
     let request = Request::TopUp {
         amount,
-        // The node's own money mint. An operator topping up is topping up
-        // *their* wallet and should not have to know a URL to do it.
-        mint: None,
-        unit: "sat".into(),
+        mint: at.map(|h| h.mint.clone()),
+        unit: at.map(|h| h.unit.clone()).unwrap_or_else(|| "sat".into()),
     };
     match control::send(socket, &request).await? {
         Response::Ok { data } => Ok(serde_json::from_value(data)?),
@@ -444,26 +485,10 @@ fn peer_table(frame: &mut Frame, app: &mut App, area: Rect, compact: bool) {
         ]
     };
 
-    let header = Row::new(titles.iter().map(|t| Cell::from(*t))).style(
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Gray)
-            .add_modifier(Modifier::BOLD),
-    );
-
-    let rows: Vec<Row> = app
-        .snapshot
-        .peers
-        .iter()
-        .map(|peer| {
-            let full = peer_row(peer);
-            if compact { full.clone() } else { full }
-        })
-        .collect();
     let rows: Vec<Row> = if compact {
         app.snapshot.peers.iter().map(compact_peer_row).collect()
     } else {
-        rows
+        app.snapshot.peers.iter().map(peer_row).collect()
     };
 
     let title = if compact {
@@ -474,15 +499,33 @@ fn peer_table(frame: &mut Frame, app: &mut App, area: Rect, compact: bool) {
     };
 
     let table = Table::new(rows, widths.to_vec())
-        .header(header)
-        .row_highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
+        .header(header_row(titles))
+        .row_highlight_style(SELECTED)
+        .highlight_symbol(CURSOR)
         .block(Block::default().borders(Borders::ALL).title(title));
 
     frame.render_stateful_widget(table, area, &mut app.peers);
+}
+
+/// How the row under the cursor is drawn.
+///
+/// Reversed rather than given a background colour of its own. A coloured bar is
+/// what a header looks like, and one sitting under another was unreadable as a
+/// cursor — worse when there was a single row, where a permanently highlighted
+/// line reads as decoration rather than as a thing that moves.
+const SELECTED: Style = Style::new().add_modifier(Modifier::REVERSED);
+
+/// And the mark in front of it, so a cursor is a cursor even where the terminal
+/// renders reversed video badly.
+const CURSOR: &str = "▶ ";
+
+/// A column header: a label, not a selection.
+fn header_row<'a>(titles: &'a [&'a str]) -> Row<'a> {
+    Row::new(titles.iter().map(|t| Cell::from(*t))).style(
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
 }
 
 /// The five columns that say whether a peering is working, for when the detail
@@ -681,20 +724,6 @@ fn pricing_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let header = Row::new(vec![
-        Cell::from("issuer"),
-        Cell::from("unit"),
-        Cell::from("bytes per unit"),
-        Cell::from("a gigabyte"),
-        Cell::from("a megabyte"),
-    ])
-    .style(
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Gray)
-            .add_modifier(Modifier::BOLD),
-    );
-
     let rows: Vec<Row> = app
         .snapshot
         .accepts
@@ -720,12 +749,15 @@ fn pricing_tab(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(14), // a megabyte
         ],
     )
-    .header(header)
-    .row_highlight_style(
-        Style::default()
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD),
-    )
+    .header(header_row(&[
+        "issuer",
+        "unit",
+        "bytes per unit",
+        "a gigabyte",
+        "a megabyte",
+    ]))
+    .row_highlight_style(SELECTED)
+    .highlight_symbol(CURSOR)
     .block(
         Block::default()
             .borders(Borders::ALL)
@@ -787,19 +819,26 @@ fn wallet_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     // Two tables rather than one with a column saying which is which: they are
     // different questions, and an operator reading the top one is asking "can I
     // buy?" while the bottom one answers "what have I been paid?".
+    //
+    // Only the money table takes the cursor, because only it is actionable: `t`
+    // tops up the issuer under it. A voucher is a claim on one peer's capacity
+    // and there is nothing to do to it from here.
     let [top, bottom] = Layout::vertical([
-        Constraint::Length(money.len() as u16 + 3),
+        Constraint::Length(money.len().max(1) as u16 + 3),
         Constraint::Min(3),
     ])
     .areas(area);
 
-    frame.render_widget(
+    frame.render_stateful_widget(
         holdings_table(
             &money,
             " money — what this node can pay peers with ",
             Color::Green,
-        ),
+        )
+        .row_highlight_style(SELECTED)
+        .highlight_symbol(CURSOR),
         top,
+        &mut app.holdings,
     );
     frame.render_widget(
         holdings_table(
@@ -812,18 +851,6 @@ fn wallet_tab(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn holdings_table<'a>(holdings: &[&'a Holding], title: &'a str, colour: Color) -> Table<'a> {
-    let header = Row::new(vec![
-        Cell::from("issuer"),
-        Cell::from("unit"),
-        Cell::from("held"),
-    ])
-    .style(
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Gray)
-            .add_modifier(Modifier::BOLD),
-    );
-
     let rows: Vec<Row> = if holdings.is_empty() {
         vec![Row::new(vec![Cell::from(Span::styled(
             "—",
@@ -853,7 +880,7 @@ fn holdings_table<'a>(holdings: &[&'a Holding], title: &'a str, colour: Color) -
             Constraint::Length(16), // held
         ],
     )
-    .header(header)
+    .header(header_row(&["issuer", "unit", "held"]))
     .block(Block::default().borders(Borders::ALL).title(title))
 }
 
@@ -1177,5 +1204,144 @@ mod tests {
         // because a mint wrote a long invoice would be worse than one showing
         // the string alone.
         assert!(qr_lines(&"x".repeat(4096)).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use tollgate_net::wallet::Holding;
+
+    fn app_with_two_issuers() -> App {
+        let mut app = App {
+            socket: PathBuf::from("/tmp/x.sock"),
+            snapshot: Snapshot {
+                pubkey: "02aa".into(),
+                unit: "byte".into(),
+                accepts: vec![
+                    Accepted {
+                        mint: "https://one.example".into(),
+                        unit: "sat".into(),
+                        bytes_per_unit: 1_000_000,
+                    },
+                    Accepted {
+                        mint: "https://two.example".into(),
+                        unit: "sat".into(),
+                        bytes_per_unit: 500_000,
+                    },
+                ],
+                holdings: vec![
+                    Holding {
+                        mint: "https://one.example".into(),
+                        unit: "sat".into(),
+                        amount: 900,
+                        spendable: true,
+                    },
+                    Holding {
+                        mint: "https://peer.example".into(),
+                        unit: "byte".into(),
+                        amount: 4096,
+                        spendable: false,
+                    },
+                ],
+                ..Snapshot::default()
+            },
+            error: None,
+            notice: None,
+            tab: Tab::Pricing,
+            peers: TableState::default(),
+            detail: false,
+            issuers: TableState::default(),
+            holdings: TableState::default(),
+            editing: None,
+            invoice: None,
+        };
+        app.clamp_issuers();
+        app
+    }
+
+    fn render(app: &mut App) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("terminal");
+        terminal.draw(|frame| draw(frame, app)).expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().chars().next().unwrap_or(' '))
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// The rows the cursor is on, by what they contain.
+    fn cursored(screen: &[String]) -> Vec<String> {
+        screen
+            .iter()
+            .filter(|line| line.contains(CURSOR.trim()))
+            .map(|line| line.trim().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_cursor_is_on_a_row_rather_than_on_the_header() {
+        // The bug this replaces: the header was a solid grey bar and the
+        // selected row was another one just under it, so the header read as the
+        // selection and nothing looked like a cursor at all.
+        let mut app = app_with_two_issuers();
+        let screen = render(&mut app);
+
+        let marked = cursored(&screen);
+        assert_eq!(marked.len(), 1, "exactly one row carries the cursor");
+        assert!(marked[0].contains("one.example"), "{:?}", marked);
+
+        let header = screen
+            .iter()
+            .find(|l| l.contains("bytes per unit"))
+            .expect("a header");
+        assert!(
+            !header.contains(CURSOR.trim()),
+            "the header is a label, not a selection: {header:?}"
+        );
+    }
+
+    #[test]
+    fn the_cursor_moves_between_issuers_and_stops_at_the_ends() {
+        let mut app = app_with_two_issuers();
+
+        app.move_issuer(1);
+        assert!(cursored(&render(&mut app))[0].contains("two.example"));
+
+        // Past the end stays at the end rather than wrapping, which in a list
+        // this short reads as the cursor jumping.
+        app.move_issuer(1);
+        assert!(cursored(&render(&mut app))[0].contains("two.example"));
+
+        app.move_issuer(-5);
+        assert!(cursored(&render(&mut app))[0].contains("one.example"));
+    }
+
+    #[test]
+    fn the_wallet_cursor_is_on_the_money_and_not_on_the_vouchers() {
+        // Only the money is actionable: `t` tops up the issuer under the
+        // cursor, and there is nothing to do to a voucher from here.
+        let mut app = app_with_two_issuers();
+        app.tab = Tab::Wallet;
+        let screen = render(&mut app);
+
+        let marked = cursored(&screen);
+        assert_eq!(marked.len(), 1, "{marked:?}");
+        assert!(marked[0].contains("one.example"), "{:?}", marked);
+        assert_eq!(
+            app.selected_money().map(|h| h.unit),
+            Some("sat".to_string())
+        );
+
+        let voucher = screen
+            .iter()
+            .find(|l| l.contains("peer.example"))
+            .expect("the voucher row");
+        assert!(!voucher.contains(CURSOR.trim()), "{voucher:?}");
     }
 }
