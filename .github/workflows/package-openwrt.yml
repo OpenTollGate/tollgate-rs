@@ -11,21 +11,35 @@ env:
   PACKAGE_NAME: tollgate
 
 jobs:
-  # Every job is gated on the packaging tree being present on the ref being
-  # built. The workflow itself has to live on the default branch for the "Run
-  # workflow" button to exist at all, and it got there before `packaging/` did;
-  # on a ref without it these skip rather than failing on a missing script.
-  # Harmless to leave once both are everywhere — it says what the workflow
-  # needs.
   version:
     runs-on: ubuntu-latest
-    if: hashFiles('packaging/openwrt-ipk/build-ipk.sh') != ''
     outputs:
       package_version: ${{ steps.version.outputs.package_version }}
+      packaging: ${{ steps.guard.outputs.present }}
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+
+      # The workflow has to live on the default branch for the "Run workflow"
+      # button to exist at all — that is the one event that reads the file from
+      # there rather than from the ref being pushed — and it got there before
+      # `packaging/` did. So the work is gated on the tree it drives actually
+      # being on the ref being built, and skips rather than failing on a
+      # missing script.
+      #
+      # The check is a step rather than a job-level `hashFiles`, which is not a
+      # function GitHub allows there: it rejects the whole file, and a workflow
+      # that will not parse fails in zero seconds with no job to point at.
+      - name: Is the packaging tree on this ref?
+        id: guard
+        run: |
+          if [ -f packaging/openwrt-ipk/build-ipk.sh ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::packaging/ is not on this ref; nothing to build"
+          fi
 
       - name: Derive a package version
         id: version
@@ -51,6 +65,7 @@ jobs:
     name: Cross-compile (${{ matrix.openwrt_arch }})
     runs-on: ubuntu-latest
     needs: [version]
+    if: needs.version.outputs.packaging == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -111,6 +126,7 @@ jobs:
     name: Build .ipk (${{ matrix.openwrt_arch }})
     runs-on: ubuntu-latest
     needs: [version, compile]
+    if: needs.version.outputs.packaging == 'true'
     strategy:
       fail-fast: false
       matrix:
