@@ -130,6 +130,9 @@ async fn main() -> Result<()> {
     let wallet = tollgate_net::wallet::Wallet::open(
         &wallet_path,
         wallet_seed(&config.identity.secret_hex())?,
+        // What this node sells, so a holding denominated in it can be told
+        // apart from money: it is capacity bought from an upstream.
+        config.policy.unit.clone(),
     )
     .await
     .context("open this node's wallet")?;

@@ -35,7 +35,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
 use tollgate_net::control::{self, PeerSnapshot, Request, Response, Snapshot};
 use tollgate_net::market::Accepted;
-use tollgate_net::wallet::{Holding, TopUp};
+use tollgate_net::wallet::{Holding, Kind, TopUp};
 
 #[derive(Parser, Debug)]
 #[command(name = "tolltop", about = "Watch a TollGate node")]
@@ -153,12 +153,13 @@ impl App {
         clamp(&mut self.holdings, money);
     }
 
-    /// The holdings the wallet cursor moves over — the spendable ones.
+    /// The holdings the wallet cursor moves over — the money, since that is the
+    /// half that can be topped up.
     fn money(&self) -> Vec<&Holding> {
         self.snapshot
             .holdings
             .iter()
-            .filter(|h| h.spendable)
+            .filter(|h| h.kind == Kind::Money)
             .collect()
     }
 
@@ -807,22 +808,23 @@ fn wallet_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         .snapshot
         .holdings
         .iter()
-        .filter(|h| h.spendable)
+        .filter(|h| h.kind == Kind::Money)
         .collect();
-    let vouchers: Vec<&Holding> = app
+    let transit: Vec<&Holding> = app
         .snapshot
         .holdings
         .iter()
-        .filter(|h| !h.spendable)
+        .filter(|h| h.kind == Kind::PrepaidTransit)
         .collect();
 
-    // Two tables rather than one with a column saying which is which: they are
-    // different questions, and an operator reading the top one is asking "can I
-    // buy?" while the bottom one answers "what have I been paid?".
+    // Two tables rather than one with a column saying which is which. Both are
+    // spending power; the difference is who will take it. Money buys from
+    // whoever accepts its mint, and a byte-denominated holding is capacity
+    // already bought from one upstream — good there and nowhere else.
     //
     // Only the money table takes the cursor, because only it is actionable: `t`
-    // tops up the issuer under it. A voucher is a claim on one peer's capacity
-    // and there is nothing to do to it from here.
+    // tops up the issuer under it, and there is no topping up an upstream's
+    // capacity except by buying transit, which the node does for itself.
     let [top, bottom] = Layout::vertical([
         Constraint::Length(money.len().max(1) as u16 + 3),
         Constraint::Min(3),
@@ -832,7 +834,7 @@ fn wallet_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(
         holdings_table(
             &money,
-            " money — what this node can pay peers with ",
+            " money — buys from any peer that accepts the mint ",
             Color::Green,
         )
         .row_highlight_style(SELECTED)
@@ -842,8 +844,8 @@ fn wallet_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     );
     frame.render_widget(
         holdings_table(
-            &vouchers,
-            " vouchers — what peers have paid this node, in their own paper ",
+            &transit,
+            " prepaid transit — bought from an upstream, spendable only there ",
             Color::Cyan,
         ),
         bottom,
@@ -885,11 +887,14 @@ fn holdings_table<'a>(holdings: &[&'a Holding], title: &'a str, colour: Color) -
 }
 
 /// A holding, in the units its own kind is read in.
+///
+/// Money is counted: 900 sat is 900 sat, and rounding it to "0.9k" hides the
+/// thing being counted. Capacity is measured, so it reads as bytes do
+/// everywhere else in this display.
 fn held(holding: &Holding) -> String {
-    if holding.spendable {
-        format!("{} {}", holding.amount, holding.unit)
-    } else {
-        units(holding.amount)
+    match holding.kind {
+        Kind::Money => format!("{} {}", holding.amount, holding.unit),
+        Kind::PrepaidTransit => units(holding.amount),
     }
 }
 
@@ -1237,13 +1242,15 @@ mod render_tests {
                         mint: "https://one.example".into(),
                         unit: "sat".into(),
                         amount: 900,
-                        spendable: true,
+                        kind: Kind::Money,
                     },
+                    // Bought from an upstream and not yet spent — spending
+                    // power, but only at the node that issued it.
                     Holding {
-                        mint: "https://peer.example".into(),
+                        mint: "https://upstream.example".into(),
                         unit: "byte".into(),
                         amount: 4096,
-                        spendable: false,
+                        kind: Kind::PrepaidTransit,
                     },
                 ],
                 ..Snapshot::default()
@@ -1323,9 +1330,10 @@ mod render_tests {
     }
 
     #[test]
-    fn the_wallet_cursor_is_on_the_money_and_not_on_the_vouchers() {
+    fn the_wallet_cursor_is_on_the_money_and_not_on_prepaid_transit() {
         // Only the money is actionable: `t` tops up the issuer under the
-        // cursor, and there is nothing to do to a voucher from here.
+        // cursor, and an upstream's capacity is topped up by buying transit,
+        // which the node does for itself.
         let mut app = app_with_two_issuers();
         app.tab = Tab::Wallet;
         let screen = render(&mut app);
@@ -1338,10 +1346,24 @@ mod render_tests {
             Some("sat".to_string())
         );
 
-        let voucher = screen
+        let transit = screen
             .iter()
-            .find(|l| l.contains("peer.example"))
-            .expect("the voucher row");
-        assert!(!voucher.contains(CURSOR.trim()), "{voucher:?}");
+            .find(|l| l.contains("upstream.example"))
+            .expect("the prepaid-transit row");
+        assert!(!transit.contains(CURSOR.trim()), "{transit:?}");
+    }
+
+    #[test]
+    fn the_two_halves_say_who_will_take_them() {
+        // The labels are the point. Both halves are spending power; what
+        // differs is whether it is general or good at exactly one node — and
+        // neither of them is "what peers have paid us", because a peer pays in
+        // *this* node's paper, which redeeming cancels rather than banks.
+        let mut app = app_with_two_issuers();
+        app.tab = Tab::Wallet;
+        let screen = render(&mut app).join("\n");
+
+        assert!(screen.contains("buys from any peer"), "{screen}");
+        assert!(screen.contains("spendable only there"), "{screen}");
     }
 }

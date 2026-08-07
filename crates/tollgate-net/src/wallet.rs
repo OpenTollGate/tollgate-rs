@@ -3,18 +3,25 @@
 //! A thin layer over cdk's wallet, and deliberately nothing more. Proof
 //! selection, change, keyset rotation, the spent-proof bookkeeping and the
 //! database behind it are all Cashu problems that cdk has already solved; what
-//! this adds is the part that is TollGate's — a node holds paper from *several*
-//! issuers in *two kinds* of unit, and which is which decides what it can do.
+//! this adds is the part that is TollGate's — a node holds paper from several
+//! issuers, and what it can do with a holding depends on who issued it.
 //!
-//! - **money** — sat-denominated tokens from a mint that deals in money. This
-//!   is what the node pays peers with, and the only thing it can top up.
-//! - **other people's vouchers** — byte-denominated tokens from peers it has
-//!   sold to. Revenue, not spending power: a claim on somebody else's capacity,
-//!   worth exactly as much as that peer is willing to carry.
+//! - **money** — sat-denominated tokens from a mint that deals in money. Any
+//!   peer that accepts that mint will take them, so this is what a node pays
+//!   with generally, and the only thing it can top itself up in.
+//! - **prepaid transit** — byte-denominated tokens from an *upstream*: capacity
+//!   bought and not yet spent. Also spending power, but only at the one node
+//!   that issued them, since nobody else's mint honours them.
+//!
+//! What a node never accumulates is its own vouchers. A customer pays in the
+//! paper this node issued, and redeeming that cancels this node's own claim —
+//! the money side of being paid arrives as money, at the market, which is why
+//! selling shows up in the first list and not the second.
 //!
 //! So one cdk wallet per (mint, unit), created on demand and kept in one
-//! database. Balances are reported money first, because the two answer
-//! different questions.
+//! database. Balances are reported money first, because a node short of money
+//! cannot buy from anyone, where a node short of one upstream's vouchers is
+//! only short with that upstream.
 //!
 //! # Why the node holds anything at all
 //!
@@ -41,22 +48,47 @@ use tracing::{debug, info};
 
 use crate::mint::currency_unit;
 
+/// What a holding can be spent on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// Money. Any peer that accepts the issuing mint will take it, so it buys
+    /// from whoever this node decides to buy from.
+    Money,
+    /// Capacity bought from one upstream and not yet spent. Spending power at
+    /// that node and nowhere else — nobody else's mint honours its paper.
+    PrepaidTransit,
+}
+
+impl Kind {
+    /// What a unit means to a node that sells `resource`.
+    ///
+    /// Anything the node does not itself sell is money to it; its own resource
+    /// unit, issued by somebody else, is a prepayment to that somebody.
+    pub fn of(unit: &str, resource: &str) -> Self {
+        if unit == resource {
+            Kind::PrepaidTransit
+        } else {
+            Kind::Money
+        }
+    }
+}
+
 /// One issuer's paper, in one unit, and how much of it there is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Holding {
     /// The mint that issued it.
     pub mint: String,
-    /// What it is denominated in — `sat` for money, `byte` for a peer's
-    /// vouchers.
+    /// What it is denominated in — `sat` for money, `byte` for capacity.
     pub unit: String,
     /// How much, in that unit.
     pub amount: u64,
-    /// Whether this node can pay anybody with it.
+    /// What it can be spent on, and with whom.
     ///
-    /// Stated rather than inferred by every reader: a byte-denominated voucher
-    /// is a claim on one peer's capacity, and no peer but its issuer will take
-    /// it.
-    pub spendable: bool,
+    /// Stated rather than left for each reader to infer: both kinds are
+    /// spending power, and the difference is whether it is general or is good
+    /// at exactly one node.
+    pub kind: Kind,
 }
 
 /// A top-up waiting to be paid.
@@ -84,6 +116,9 @@ pub struct Wallet {
     /// Derives the wallet's keys. The node's own identity, hashed, so a
     /// restored config restores the balance with it.
     seed: [u8; 64],
+    /// The unit this node sells. Holdings in it are somebody else's capacity;
+    /// holdings in anything else are money.
+    resource: String,
     path: PathBuf,
 }
 
@@ -101,7 +136,14 @@ impl Wallet {
     /// The seed is derived from the node's own secret, so the wallet is part of
     /// the node's identity rather than a separate thing to back up: restore the
     /// config on a new box and the proofs it holds are recoverable from it.
-    pub async fn open(path: impl Into<PathBuf>, seed: [u8; 64]) -> Result<Self> {
+    ///
+    /// `resource` is the unit this node sells, which is what tells a holding in
+    /// it apart from money.
+    pub async fn open(
+        path: impl Into<PathBuf>,
+        seed: [u8; 64],
+        resource: impl Into<String>,
+    ) -> Result<Self> {
         let path = path.into();
         if let Some(dir) = path.parent()
             && !dir.as_os_str().is_empty()
@@ -117,6 +159,7 @@ impl Wallet {
             wallets: Arc::new(Mutex::new(BTreeMap::new())),
             store: Arc::new(store),
             seed,
+            resource: resource.into(),
             path,
         })
     }
@@ -162,9 +205,9 @@ impl Wallet {
         info!(%mint, %unit, amount, "deposited");
         Ok(Holding {
             mint,
-            unit: unit.clone(),
+            kind: Kind::of(&unit, &self.resource),
+            unit,
             amount,
-            spendable: is_money(&unit),
         })
     }
 
@@ -193,9 +236,9 @@ impl Wallet {
 
     /// What is held, money first.
     ///
-    /// Money before vouchers because they answer different questions: money is
-    /// what this node can spend, and a peer's vouchers are what it has been
-    /// paid.
+    /// Money before prepaid transit because a node short of money cannot buy
+    /// from anybody, where a node short of one upstream's vouchers is only
+    /// short with that upstream.
     pub async fn balances(&self) -> Vec<Holding> {
         let wallets: Vec<((String, String), CdkWallet)> = self
             .wallets
@@ -213,18 +256,13 @@ impl Wallet {
             }
             holdings.push(Holding {
                 mint,
-                spendable: is_money(&unit),
+                kind: Kind::of(&unit, &self.resource),
                 unit,
                 amount,
             });
         }
 
-        holdings.sort_by(|a, b| {
-            b.spendable
-                .cmp(&a.spendable)
-                .then_with(|| a.unit.cmp(&b.unit))
-                .then_with(|| a.mint.cmp(&b.mint))
-        });
+        holdings.sort_by_key(|h| (h.kind != Kind::Money, h.unit.clone(), h.mint.clone()));
         holdings
     }
 
@@ -294,14 +332,6 @@ impl Wallet {
     }
 }
 
-/// Whether a unit is money — something a peer other than its issuer will take.
-///
-/// The resource unit is the exception rather than the rule: everything a node
-/// is paid in that is *not* the thing it sells is money to it.
-fn is_money(unit: &str) -> bool {
-    unit != "byte"
-}
-
 fn normalise(mint_url: &str) -> String {
     mint_url.trim_end_matches('/').to_string()
 }
@@ -347,7 +377,7 @@ mod tests {
     /// A wallet in a directory that removes itself.
     async fn wallet() -> (Wallet, tempdir::Dir) {
         let dir = tempdir::Dir::new();
-        let wallet = Wallet::open(dir.path().join("wallet.sqlite"), [7u8; 64])
+        let wallet = Wallet::open(dir.path().join("wallet.sqlite"), [7u8; 64], "byte")
             .await
             .expect("open");
         (wallet, dir)
@@ -391,12 +421,29 @@ mod tests {
     }
 
     #[test]
-    fn what_counts_as_money_is_everything_but_the_resource() {
-        // A byte-denominated voucher is a claim on one peer's capacity, and no
-        // peer but its issuer will take it.
-        assert!(is_money("sat"));
-        assert!(is_money("usd"));
-        assert!(!is_money("byte"));
+    fn anything_but_the_resource_is_money() {
+        // Money buys from whoever accepts its mint. Paper denominated in the
+        // thing this node sells is somebody else's capacity, bought and not yet
+        // spent, and only that somebody honours it.
+        assert_eq!(Kind::of("sat", "byte"), Kind::Money);
+        assert_eq!(Kind::of("usd", "byte"), Kind::Money);
+        assert_eq!(Kind::of("byte", "byte"), Kind::PrepaidTransit);
+
+        // And a node selling something else reads the same units differently:
+        // to one selling watt-hours, a byte voucher is money like any other.
+        assert_eq!(Kind::of("byte", "watt_hour"), Kind::Money);
+    }
+
+    #[test]
+    fn a_node_never_holds_its_own_vouchers() {
+        // Worth stating because the wallet's shape assumes it: a customer pays
+        // in the paper this node issued, and redeeming that cancels this node's
+        // own claim rather than adding to a balance. What selling puts in the
+        // wallet is money, deposited at the market.
+        //
+        // So every `PrepaidTransit` holding is by construction some *other*
+        // mint's, and there is no case where the issuer is this node.
+        assert_eq!(Kind::of("byte", "byte"), Kind::PrepaidTransit);
     }
 
     mod tempdir {

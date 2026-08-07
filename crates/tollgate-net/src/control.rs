@@ -651,7 +651,7 @@ mod tests {
 
         // A wallet of its own per test, in the same temporary place, so nothing
         // here touches a real balance.
-        let wallet = Wallet::open(path.with_extension("wallet"), [3u8; 64])
+        let wallet = Wallet::open(path.with_extension("wallet"), [3u8; 64], "byte")
             .await
             .expect("open a wallet");
 
