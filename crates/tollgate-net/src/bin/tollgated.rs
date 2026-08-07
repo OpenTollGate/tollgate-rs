@@ -186,6 +186,28 @@ async fn main() -> Result<()> {
         tracing::warn!("this node takes no paper as payment, so nobody can buy its vouchers here");
     }
 
+    // A byte source on the mesh. Off unless asked for: it is an instrument, and
+    // an unauthenticated one, so a node that was never told to serve it should
+    // not be.
+    if file.speedtest.enabled {
+        let (listen, settings) = file
+            .speedtest
+            .resolve()
+            .context("resolve the speedtest configuration")?;
+        tokio::spawn(async move {
+            if let Err(e) =
+                tollgate_net::speedtest::serve(settings, listen, std::future::pending()).await
+            {
+                tracing::error!(error = %format!("{e:#}"), "the speedtest stopped");
+            }
+        });
+        info!(
+            %listen,
+            streams = file.speedtest.streams,
+            "speedtest serving"
+        );
+    }
+
     let channels = Arc::new(
         SpilmanChannels::new(SpilmanConfig {
             mint: Arc::clone(&mint),

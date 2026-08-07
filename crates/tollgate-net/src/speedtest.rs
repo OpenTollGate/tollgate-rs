@@ -260,7 +260,10 @@ async fn up(State(test): State<Speedtest>, request: Request) -> Response {
                     debug!(bytes, cap = test.config.max_bytes, "upload over the cap");
                     return (
                         StatusCode::PAYLOAD_TOO_LARGE,
-                        format!("this node takes at most {} bytes at once", test.config.max_bytes),
+                        format!(
+                            "this node takes at most {} bytes at once",
+                            test.config.max_bytes
+                        ),
                     )
                         .into_response();
                 }
@@ -274,7 +277,11 @@ async fn up(State(test): State<Speedtest>, request: Request) -> Response {
         }
     }
 
-    ([(header::CACHE_CONTROL, "no-store")], Json(Received { bytes })).into_response()
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(Received { bytes }),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -432,6 +439,9 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let page = std::str::from_utf8(&body).expect("the page is text");
         assert!(!page.contains("http://"), "the page loads something remote");
-        assert!(!page.contains("https://"), "the page loads something remote");
+        assert!(
+            !page.contains("https://"),
+            "the page loads something remote"
+        );
     }
 }

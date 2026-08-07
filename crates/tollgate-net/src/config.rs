@@ -355,6 +355,74 @@ pub enum ForwardingMode {
     Fips,
 }
 
+/// A byte source clients can measure this node against.
+///
+/// Off unless an operator turns it on. The endpoints are unauthenticated, and
+/// on a node that is not gating transit they are a free firehose — see
+/// [`crate::speedtest`] for why that is the right default even though the
+/// intended deployment, behind a FIPS transit policy, is not one.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SpeedtestSection {
+    /// Whether to serve it at all.
+    pub enabled: bool,
+    /// Where to serve it.
+    ///
+    /// Defaults to every interface on both families, because the client this is
+    /// for arrives over `fips0` on an IPv6 address and `0.0.0.0` would not hear
+    /// it.
+    pub listen: String,
+    /// Ceiling on a single request, in either direction.
+    pub max_bytes: u64,
+    /// How many flows the page opens at once.
+    pub streams: u8,
+    /// How long the page discards before it starts counting.
+    pub warmup_ms: u32,
+    /// How long it counts for, after the warm-up.
+    pub duration_ms: u32,
+}
+
+impl Default for SpeedtestSection {
+    fn default() -> Self {
+        let defaults = crate::speedtest::Config::default();
+        Self {
+            enabled: false,
+            listen: "[::]:3339".into(),
+            max_bytes: defaults.max_bytes,
+            streams: defaults.streams,
+            warmup_ms: defaults.warmup_ms,
+            duration_ms: defaults.duration_ms,
+        }
+    }
+}
+
+impl SpeedtestSection {
+    /// The address to serve on, and how.
+    pub fn resolve(&self) -> Result<(SocketAddr, crate::speedtest::Config)> {
+        let listen: SocketAddr = self
+            .listen
+            .parse()
+            .with_context(|| format!("speedtest.listen {:?} is not an address", self.listen))?;
+        // A test with no flows measures nothing, and one with no window divides
+        // by zero on the page rather than here.
+        if self.streams == 0 {
+            bail!("speedtest.streams must be at least one");
+        }
+        if self.duration_ms == 0 {
+            bail!("speedtest.duration_ms must be above zero");
+        }
+        Ok((
+            listen,
+            crate::speedtest::Config {
+                max_bytes: self.max_bytes,
+                streams: self.streams,
+                warmup_ms: self.warmup_ms,
+                duration_ms: self.duration_ms,
+            },
+        ))
+    }
+}
+
 /// Per-peer overrides.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]

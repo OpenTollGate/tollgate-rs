@@ -65,9 +65,13 @@ cashu = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.16.0", package 
 axum = { version = "0.8" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 serde_json = { version = "1" }
+qrcode = { version = "0.14.1", default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+# Driving an axum Router without binding a socket, which is how the speedtest's
+# handlers are tested.
+tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true

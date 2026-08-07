@@ -1,8 +1,8 @@
 //! A live view of what a TollGate node is doing.
 //!
-//! Reads the node's control socket and redraws. Two tabs, because the node does
-//! two separable things: it carries traffic for peers, and it sells the
-//! vouchers that pay for it.
+//! Reads the node's control socket and redraws. Three tabs, because the node
+//! does three separable things: it carries traffic for peers, it sells the
+//! vouchers that pay for it, and it holds what it is paid.
 //!
 //! The peers tab is deliberately organised around the thing the protocol makes
 //! hard to see: **two independent payment streams per peer**. What a peer
@@ -12,10 +12,15 @@
 //! relationship the protocol does not have. A row is a summary; Enter opens
 //! everything the node knows about that peering.
 //!
-//! The pricing tab is the one place an operator changes something. The price is
-//! the one setting worth moving while a node runs — an uplink becomes scarce,
-//! or stops being — and moving it touches no session, grant or channel: it
-//! decides what the *next* buyer of vouchers pays, and nothing already sold.
+//! The pricing tab is where an operator changes what the node charges. The
+//! price is the one setting worth moving while a node runs — an uplink becomes
+//! scarce, or stops being — and moving it touches no session, grant or channel:
+//! it decides what the *next* buyer of vouchers pays, and nothing already sold.
+//!
+//! The wallet tab is where the money is, and the only place the display asks
+//! anything of the outside world: topping up produces an invoice somebody has
+//! to pay, so it is shown as a QR as well as a string. The thing paying it is
+//! usually a phone.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -738,9 +743,9 @@ fn pricing_tab(frame: &mut Frame, app: &mut App, area: Rect) {
 /// that peer will honour.
 fn wallet_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     // An invoice takes the whole tab while it is unpaid: it is the one thing on
-    // screen the operator has to act on, and a bolt11 string is long.
+    // screen the operator has to act on, and a QR wants the room.
     if let Some(invoice) = &app.invoice {
-        frame.render_widget(invoice_panel(invoice), area);
+        invoice_panel(frame, invoice, area);
         return;
     }
 
@@ -862,9 +867,19 @@ fn held(holding: &Holding) -> String {
 }
 
 /// The invoice for a top-up, and nothing else on screen.
-fn invoice_panel(invoice: &TopUp) -> Paragraph<'_> {
+///
+/// A QR beside the string, because the thing paying is a phone. The string
+/// stays: a QR is no use over ssh into a terminal being read through a scroll
+/// buffer, and it is what an operator copies into a wallet on the same machine.
+fn invoice_panel(frame: &mut Frame, invoice: &TopUp, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" top up — esc to dismiss ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
     let dim = Style::default().fg(Color::DarkGray);
-    Paragraph::new(vec![
+    let header = Paragraph::new(vec![
         Line::from(vec![
             Span::styled("buying ", dim),
             Span::styled(
@@ -874,27 +889,83 @@ fn invoice_panel(invoice: &TopUp) -> Paragraph<'_> {
             Span::styled(" at ", dim),
             Span::raw(invoice.mint.clone()),
         ]),
-        Line::from(""),
         Line::from(Span::styled(
-            "Pay this invoice. The node collects what it buys by itself, and the",
+            "Scan or paste. The node collects what it buys by itself, and the \
+             balance appears when it lands — there is nothing to confirm.",
             dim,
-        )),
-        Line::from(Span::styled(
-            "balance above appears when it lands — there is nothing to confirm.",
-            dim,
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            invoice.request.clone(),
-            Style::default().fg(Color::Yellow),
         )),
     ])
-    .wrap(Wrap { trim: false })
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" top up — esc to dismiss "),
-    )
+    .wrap(Wrap { trim: false });
+
+    let qr = qr_lines(&invoice.request);
+    // Height first: a QR that does not fit whole is not a QR, so if the pane is
+    // too short the string gets the room instead.
+    let qr_height = qr.len() as u16;
+    let qr_width = qr.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
+    let fits = qr_height + 3 <= inner.height && qr_width + 20 <= inner.width;
+
+    let [head, body] = Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).areas(inner);
+    frame.render_widget(header, head);
+
+    if !fits {
+        let mut lines = vec![Line::from(Span::styled(
+            invoice.request.clone(),
+            Style::default().fg(Color::Yellow),
+        ))];
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("(a {qr_width}×{qr_height} QR needs a taller window)"),
+            dim,
+        )));
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
+        return;
+    }
+
+    let [left, right] =
+        Layout::horizontal([Constraint::Length(qr_width + 2), Constraint::Min(20)]).areas(body);
+
+    // Black on white, whatever the terminal's own colours are: a scanner needs
+    // dark modules on a light field, and a QR drawn in the terminal's
+    // foreground colour on its background is as likely to be the negative.
+    frame.render_widget(
+        Paragraph::new(
+            qr.into_iter()
+                .map(|line| Line::from(Span::raw(line)))
+                .collect::<Vec<_>>(),
+        )
+        .style(Style::default().fg(Color::Black).bg(Color::White)),
+        left,
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            invoice.request.clone(),
+            Style::default().fg(Color::Yellow),
+        ))
+        .wrap(Wrap { trim: false }),
+        right,
+    );
+}
+
+/// A bolt11 invoice as terminal-sized QR rows.
+///
+/// Uppercased first. A bech32 invoice is case-insensitive, and uppercase is
+/// what lets the encoder use alphanumeric mode instead of binary — roughly a
+/// third fewer modules, which is the difference between a QR that fits an
+/// ordinary window and one that does not. Two module rows per line of text,
+/// for the same reason.
+fn qr_lines(invoice: &str) -> Vec<String> {
+    use qrcode::QrCode;
+    use qrcode::render::unicode;
+
+    let Ok(code) = QrCode::new(invoice.to_uppercase().as_bytes()) else {
+        return Vec::new();
+    };
+    code.render::<unicode::Dense1x2>()
+        .quiet_zone(true)
+        .build()
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 /// What a quantity costs in one issuer's paper.
@@ -1056,4 +1127,55 @@ fn duration(ms: u64) -> String {
 
 fn short(hex_key: &str) -> String {
     hex_key.chars().take(8).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A real bolt11 invoice, from the fake mint the topologies run.
+    const INVOICE: &str = "lnbc2500n1p48t9kydqqpp5atkdtq5tetqkr3acy4cxhgzc0pn9lw7pyahumh70g43qy9qt2r9qsp59g4z52329g4z52329g4z52329g4z52329g4z52329g4z52329g4q9qrsgq";
+
+    #[test]
+    fn an_invoice_becomes_a_square_qr() {
+        let lines = qr_lines(INVOICE);
+        assert!(!lines.is_empty(), "an invoice should encode");
+
+        // Two module rows per line of text, so the drawing is half as tall as
+        // it is wide — give or take the odd row.
+        let width = lines.iter().map(|l| l.chars().count()).max().unwrap();
+        let height = lines.len();
+        assert!(
+            height * 2 >= width - 2 && height * 2 <= width + 2,
+            "{width}×{height} is not a square QR"
+        );
+        assert!(
+            width < 80,
+            "{width} columns will not fit an ordinary window"
+        );
+    }
+
+    #[test]
+    fn uppercasing_the_invoice_makes_the_qr_smaller() {
+        // Bech32 is case-insensitive, and uppercase is what lets the encoder
+        // use alphanumeric mode instead of binary. It is the difference between
+        // a QR that fits a window and one that does not.
+        use qrcode::QrCode;
+        let binary = QrCode::new(INVOICE.as_bytes()).expect("encode").width();
+        let alphanumeric = QrCode::new(INVOICE.to_uppercase().as_bytes())
+            .expect("encode")
+            .width();
+        assert!(
+            alphanumeric < binary,
+            "uppercase {alphanumeric} should beat mixed case {binary}"
+        );
+    }
+
+    #[test]
+    fn something_that_will_not_encode_is_not_a_panic() {
+        // 4 kB is past what any QR version holds. A display that fell over
+        // because a mint wrote a long invoice would be worse than one showing
+        // the string alone.
+        assert!(qr_lines(&"x".repeat(4096)).is_empty());
+    }
 }
