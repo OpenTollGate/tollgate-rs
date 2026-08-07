@@ -10,19 +10,28 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Gated on the packaging tree being present — see the note in
-  # package-openwrt.yml. The workflow has to be on the default branch for the
-  # "Run workflow" button to exist; `packaging/` arrives with the branch that
-  # built it.
   version:
     runs-on: ubuntu-latest
-    if: hashFiles('packaging/macos/build-pkg.sh') != ''
     outputs:
       package_version: ${{ steps.version.outputs.package_version }}
+      packaging: ${{ steps.guard.outputs.present }}
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+
+      # Gated on the packaging tree being present on this ref — see the note in
+      # package-openwrt.yml for why the workflow can be somewhere the scripts
+      # are not, and why this is a step rather than a job-level `hashFiles`.
+      - name: Is the packaging tree on this ref?
+        id: guard
+        run: |
+          if [ -f packaging/macos/build-pkg.sh ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::packaging/ is not on this ref; nothing to build"
+          fi
 
       - name: Derive a package version
         id: version
@@ -43,6 +52,7 @@ jobs:
     name: Build .pkg (${{ matrix.arch }})
     runs-on: macos-latest
     needs: [version]
+    if: needs.version.outputs.packaging == 'true'
     strategy:
       fail-fast: false
       matrix:
