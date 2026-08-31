@@ -1,0 +1,270 @@
+; TollGate Protocol v1 — CDDL Schema
+; Canonical CBOR wire format definition per RFC 8949
+;
+; Source: docs/design/core/tollgate-protocol.md
+; CDDL syntax: RFC 8610, RFC 9165, RFC 9682
+;
+; All messages are CBOR maps with integer keys for compactness.
+; Field key 0 is the message type discriminator (u8).
+
+start = tollgate-message
+
+; ============================================================================
+; Top-level message union
+; ============================================================================
+
+tollgate-message = announce /
+                   price-sheet /
+                   accept /
+                   channel-ready /
+                   metering-report /
+                   balance-update /
+                   balance-ack /
+                   bootstrap-token /
+                   bootstrap-ack /
+                   rollover-init /
+                   rollover-ready /
+                   channel-close /
+                   close-ack /
+                   reject /
+                   disconnect
+
+; ============================================================================
+; Shared types
+; ============================================================================
+
+pubkey = bstr .size 33          ; compressed secp256k1 public key
+channel-id = bstr .size 32     ; Spilman channel ID
+signature = bstr .size 64      ; Schnorr signature
+product-id = bstr .size 32     ; SHA-256 of full product (including pricing)
+option-id = bstr .size 32      ; SHA-256(mint_url || mint_unit)
+reason-code = uint .size 1     ; u8 reason code
+
+; ============================================================================
+; 0x00 Announce
+; First message sent by each peer. No prior handshake required.
+; ============================================================================
+
+announce = {
+  0: 0,                         ; type: Announce
+  1: protocol-version,          ; protocol version
+  2: pubkey,                    ; sender's compressed secp256k1 public key
+  3: tstr,                      ; unit: "bytes", "wh", "ml", etc.
+  4: capabilities,              ; capability bitfield
+}
+
+protocol-version = uint .size 1  ; current: 1
+
+capabilities = uint .size 4     ; u32 bitfield
+; Bit 0x01: SPILMAN — peer supports Spilman payment channels
+; Bits 0x02–0x80000000: reserved, must be zero in v1
+
+; ============================================================================
+; 0x01 PriceSheet
+; Sent by each peer after Announce. Contains product offerings with pricing.
+; ============================================================================
+
+price-sheet = {
+  0: 1,                         ; type: PriceSheet
+  1: [+ product],               ; array of one or more products
+  2: interval-range,            ; metering interval range [min_ms, max_ms]
+}
+
+product = {
+  1: product-id,                ; SHA-256 of full product
+  2: bstr,                      ; CBOR-encoded implementation-specific extensions
+  3: pricing-scale,             ; scale divisor for sub-sat precision (default 1000)
+  4: [+ mint-option],           ; array of one or more mint options
+}
+
+pricing-scale = uint             ; default: 1000
+
+mint-option = {
+  1: option-id,                 ; SHA-256(mint_url || mint_unit)
+  2: tstr,                      ; mint URL
+  3: scaled-price,              ; price_per_second (scaled integer)
+  4: scaled-price,              ; price_per_unit (scaled integer)
+  5: tstr,                      ; mint unit: "sat", "msat", "usd"
+}
+
+scaled-price = int               ; i64 — signed, supports negative pricing
+; Actual price = scaled-price / pricing-scale
+
+interval-range = [uint .size 4, uint .size 4]  ; [min_interval_ms, max_interval_ms]
+
+; ============================================================================
+; 0x02 Accept
+; Accept a price sheet. References chosen product and mint option by hash.
+; ============================================================================
+
+accept = {
+  0: 2,                         ; type: Accept
+  1: product-id,                ; accepted product
+  2: option-id,                 ; chosen mint option
+  3: interval-range,            ; peer's interval range
+  4: bstr,                      ; Spilman funding proofs (CBOR-encoded)
+}
+
+; ============================================================================
+; 0x03 ChannelReady
+; Confirm Spilman channel is funded and active.
+; ============================================================================
+
+channel-ready = {
+  0: 3,                         ; type: ChannelReady
+  1: channel-id,                ; Spilman channel ID
+  2: direction,                 ; channel direction
+}
+
+direction = uint .size 1         ; 0 = A→B, 1 = B→A
+
+; ============================================================================
+; 0x04 MeteringReport
+; Unsigned resource stats exchanged at each metering interval.
+; Counters are cumulative since session start (ChannelReady baseline).
+; ============================================================================
+
+metering-report = {
+  0: 4,                         ; type: MeteringReport
+  1: uint,                      ; elapsed_ms — milliseconds since session start
+  2: uint,                      ; delivered — cumulative units delivered TO peer
+  3: uint,                      ; received — cumulative units received FROM peer
+  ? 4: nullable-product-id,     ; updated product ID for next interval (null if unchanged)
+  ? 5: nullable-pricing,        ; updated pricing if product changed (null if unchanged)
+}
+
+nullable-product-id = null / product-id
+
+nullable-pricing = null / [+ mint-option]  ; new pricing array if product changed
+
+; ============================================================================
+; 0x05 BalanceUpdate
+; Sent by net debtor. Signed Spilman balance update for net amount owed.
+; ============================================================================
+
+balance-update = {
+  0: 5,                         ; type: BalanceUpdate
+  1: channel-id,                ; debtor's Spilman channel
+  2: uint,                      ; cumulative_balance — new cumulative balance
+  3: signature,                 ; Schnorr signature over balance update
+  4: uint,                      ; net_amount — the net amount charged this interval
+}
+
+; ============================================================================
+; 0x06 BalanceAck
+; Sent by creditor to confirm balance update.
+; ============================================================================
+
+balance-ack = {
+  0: 6,                         ; type: BalanceAck
+  1: channel-id,                ; channel ID
+  2: uint,                      ; accepted_balance — cumulative balance acknowledged
+}
+
+; ============================================================================
+; 0x07 BootstrapToken
+; Regular Cashu token for pre-channel bootstrap payment.
+; ============================================================================
+
+bootstrap-token = {
+  0: 7,                         ; type: BootstrapToken
+  1: bstr,                      ; raw Cashu token (NUT-00 format)
+}
+
+; ============================================================================
+; 0x08 BootstrapAck
+; Acknowledge bootstrap token verification result.
+; ============================================================================
+
+bootstrap-ack = {
+  0: 8,                         ; type: BootstrapAck
+  1: bootstrap-status,          ; 0 = accepted (verified), 1 = rejected
+  ? 2: null / tstr,             ; rejection reason (null if accepted)
+}
+
+bootstrap-status = uint .size 1  ; 0 = accepted, 1 = rejected
+
+; ============================================================================
+; 0x09 RolloverInit
+; Initiate channel rollover when outgoing channel approaches exhaustion.
+; ============================================================================
+
+rollover-init = {
+  0: 9,                         ; type: RolloverInit
+  1: channel-id,                ; old (exhausting) channel ID
+  2: bstr,                      ; Spilman funding proofs for new channel
+}
+
+; ============================================================================
+; 0x0A RolloverReady
+; New channel funded and ready. Old channel continues draining to 100%.
+; ============================================================================
+
+rollover-ready = {
+  0: 10,                        ; type: RolloverReady
+  1: channel-id,                ; old channel ID
+  2: channel-id,                ; new channel ID
+}
+
+; ============================================================================
+; 0x0B ChannelClose
+; Request cooperative close of a channel.
+; ============================================================================
+
+channel-close = {
+  0: 11,                        ; type: ChannelClose
+  1: channel-id,                ; channel to close
+  2: uint,                      ; proposed final balance
+  3: signature,                 ; signature over final balance
+  4: close-reason,              ; reason for close
+}
+
+close-reason = uint .size 1
+; 0 = normal
+; 1 = price_rejected
+; 2 = peer_leaving
+
+; ============================================================================
+; 0x0C CloseAck
+; Acknowledge cooperative close.
+; ============================================================================
+
+close-ack = {
+  0: 12,                        ; type: CloseAck
+  1: channel-id,                ; channel ID
+  2: uint,                      ; agreed final balance
+}
+
+; ============================================================================
+; 0x0D Reject
+; General-purpose rejection for any proposal.
+; ============================================================================
+
+reject = {
+  0: 13,                        ; type: Reject
+  1: uint .size 1,              ; rejected_type — message type being rejected
+  2: reason-code,               ; machine-readable reason code
+  ? 3: null / tstr,             ; human-readable reason text
+}
+
+; Reason codes:
+;   0x01 = price too high
+;   0x02 = mint not accepted
+;   0x03 = unit not accepted
+;   0x04 = metering interval out of range
+;   0x05 = channel funding invalid
+;   0x06 = balance verification failed
+;   0x07 = transit loss tolerance exceeded
+;   0x08 = product changed, renegotiation required
+;   0x09 = protocol version unsupported
+;   0xFF = other (see reason_text)
+
+; ============================================================================
+; 0x0E Disconnect
+; Orderly teardown of the entire TollGate relationship.
+; ============================================================================
+
+disconnect = {
+  0: 14,                        ; type: Disconnect
+  1: reason-code,               ; same reason codes as Reject
+}
