@@ -19,8 +19,9 @@ pub const MAX_FRAME_LEN: usize = u16::MAX as usize;
 pub enum FrameError {
     /// A message body exceeds [`MAX_FRAME_LEN`].
     TooLong,
-    /// The buffer ended in the middle of a frame.
-    Truncated,
+    /// The buffer ended in the middle of a frame. The offset is the byte
+    /// position in the input buffer where truncation was detected.
+    Truncated { offset: usize },
 }
 
 /// Append `body` to `out` as a length-prefixed frame (2-byte little-endian
@@ -45,18 +46,18 @@ pub fn frame(body: &[u8]) -> Result<Vec<u8>, FrameError> {
 /// An empty buffer yields an empty list.
 pub fn decode_frames(buf: &[u8]) -> Result<Vec<&[u8]>, FrameError> {
     let mut frames = Vec::new();
-    let mut rest = buf;
-    while !rest.is_empty() {
-        if rest.len() < 2 {
-            return Err(FrameError::Truncated);
+    let mut offset = 0usize;
+    while offset < buf.len() {
+        if buf.len() - offset < 2 {
+            return Err(FrameError::Truncated { offset });
         }
-        let len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
-        let end = 2 + len;
-        if rest.len() < end {
-            return Err(FrameError::Truncated);
+        let len = u16::from_le_bytes([buf[offset], buf[offset + 1]]) as usize;
+        let end = offset + 2 + len;
+        if buf.len() < end {
+            return Err(FrameError::Truncated { offset });
         }
-        frames.push(&rest[2..end]);
-        rest = &rest[end..];
+        frames.push(&buf[offset + 2..end]);
+        offset = end;
     }
     Ok(frames)
 }
@@ -100,7 +101,7 @@ mod tests {
 
     #[test]
     fn truncated_length_prefix_errors() {
-        assert_eq!(decode_frames(&[0x05]), Err(FrameError::Truncated));
+        assert_eq!(decode_frames(&[0x05]), Err(FrameError::Truncated { offset: 0 }));
     }
 
     #[test]
@@ -108,7 +109,7 @@ mod tests {
         // Says 5 bytes follow, but only 2 are present.
         assert_eq!(
             decode_frames(&[0x05, 0x00, 0xAA, 0xBB]),
-            Err(FrameError::Truncated)
+            Err(FrameError::Truncated { offset: 0 })
         );
     }
 
