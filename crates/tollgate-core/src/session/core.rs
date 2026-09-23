@@ -226,20 +226,25 @@ impl Sessions {
         });
         out.push(Action::Send {
             peer,
-            msg: self.our_offer(),
+            msg: self.our_offer(&policy),
         });
         self.refresh(peer, now, out);
     }
 
-    /// What this node advertises: which mints it will take, the unit, the
-    /// window range, and one unsigned multiplier. No price anywhere.
-    fn our_offer(&self) -> Message {
+    /// What this node advertises to one peer: which mints it will take, the
+    /// unit, the window range, and one unsigned multiplier. No price anywhere.
+    ///
+    /// The multiplier is the one that peer's grant will be drawn down under,
+    /// override included. The payer sizes its purchases from it, so
+    /// advertising the node-wide value to a peer we surcharge harder would
+    /// have it under-buy and be shaped below what it needs.
+    fn our_offer(&self, policy: &PeerPolicy) -> Message {
         Message::Offer(Offer {
             accepted_mints: self.node.accepted_mints.clone(),
             unit: self.node.unit.clone(),
             min_window_ms: self.node.grants.min_window_ms,
             max_window_ms: self.node.grants.max_window_ms,
-            received_multiplier: self.node.received_multiplier,
+            received_multiplier: policy.multiplier(&self.node),
         })
     }
 

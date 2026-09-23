@@ -940,3 +940,67 @@ fn a_peer_that_does_not_surcharge_is_bought_for_on_download_alone() {
         "at m = 0 the peer pays for our uploads out of its own grant"
     );
 }
+
+#[test]
+fn a_peer_with_an_overridden_multiplier_is_offered_it_and_buys_for_it() {
+    // The node-wide multiplier is 0, but B surcharges A at m = 2. The Offer is
+    // how A learns that, so it has to carry the override: advertise 0 and A
+    // buys for its download alone while B draws its uploads at two apiece.
+    let mut link = Link::new();
+    let (a, b) = (link.a.id, link.b.id);
+    link.b.sessions.set_peer_policy(
+        a,
+        PeerPolicy {
+            received_multiplier: Some(2),
+            ..PeerPolicy::default()
+        },
+    );
+    link.connect();
+
+    let offer = link
+        .a
+        .sessions
+        .peer(&b)
+        .expect("session")
+        .offer
+        .as_ref()
+        .expect("B offered");
+    assert_eq!(
+        offer.received_multiplier, 2,
+        "the override, not the default"
+    );
+
+    // A wants 1 M/s down, and is pushing 500 k/s up.
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    link.now = Millis(1_000);
+    link.deliver(
+        true,
+        Event::Metered {
+            peer: b,
+            counters: Counters {
+                delivered: 500_000,
+                received: 0,
+            },
+        },
+    );
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+
+    // 1 M down + 500 k up x 2 = 2 M/s of draw, at 125% headroom.
+    assert_eq!(
+        link.b_shapes_a(),
+        2_500_000,
+        "the purchase should cover the surcharge B actually applies"
+    );
+}
