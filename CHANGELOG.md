@@ -19,6 +19,11 @@ Nothing has been released yet. Everything below is on `master` and will ship as
   `max_rate` leaves after its other peers' grants re-buys inside one round
   trip.
 
+- Free peering is on the wire: an `Offer` carries key 5 when the sender will
+  not charge that peer, so the peer funds no channel toward it and buys
+  nothing. The key is written only when true, so an ordinary `Offer` is
+  unchanged and a peer that predates it decodes as charging.
+
 - `tollgate-core`: grants, buying, metering and admission control, sans-IO and
   `no_std` + `alloc`, with tests written against the design documents' worked
   examples. A grant is a quantity paired with a window and buys a **rate**; a

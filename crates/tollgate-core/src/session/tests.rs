@@ -669,6 +669,130 @@ fn a_peer_the_operator_does_not_charge_is_free_and_unmetered() {
     assert_eq!(link.a.access.get(&link.b.id), Some(&AccessLevel::Active));
 }
 
+/// The Offer a node sends a freshly connected peer.
+fn opening_offer(node: &mut Node, peer: PubKey) -> tollgate_protocol::Offer {
+    node.sessions
+        .handle(Event::PeerConnected { peer }, Millis(0))
+        .into_iter()
+        .find_map(|a| match a {
+            Action::Send {
+                msg: Message::Offer(o),
+                ..
+            } => Some(o),
+            _ => None,
+        })
+        .expect("an Offer on connect")
+}
+
+#[test]
+fn an_offer_says_whether_the_sender_charges_that_peer() {
+    let mut link = Link::new();
+    let (a, b) = (link.a.id, link.b.id);
+    link.b.sessions.set_peer_policy(
+        a,
+        PeerPolicy {
+            no_charge: true,
+            ..PeerPolicy::default()
+        },
+    );
+
+    assert!(opening_offer(&mut link.b, a).no_charge);
+    // Default unchanged: a node charges unless the operator said otherwise.
+    assert!(!opening_offer(&mut link.a, b).no_charge);
+}
+
+#[test]
+fn a_peer_that_is_not_charged_funds_nothing_toward_the_node_that_said_so() {
+    // One-sided: B does not charge A, A still charges B. So one channel, the
+    // one B funds toward A — "a peering can legitimately run with one channel".
+    let mut link = Link::new();
+    let (a, b) = (link.a.id, link.b.id);
+    link.b.sessions.set_peer_policy(
+        a,
+        PeerPolicy {
+            no_charge: true,
+            ..PeerPolicy::default()
+        },
+    );
+    link.connect();
+
+    let a_view = link.a.sessions.peer(&b).expect("session");
+    assert!(a_view.buyer.active().is_none(), "A funds nothing toward B");
+    assert!(!a_view.grant.channels().is_empty(), "B still pays A");
+    let b_view = link.b.sessions.peer(&a).expect("session");
+    assert!(b_view.grant.channels().is_empty(), "nothing to receive on");
+    assert!(b_view.buyer.active().is_some(), "B pays A on this one");
+
+    assert_eq!(link.b.access.get(&a), Some(&AccessLevel::Free));
+    assert_eq!(link.a.access.get(&b), Some(&AccessLevel::Active));
+
+    // Demand toward a peer that does not charge buys nothing: no TopUp.
+    let actions = link.a.sessions.handle(
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+        Millis(0),
+    );
+    assert!(
+        !actions.iter().any(|x| matches!(
+            x,
+            Action::SignAndSendTopUp { .. } | Action::FundChannel { .. }
+        )),
+        "A bought from a peer that does not charge it: {actions:?}"
+    );
+
+    // B's demand toward A is still bought, and A shapes B to it.
+    link.deliver(
+        false,
+        Event::DemandObserved {
+            peer: a,
+            rate: 1_000_000,
+        },
+    );
+    assert_eq!(link.a_shapes_b(), 1_250_000);
+    assert_eq!(link.b_shapes_a(), u64::MAX, "unmetered");
+}
+
+#[test]
+fn when_neither_side_charges_there_are_no_channels_and_no_topups() {
+    let mut link = Link::new();
+    let (a, b) = (link.a.id, link.b.id);
+    let free = PeerPolicy {
+        no_charge: true,
+        ..PeerPolicy::default()
+    };
+    link.a.sessions.set_peer_policy(b, free);
+    link.b.sessions.set_peer_policy(a, free);
+    link.connect();
+
+    for (node, peer) in [(&link.a, b), (&link.b, a)] {
+        let session = node.sessions.peer(&peer).expect("session");
+        assert!(session.buyer.active().is_none(), "nothing funded");
+        assert!(session.grant.channels().is_empty(), "nothing received");
+        assert_eq!(node.access.get(&peer), Some(&AccessLevel::Free));
+        assert_eq!(node.shaping.get(&peer), Some(&u64::MAX));
+    }
+
+    for (node, peer) in [(&mut link.a, b), (&mut link.b, a)] {
+        let mut actions = node.sessions.handle(
+            Event::DemandObserved {
+                peer,
+                rate: 1_000_000,
+            },
+            Millis(1_000),
+        );
+        actions.extend(node.sessions.handle(Event::Tick, Millis(2_000)));
+        assert!(
+            !actions.iter().any(|x| matches!(
+                x,
+                Action::SignAndSendTopUp { .. } | Action::FundChannel { .. }
+            )),
+            "free peering bought something: {actions:?}"
+        );
+    }
+}
+
 #[test]
 fn a_blocked_peer_is_dropped_without_a_session() {
     let mut link = Link::new();
@@ -844,6 +968,7 @@ fn a_peer_that_has_merely_stopped_paying_is_kept() {
                     min_window_ms: 200,
                     max_window_ms: 30_000,
                     received_multiplier: 0,
+                    no_charge: false,
                 }),
             },
         );

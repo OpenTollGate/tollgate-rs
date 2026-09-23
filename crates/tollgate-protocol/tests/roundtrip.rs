@@ -35,10 +35,22 @@ fn all_messages() -> Vec<Message> {
             min_window_ms: 200,
             max_window_ms: 30_000,
             received_multiplier: 2,
+            no_charge: false,
+        }),
+        // Free peering: the sender will not charge the peer.
+        Message::Offer(Offer {
+            accepted_mints: vec!["https://hub.example/mint".into()],
+            unit: "byte".into(),
+            min_window_ms: 200,
+            max_window_ms: 30_000,
+            received_multiplier: 0,
+            no_charge: true,
         }),
         Message::Accept(Accept {
             funding: vec![0xAA; 64],
         }),
+        // Accept with no funding, which is what an uncharged payer sends.
+        Message::Accept(Accept { funding: vec![] }),
         Message::ChannelReady(ChannelReady {
             channel_id: channel(3),
         }),
@@ -226,9 +238,94 @@ fn an_offer_with_no_mints_is_malformed() {
         min_window_ms: 200,
         max_window_ms: 30_000,
         received_multiplier: 0,
+        no_charge: false,
     });
     let mut buf = Vec::new();
     encode(&msg, &mut buf).expect("encode");
+    assert_eq!(decode(&buf), Err(Error::EmptyMintList));
+}
+
+fn offer(no_charge: bool) -> Offer {
+    Offer {
+        accepted_mints: vec!["https://hub.example/mint".into()],
+        unit: "byte".into(),
+        min_window_ms: 200,
+        max_window_ms: 30_000,
+        received_multiplier: 0,
+        no_charge,
+    }
+}
+
+#[test]
+fn an_offer_that_charges_does_not_carry_the_no_charge_key() {
+    // Absent is the default, so an ordinary Offer encodes exactly as it did
+    // before key 5 existed — five pairs, and no `5` among them.
+    let mut buf = Vec::new();
+    encode(&Message::Offer(offer(false)), &mut buf).expect("encode");
+    let mut d = minicbor::Decoder::new(&buf);
+    assert_eq!(d.map().unwrap(), Some(5));
+
+    buf.clear();
+    encode(&Message::Offer(offer(true)), &mut buf).expect("encode");
+    let mut d = minicbor::Decoder::new(&buf);
+    assert_eq!(d.map().unwrap(), Some(6));
+}
+
+#[test]
+fn an_offer_without_key_5_decodes_as_charging() {
+    // Built by hand: the Offer of a peer that predates the field.
+    let mut buf = Vec::new();
+    let mut e = minicbor::Encoder::new(&mut buf);
+    e.map(5).unwrap();
+    e.u8(0).unwrap().u8(MsgType::Offer as u8).unwrap();
+    e.u8(1).unwrap().array(1).unwrap();
+    e.str("https://hub.example/mint").unwrap();
+    e.u8(2).unwrap().str("byte").unwrap();
+    e.u8(3)
+        .unwrap()
+        .array(2)
+        .unwrap()
+        .u32(200)
+        .unwrap()
+        .u32(30_000)
+        .unwrap();
+    e.u8(4).unwrap().u16(0).unwrap();
+
+    assert_eq!(decode(&buf).expect("decode"), Message::Offer(offer(false)));
+}
+
+#[test]
+fn an_offer_with_key_5_false_decodes_as_charging() {
+    // Nothing writes it, but a peer that does means the same as leaving it out.
+    let mut buf = Vec::new();
+    let mut e = minicbor::Encoder::new(&mut buf);
+    e.map(6).unwrap();
+    e.u8(0).unwrap().u8(MsgType::Offer as u8).unwrap();
+    e.u8(1).unwrap().array(1).unwrap();
+    e.str("https://hub.example/mint").unwrap();
+    e.u8(2).unwrap().str("byte").unwrap();
+    e.u8(3)
+        .unwrap()
+        .array(2)
+        .unwrap()
+        .u32(200)
+        .unwrap()
+        .u32(30_000)
+        .unwrap();
+    e.u8(4).unwrap().u16(0).unwrap();
+    e.u8(5).unwrap().bool(false).unwrap();
+
+    assert_eq!(decode(&buf).expect("decode"), Message::Offer(offer(false)));
+}
+
+#[test]
+fn a_no_charge_offer_still_needs_a_mint() {
+    // Not charging this peer says nothing about what the node takes from
+    // anyone else, so the list stays mandatory.
+    let mut msg = offer(true);
+    msg.accepted_mints.clear();
+    let mut buf = Vec::new();
+    encode(&Message::Offer(msg), &mut buf).expect("encode");
     assert_eq!(decode(&buf), Err(Error::EmptyMintList));
 }
 

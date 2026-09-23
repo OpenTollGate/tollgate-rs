@@ -46,6 +46,9 @@ pub struct PeerOffer {
     /// does, against our grant — but it is worth holding for the operator to
     /// see why a link is costing what it costs.
     pub received_multiplier: u16,
+    /// It will not charge us, so we fund no channel toward it and buy nothing
+    /// from it. Its decision alone — it says nothing about whether we charge.
+    pub no_charge: bool,
 }
 
 /// Everything we know about one peer.
