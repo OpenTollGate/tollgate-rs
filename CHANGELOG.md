@@ -32,7 +32,8 @@ Nothing has been released yet. Everything below is on `master` and will ship as
   to exactly what it bought with a token bucket, and holds a peer that has
   bought nothing at the minimum flow allowance — the trickle that lets a peer
   holding no vouchers reach a mint at all. It shuts down cleanly, drops silent
-  peers, and stops re-probing a rate ceiling a peer has already refused.
+  peers, and backs off from a rate ceiling a peer refused for `cap_hold_ms`
+  before trying it again.
 
 - A Cashu mint in every node, with a byte-denominated keyset, and payment over
   real Cashu Spilman channels: a channel is a 2-of-2 multisig token, each
@@ -45,27 +46,27 @@ Nothing has been released yet. Everything below is on `master` and will ship as
   from mints it names (`market.accept`, with a `bytes_per_unit` per issuer), at
   a price the operator can move without restarting the node.
 
-- A wallet (`wallet.mint`): a node holds what it has bought and been paid,
-  tops up from any mint when a purchase needs more, and collects what it was
-  paid for.
+- A wallet: a node holds what it has bought and been paid, tops up from its
+  `wallet.mint` over Lightning when a purchase needs more, and collects what it
+  was paid for.
 
 - `tolltop`, a dashboard over each node's control socket, which it finds on
-  its own. Tabs for peers and the wallet; a top-up shows its Lightning invoice
-  as a QR.
+  its own. Tabs for peers, pricing and the wallet; a top-up shows its Lightning
+  invoice as a QR.
 
 - Selling transit on the kernel forwarding path: nftables gates each peer and
   `tc` shapes only what the node forwards, leaving the payment path alone.
 
 - Selling transit over a [FIPS](docs/design/network-peering/peering-fips.md)
-  mesh. Unnamed peers are held at the allowance from their first packet, and a
-  peer's announced key is checked against the mesh address it arrived from.
-  FIPS cannot yet enforce a per-peer rate, so over FIPS a node gates delivery
-  but cannot yet shape it to a bought rate (requested as feature 2 in
-  [FIPS_FEATURE_REQUESTS.md](docs/design/FIPS_FEATURE_REQUESTS.md)).
+  mesh: the FIPS node gates and shapes each peer to the rate it bought, set
+  through its `set_transit_policy` control command. Unnamed peers are held at
+  the allowance from their first packet, and a peer's announced key is checked
+  against the mesh address it arrived from. Needs a FIPS build with per-peer
+  transit policy.
 
-- Packages for OpenWrt (`.ipk`) and macOS (`.pkg`), priced out of the box at
-  1000 sat for an hour at 5 MB/s. A Mac can pay a router without a command
-  line.
+- Packages for OpenWrt (`.ipk`) and macOS (`.pkg`). The OpenWrt package sells
+  out of the box at 1000 sat for an hour at 5 MB/s; a Mac, once configured with
+  its router's key and a `buying.demand`, keeps a grant in force on its own.
 
 - Docker integration topologies under `testing/`: peering, purchase, refusal,
   rollover, allowance, forwarding and fips, each asserting against the nodes'
@@ -95,8 +96,8 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 - A node accepts vouchers from several mints, as one ordered list.
 
-- Raw TCP is the v1 transport; HTTP and WebSocket are alternatives for networks
-  that need them.
+- Raw TCP is the v1 transport; HTTP and WebSocket are specified as future
+  alternatives.
 
 - Payment rides upstream `cdk-spilman` rather than a fork, now that it
   round-trips a custom currency unit, and every cdk crate is on v0.18.1.
@@ -104,3 +105,4 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 ### Removed
 
 - `tollgate-pricing.md`, replaced by `tollgate-hazards.md`.
+- `tollgate-bootstrap.md` and its diagrams, with bootstrap tokens.

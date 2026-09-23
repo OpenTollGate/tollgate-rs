@@ -274,7 +274,7 @@ tollgate-rs differs fundamentally:
 
 ### Cashu Spilman Channels
 
-TollGate uses the [Cashu Spilman channel](../../../reference/cashu_spilman_channels/ARCHITECTURE.md) implementation for streaming micropayments. Spilman channels are unidirectional payment channels where the sender funds a 2-of-2 multisig and signs off-chain balance updates. This is adapted from Bitcoin's [Spilman channels](https://en.bitcoin.it/wiki/Payment_channels#Spillman-style_payment_channels) to work with Cashu ecash instead of on-chain Bitcoin.
+TollGate uses the [Cashu Spilman channel](https://github.com/SatsAndSports/cashu_spilman_channels/blob/main/ARCHITECTURE.md) implementation for streaming micropayments. Spilman channels are unidirectional payment channels where the sender funds a 2-of-2 multisig and signs off-chain balance updates. This is adapted from Bitcoin's [Spilman channels](https://en.bitcoin.it/wiki/Payment_channels#Spillman-style_payment_channels) to work with Cashu ecash instead of on-chain Bitcoin.
 
 ### FIPS (Free Internetworking Peering System)
 

@@ -43,7 +43,7 @@ used for deterministic builds. A source build requires **`protoc`**
 prost, whose build script shells out to it, and the build fails inside
 that build script without it.
 
-For multi-node integration runs, Docker is required. Each topology
+For multi-node integration runs, Docker is required. Each test topology
 under [testing/](testing/) starts containerized nodes and a fake
 Lightning sat mint, and asserts against each node's control socket; see
 [testing/README.md](testing/README.md) for the suite catalog.
@@ -75,9 +75,11 @@ When you open a bug report, please include:
   Multi-node bugs should include the topology (who sells, who buys,
   over the kernel path or FIPS) and per-node config excerpts. Leave
   secret keys and wallet tokens out.
-- **Evidence** — log excerpts from both sides of the peering, with
-  `RUST_LOG=tollgate_net=debug,info`. On OpenWrt that is `logread`; on
-  macOS `/usr/local/var/log/tollgate/tollgate.log`. Add what `tolltop`
+- **Evidence** — log excerpts from both sides of the peering. On
+  OpenWrt that is `logread`; on macOS
+  `/usr/local/var/log/tollgate/tollgate.log`. The packages log at
+  `info`; if you can reproduce it by hand, run `tollgated` with
+  `RUST_LOG=tollgate_net=debug,info` for more. Add what `tolltop`
   shows for the peer if it is relevant — the grant in force, the rate
   being shaped to, the wallet balance.
 
@@ -261,7 +263,7 @@ restrictions.
 
 For implementation questions specific to your PR, ask in the PR
 itself. For design or roadmap questions that don't have a clear PR
-home yet, file a GitHub issue with the `design` label.
+home yet, file a GitHub issue and say so in the title.
 
 ## Further reading
 

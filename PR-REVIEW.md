@@ -42,11 +42,11 @@ Read these *before* analyzing the diff so the review is grounded:
 
 3. Base-branch freshness. How many commits have landed on the PR's
    base since the PR forked from it.
-4. Project guidance. Read [CONTRIBUTING.md](CONTRIBUTING.md) and
-   [AGENTS.md](AGENTS.md). These describe project-specific conventions
-   and constraints not visible from the diff alone — above all the
-   crate layering: `tollgate-core` is sans-IO, and it and
-   `tollgate-protocol` stay `no_std`.
+4. Project guidance. Read [CONTRIBUTING.md](CONTRIBUTING.md). It
+   describes project-specific conventions and constraints not visible
+   from the diff alone — above all the crate layering:
+   `tollgate-core` is sans-IO, and it and `tollgate-protocol` stay
+   `no_std`.
 5. Related work on GitHub. Skim the [open issues](https://github.com/OpenTollGate/tollgate-rs/issues)
    and other [open PRs](https://github.com/OpenTollGate/tollgate-rs/pulls) for
    work that overlaps, duplicates, partially addresses, or is unblocked
@@ -95,8 +95,9 @@ Step 4.
    it introduce new ones where existing ones would have served? Does
    it sit in the right crate — no I/O, clock reads or signature checks
    in `tollgate-core`, nothing above `ChannelBackend` that knows which
-   backend it is paying over, and each core module keeping its
-   `core.rs` / `state.rs` / `limits.rs` / `tests.rs` split?
+   backend it is paying over, and a core module with enough logic to
+   split keeping the `core.rs` / `state.rs` / `limits.rs` / `tests.rs`
+   shape of its neighbours?
 
 ### Group C — Cross-cutting concerns
 
