@@ -12,6 +12,7 @@ workspace root:
 
 | Step | Command |
 | --- | --- |
+| protoc | `apt-get install protobuf-compiler` |
 | Format | `cargo fmt --all --check` |
 | Clippy | `cargo clippy --workspace --all-targets -- -D warnings` |
 | Build | `cargo build --workspace --all-targets` |
@@ -29,13 +30,9 @@ Caching uses `actions/cache@v4` against the coordinator's own cache server
 cache action; the step is `continue-on-error: true` so a coordinator with
 caching disabled still runs the job.
 
-`protobuf-compiler` is *not* installed here: the packaging workflows install it
-because cdk's signatory reaches gRPC through prost, but this workspace's
-dependency graph at this commit contains no `prost`/`tonic` (checked in
-`Cargo.lock`), and `cargo build --workspace --all-targets` compiles without it.
-If a dependency change pulls prost in, add
-`sudo apt-get install -y --no-install-recommends protobuf-compiler` before the
-build step.
+`protobuf-compiler` is installed before the build, as in the GitHub `check`
+job: cdk's signatory reaches gRPC through prost, whose build script shells out
+to `protoc`.
 
 ## Triggers
 
@@ -75,7 +72,7 @@ nak req -k 9841 -a "$COORD_HEX" -l 20 wss://relay.ngit.dev   # per-job + log tai
 ## Not run here (deliberately)
 
 - **Docker integration suites** (`image` + `integration` jobs in
-  `.github/workflows/ci.yml`: `testing/{detect,bootstrap,exhaust,metering,drift}/test.sh`,
+  `.github/workflows/ci.yml`: `testing/{peering,purchase,refusal,rollover,allowance,forwarding}/test.sh`,
   which build `tollgate-test:latest` and run compose topologies). act's job
   container has no Docker daemon, so these cannot run here. They remain GitHub
   only — ngit-ci's docs are explicit that `docker` fails in the job container.
@@ -83,8 +80,7 @@ nak req -k 9841 -a "$COORD_HEX" -l 20 wss://relay.ngit.dev   # per-job + log tai
   macOS labels cannot be served by ngit-ci, and the OpenWrt job needs
   `cargo-zigbuild` + zig for a tag-triggered release build rather than a test.
 - **Anything requiring a live network peer or mint** beyond the unit tests —
-  the crate tests are self-contained (90 `#[test]`/`#[tokio::test]` cases, no
-  `dev-dependencies`).
+  the crate tests are self-contained `#[test]`/`#[tokio::test]` cases.
 - **Cross-architecture fan-in.** There is one file, on `ubuntu-latest`. A single
   file whose jobs span architectures is claimed only where one coordinator
   supports every label; use one file per architecture if that is ever needed.

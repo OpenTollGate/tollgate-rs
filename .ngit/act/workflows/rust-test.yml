@@ -5,7 +5,7 @@ name: Rust test
 #
 # This mirrors the `check` job of .github/workflows/ci.yml, which is left
 # untouched: the same pinned toolchain (rust-toolchain.toml pins 1.94.1) and
-# the same four commands in the same order, run from the workspace root.
+# the same protoc install and four commands in the same order, run from the workspace root.
 
 on:
   push:
@@ -38,6 +38,10 @@ jobs:
           key: rust-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             rust-${{ runner.os }}-
+      # cdk's signatory reaches gRPC through prost, whose build script shells
+      # out to protoc.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
