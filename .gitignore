@@ -22,6 +22,9 @@ deploy/
 # Local two-node demo; not part of the repository
 demo/
 
+# Local roadmap, kept under reference/
+/ROADMAP.md
+
 reference/
 
 dist/

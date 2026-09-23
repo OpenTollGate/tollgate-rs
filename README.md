@@ -8,13 +8,19 @@ delivery, built on Cashu ecash and Spilman payment channels.
 
 This repo contains:
 
-- **tollgate-protocol** — the wire format and lifecycle, defined in
-  the design documents under `docs/design/`. Resource-agnostic.
-- **tollgate-core** — Rust library implementing the protocol's
-  resource-agnostic logic (channels, metering, pricing, access control).
+- **[tollgate-protocol](docs/design/core/tollgate-protocol.md)** — the
+  wire format and lifecycle. Resource-agnostic.
+- **[tollgate-core](docs/design/core/)** — Rust library implementing the
+  protocol's resource-agnostic logic (channels, metering, pricing, access
+  control).
+- **[tollgate-market](docs/design/market/README.md)** — how vouchers are
+  bought, sold and priced. Deliberately outside the payment protocol;
+  served beside a node's mint, and implemented in `tollgate-net` for now.
 - **tollgate-net** — binary that uses `tollgate-core` to (re)sell
-  network access over traditional IP networks or a self-organizing mesh
-  such as [FIPS](https://github.com/nicobao/fips). This is the first
+  network access over traditional
+  [IP networks](docs/design/network-peering/peering-ip.md) or a
+  self-organizing mesh such as
+  [FIPS](docs/design/network-peering/peering-fips.md). This is the first
   deployment of TollGate.
 
 A constrained-device variant (`tollgate-net-esp32`) lives in a separate
