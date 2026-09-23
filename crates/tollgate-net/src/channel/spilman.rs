@@ -33,9 +33,10 @@ use cdk::mint::Mint;
 use cdk_spilman::configurable_host::{
     ConfigurableHost, ConfigurableHostConfig, KeysetCacheEntry, StorageConfig, UnitPricingConfig,
 };
+use cdk_spilman::configurable_networking::fetch_and_cache_keysets;
 use cdk_spilman::{
     ConfigurableClientHost, MemoryClientStorage, ReqwestClientNetworking, SpilmanBridge,
-    SpilmanClientBridge, SpilmanKeysetRefresher, SpilmanMintClient,
+    SpilmanClientBridge, SpilmanClientNetworking, SpilmanKeysetRefresher, SpilmanMintClient,
 };
 use tollgate_protocol::{ChannelId, PubKey, Signature};
 use tracing::debug;
@@ -124,6 +125,9 @@ pub struct SpilmanChannels {
     client: Mutex<Client>,
     /// Our side of channels peers fund to pay us.
     server: SpilmanBridge<ConfigurableHost>,
+    /// How we reach an accepted mint that is not ours, to settle a channel a
+    /// peer funded there.
+    remote: ReqwestClientNetworking,
 }
 
 impl std::fmt::Debug for SpilmanChannels {
@@ -188,17 +192,31 @@ impl SpilmanChannels {
         )
         .map_err(|e| anyhow!("build the channel receiver: {e}"))?;
 
+        let remote = ReqwestClientNetworking::new(MINT_REQUEST_TIMEOUT)
+            .map_err(|e| anyhow!("build the settlement client: {e}"))?;
+
         Ok(Self {
             config,
             runtime: tokio::runtime::Handle::current(),
             client: Mutex::new(client),
             server: SpilmanBridge::new(host),
+            remote,
         })
     }
 
     /// The mint URL this node advertises.
     pub fn mint_url(&self) -> &str {
         &self.config.mint_url
+    }
+
+    /// The mint a channel a peer funded to pay us was funded in.
+    fn funding_mint(&self, channel_id: &str) -> Result<String> {
+        let funding = self
+            .server
+            .host()
+            .get_funding_data(channel_id)
+            .ok_or_else(|| anyhow!("no funding recorded for channel {channel_id}"))?;
+        mint_of_params(&funding.params_json)
     }
 
     /// Make sure we hold the keys for the keyset a peer funded against.
@@ -255,6 +273,35 @@ fn now_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Which mint a channel's parameters say it was funded in.
+fn mint_of_params(params_json: &str) -> Result<String> {
+    let params: serde_json::Value =
+        serde_json::from_str(params_json).context("channel parameters are not JSON")?;
+    params["mint"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("channel parameters name no mint"))
+}
+
+/// Where a channel's closing swap goes.
+#[derive(Debug, PartialEq, Eq)]
+enum Settlement {
+    /// Our own mint, in this process.
+    Ours,
+    /// Another mint we accept, over HTTP.
+    Remote,
+}
+
+/// Settle in the mint the channel was funded in: a peer may fund against any
+/// mint we accept, and only the issuer of the funding proofs can swap them.
+fn settlement_for(own_mint_url: &str, funding_mint: &str) -> Settlement {
+    if own_mint_url.trim_end_matches('/') == funding_mint.trim_end_matches('/') {
+        Settlement::Ours
+    } else {
+        Settlement::Remote
+    }
 }
 
 fn channel_id_from_hex(s: &str) -> Result<ChannelId> {
@@ -559,10 +606,27 @@ impl ChannelBackend for SpilmanChannels {
 
     fn settle(&self, channel_id: ChannelId) -> Result<()> {
         let id = channel_id_to_hex(channel_id);
-        let networking = MintNetworking::new(Arc::clone(&self.config.mint));
-        self.server
-            .execute_unilateral_close(&id, &networking, &networking)
-            .map_err(|e| anyhow!("settle {id}: {e:?}"))?;
+        // The swap goes to the mint that issued the funding. The bridge passes
+        // that mint's URL through to each call, so the networking only has to
+        // be the right kind.
+        let mint = self.funding_mint(&id)?;
+        match settlement_for(&self.config.mint_url, &mint) {
+            Settlement::Ours => {
+                let networking = MintNetworking::new(Arc::clone(&self.config.mint));
+                self.server
+                    .execute_unilateral_close(&id, &networking, &networking)
+            }
+            Settlement::Remote => {
+                let networking = RemoteMint {
+                    http: &self.remote,
+                    host: self.server.host(),
+                    runtime: self.runtime.clone(),
+                };
+                self.server
+                    .execute_unilateral_close(&id, &networking, &networking)
+            }
+        }
+        .map_err(|e| anyhow!("settle {id} in {mint}: {e:?}"))?;
         Ok(())
     }
 }
@@ -612,6 +676,31 @@ impl SpilmanKeysetRefresher for MintNetworking {
     }
 }
 
+/// Talks to another mint we accept, over HTTP.
+///
+/// A peer may fund against any mint in our Offer, and only the mint that issued
+/// the funding can swap it, so settling such a channel has to leave the node.
+struct RemoteMint<'a> {
+    http: &'a ReqwestClientNetworking,
+    host: &'a ConfigurableHost,
+    runtime: tokio::runtime::Handle,
+}
+
+impl SpilmanMintClient for RemoteMint<'_> {
+    fn call_mint_swap(&self, mint_url: &str, swap_request_json: &str) -> Result<String, String> {
+        SpilmanClientNetworking::call_mint_swap(self.http, mint_url, swap_request_json)
+    }
+}
+
+impl SpilmanKeysetRefresher for RemoteMint<'_> {
+    fn refresh(&self, mint: &str) -> Result<(), String> {
+        // Not ours, so its keysets can rotate without our knowing, and the
+        // close outputs have to be made for the one it has active now.
+        let handle = self.runtime.clone();
+        tokio::task::block_in_place(|| handle.block_on(fetch_and_cache_keysets(self.host, mint)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -629,6 +718,35 @@ mod tests {
     fn a_channel_id_of_the_wrong_length_is_rejected() {
         assert!(channel_id_from_hex(&hex::encode([0u8; 16])).is_err());
         assert!(channel_id_from_hex("nonsense").is_err());
+    }
+
+    #[test]
+    fn a_channel_funded_in_our_mint_settles_in_process() {
+        assert_eq!(
+            settlement_for("http://ours:3338", "http://ours:3338"),
+            Settlement::Ours
+        );
+        // A trailing slash is the same mint.
+        assert_eq!(
+            settlement_for("http://ours:3338/", "http://ours:3338"),
+            Settlement::Ours
+        );
+    }
+
+    #[test]
+    fn a_channel_funded_in_another_mint_settles_there() {
+        assert_eq!(
+            settlement_for("http://ours:3338", "http://theirs:3338"),
+            Settlement::Remote
+        );
+    }
+
+    #[test]
+    fn the_funding_mint_is_read_from_the_channel_parameters() {
+        let params = r#"{"mint":"http://theirs:3338","unit":"byte"}"#;
+        assert_eq!(mint_of_params(params).expect("mint"), "http://theirs:3338");
+        assert!(mint_of_params(r#"{"unit":"byte"}"#).is_err());
+        assert!(mint_of_params("nonsense").is_err());
     }
 
     #[test]
@@ -825,5 +943,210 @@ mod tests {
         })
         .await
         .expect("the test ran");
+    }
+
+    /// Real settlement, end to end: two byte mints on loopback ports, a payee
+    /// running one and accepting both, and a payer funding a channel in each.
+    mod settled {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        use super::*;
+        use crate::mint::MintConfig;
+
+        const PAYER: [u8; 32] = [1; 32];
+        const PAYEE: [u8; 32] = [2; 32];
+        const CAPACITY: u64 = 1 << 20;
+
+        fn pubkey(secret: [u8; 32]) -> PubKey {
+            PubKey(
+                cashu::nuts::SecretKey::from_slice(&secret)
+                    .expect("key")
+                    .public_key()
+                    .to_bytes(),
+            )
+        }
+
+        /// A byte mint served over HTTP, as a peer reaches it.
+        async fn serve_mint(seed: u8) -> (Arc<Mint>, String) {
+            let addr = std::net::TcpListener::bind("127.0.0.1:0")
+                .and_then(|l| l.local_addr())
+                .expect("a free port");
+            let url = format!("http://{addr}");
+            let mint = Arc::new(
+                crate::mint::build(&MintConfig {
+                    url: url.clone(),
+                    unit: "byte".into(),
+                    seed: vec![seed; 32],
+                    max_amount: u64::MAX,
+                })
+                .await
+                .expect("build the mint"),
+            );
+            tokio::spawn(crate::mint::serve(
+                Arc::clone(&mint),
+                axum::Router::new(),
+                addr,
+                std::future::pending(),
+            ));
+            for _ in 0..100 {
+                if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                    return (mint, url);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            panic!("the mint never came up on {addr}");
+        }
+
+        /// A directory that removes itself, for a wallet nothing reads again.
+        struct TempDir(std::path::PathBuf);
+
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        /// A backend running `mint` at `mint_url` and taking payment in
+        /// `accepted_mints`, with a wallet it never uses.
+        async fn backend(
+            mint: &Arc<Mint>,
+            mint_url: &str,
+            accepted_mints: Vec<String>,
+            secret: [u8; 32],
+        ) -> (SpilmanChannels, TempDir) {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let dir = TempDir(std::env::temp_dir().join(format!(
+                "tollgate-settle-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            )));
+            let wallet = crate::wallet::Wallet::open(dir.0.join("wallet.sqlite"), [7; 64], "byte")
+                .await
+                .expect("open a wallet");
+            let backend = SpilmanChannels::new(SpilmanConfig {
+                mint: Arc::clone(mint),
+                mint_url: mint_url.into(),
+                unit: "byte".into(),
+                accepted_mints,
+                secret_key_hex: hex::encode(secret),
+                wallet,
+                money: None,
+            })
+            .expect("build the backend");
+            (backend, dir)
+        }
+
+        /// A token of `amount` vouchers, signed by the mint directly — the
+        /// same thing the market does once it has been paid.
+        fn vouchers(mint: &Mint, mint_url: &str, keyset_info: &str, amount: u64) -> String {
+            let blinded = cdk_spilman::create_plain_blinded_messages(amount, keyset_info)
+                .expect("blinded messages");
+            let blinded: serde_json::Value = serde_json::from_str(&blinded).expect("json");
+            let outputs = serde_json::from_value(blinded["blinded_messages"].clone())
+                .expect("blinded messages");
+            let signatures = tokio::runtime::Handle::current()
+                .block_on(mint.blind_sign(outputs))
+                .expect("blind sign");
+            let proofs = cdk_spilman::construct_proofs(
+                &serde_json::to_string(&signatures).expect("json"),
+                &blinded["secrets_with_blinding"].to_string(),
+                keyset_info,
+            )
+            .expect("unblind");
+            cdk_spilman::build_cashu_b_token(mint_url, "byte", &proofs).expect("token")
+        }
+
+        /// Fund a channel from `payer` to `payee` in the mint at `mint_url`,
+        /// have the payee verify it, and pay `balance` over it.
+        fn pay_over_channel(
+            payer: &SpilmanChannels,
+            payee: &SpilmanChannels,
+            mint: &Mint,
+            mint_url: &str,
+            balance: u64,
+        ) -> ChannelId {
+            let keyset_id = crate::market::active_keyset(mint_url, "byte").expect("keyset");
+            let keyset_info = payer
+                .client
+                .lock()
+                .expect("not poisoned")
+                .fetch_keyset_info(mint_url, &keyset_id)
+                .expect("keyset info");
+            let token = vouchers(mint, mint_url, &keyset_info, CAPACITY);
+
+            // What `fund` does once it holds the vouchers.
+            let client = payer.client.lock().expect("not poisoned");
+            let opened = client
+                .open_channel_from_token(
+                    &token,
+                    &hex::encode(pubkey(PAYEE).0),
+                    &hex::encode(pubkey(PAYER).0),
+                    now_seconds() + CHANNEL_TTL_SECONDS,
+                    &keyset_info,
+                    MAX_PROOF_AMOUNT,
+                )
+                .expect("open");
+            let opening = client
+                .sign_channel_registration(&opened.channel_id)
+                .expect("opening payment");
+            drop(client);
+            let blob = serde_json::to_vec(&FundingBlob {
+                channel_id: opened.channel_id.clone(),
+                balance: opening.balance,
+                signature: opening.signature.clone(),
+                params: opening.params.clone().expect("params"),
+                funding_proofs: serde_json::to_value(opening.funding_proofs.expect("proofs"))
+                    .expect("json"),
+            })
+            .expect("json");
+
+            let verified = payee.verify(pubkey(PAYER), &blob).expect("verify");
+            assert_eq!(verified.mint_url, mint_url);
+
+            let signature = payer
+                .sign_update(verified.channel_id, balance)
+                .expect("sign");
+            assert!(payee.verify_update(pubkey(PAYER), verified.channel_id, balance, signature));
+            verified.channel_id
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_channel_settles_in_the_mint_it_was_funded_in() {
+            let (ours, ours_url) = serve_mint(7).await;
+            let (theirs, theirs_url) = serve_mint(8).await;
+            let accepted = vec![ours_url.clone(), theirs_url.clone()];
+            let (payer, _payer_wallet) =
+                backend(&theirs, &theirs_url, accepted.clone(), PAYER).await;
+            let (payee, _payee_wallet) = backend(&ours, &ours_url, accepted, PAYEE).await;
+
+            // Every backend call blocks, as it does when the node drives it.
+            tokio::task::spawn_blocking(move || {
+                // Funded in another mint: only that mint can swap the proofs.
+                let elsewhere = pay_over_channel(&payer, &payee, &theirs, &theirs_url, 1000);
+                payee
+                    .settle(elsewhere)
+                    .expect("settle a channel funded in another mint");
+
+                // Funded in our own: settled in process, as before.
+                let at_home = pay_over_channel(&payer, &payee, &ours, &ours_url, 1000);
+                payee
+                    .settle(at_home)
+                    .expect("settle a channel funded in our mint");
+            })
+            .await
+            .expect("settling");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn settling_a_channel_with_no_recorded_funding_is_an_error() {
+            let (ours, ours_url) = serve_mint(7).await;
+            let (payee, _payee_wallet) =
+                backend(&ours, &ours_url, vec![ours_url.clone()], PAYEE).await;
+            tokio::task::spawn_blocking(move || {
+                assert!(payee.settle(ChannelId([9; 32])).is_err());
+            })
+            .await
+            .expect("settling");
+        }
     }
 }
