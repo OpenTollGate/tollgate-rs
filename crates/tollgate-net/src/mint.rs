@@ -57,7 +57,7 @@ pub fn currency_unit(unit: &str) -> CurrencyUnit {
     match unit {
         "sat" => CurrencyUnit::Sat,
         "msat" => CurrencyUnit::Msat,
-        other => CurrencyUnit::Custom(other.to_string()),
+        other => CurrencyUnit::Custom(other.into()),
     }
 }
 
@@ -152,7 +152,7 @@ mod tests {
         // Cashu has no byte unit of its own; it is the resource that fixes it.
         assert_eq!(
             currency_unit("byte"),
-            CurrencyUnit::Custom("byte".to_string())
+            CurrencyUnit::Custom("byte".into())
         );
     }
 

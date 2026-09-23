@@ -35,7 +35,7 @@ use cdk_spilman::configurable_host::{
 };
 use cdk_spilman::{
     ConfigurableClientHost, MemoryClientStorage, ReqwestClientNetworking, SpilmanBridge,
-    SpilmanClientBridge, SpilmanNetworking,
+    SpilmanClientBridge, SpilmanKeysetRefresher, SpilmanMintClient,
 };
 use tollgate_protocol::{ChannelId, PubKey, Signature};
 use tracing::debug;
@@ -70,6 +70,12 @@ const CHANNEL_TTL_SECONDS: u64 = 2 * MIN_EXPIRY_SECONDS;
 /// maximum keeps individual proofs cheap; for bytes it has to track the
 /// capacity being funded.
 const MAX_PROOF_AMOUNT: u64 = 1 << 30;
+
+/// How long one request to a peer's mint may take.
+///
+/// These calls sit inline in a purchase, so a mint that hangs would otherwise
+/// stall buying until the operating system gave up on the socket.
+const MINT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// What a Spilman backend needs to know about this node.
 #[derive(Debug, Clone)]
@@ -140,7 +146,9 @@ impl SpilmanChannels {
 
         let mut client_host = ConfigurableClientHost::new_in_memory();
         client_host.add_key(secret);
-        let client = SpilmanClientBridge::new(client_host, ReqwestClientNetworking::new());
+        let networking = ReqwestClientNetworking::new(MINT_REQUEST_TIMEOUT)
+            .map_err(|e| anyhow!("build the mint client: {e}"))?;
+        let client = SpilmanClientBridge::new(client_host, networking);
 
         // Every mint we accept, trusted for our unit. Accept or refuse is
         // binary — there is no haircut, because what an issuer's paper is worth
@@ -417,7 +425,7 @@ impl ChannelBackend for SpilmanChannels {
             .map_err(|e| anyhow!("open a channel against {mint_url}: {e}"))?;
 
         let opening = client
-            .create_payment_with_funding(&opened.channel_id, 0)
+            .sign_channel_registration(&opened.channel_id)
             .map_err(|e| anyhow!("prepare funding for {}: {e}", opened.channel_id))?;
 
         let blob = FundingBlob {
@@ -479,7 +487,7 @@ impl ChannelBackend for SpilmanChannels {
             .client
             .lock()
             .expect("not poisoned")
-            .create_payment(&channel_id_to_hex(channel_id), cumulative)
+            .sign_and_record_payment(&channel_id_to_hex(channel_id), cumulative)
             .map_err(|e| anyhow!("sign a channel update: {e}"))?;
         signature_from_hex(&payment.signature)
     }
@@ -508,8 +516,9 @@ impl ChannelBackend for SpilmanChannels {
 
     fn settle(&self, channel_id: ChannelId) -> Result<()> {
         let id = channel_id_to_hex(channel_id);
+        let networking = MintNetworking::new(Arc::clone(&self.config.mint));
         self.server
-            .execute_unilateral_close(&id, &MintNetworking::new(Arc::clone(&self.config.mint)))
+            .execute_unilateral_close(&id, &networking, &networking)
             .map_err(|e| anyhow!("settle {id}: {e:?}"))?;
         Ok(())
     }
@@ -534,7 +543,7 @@ impl MintNetworking {
     }
 }
 
-impl SpilmanNetworking for MintNetworking {
+impl SpilmanMintClient for MintNetworking {
     fn call_mint_swap(&self, _mint_url: &str, swap_request_json: &str) -> Result<String, String> {
         let request: cashu::nuts::SwapRequest =
             serde_json::from_str(swap_request_json).map_err(|e| e.to_string())?;
@@ -551,8 +560,10 @@ impl SpilmanNetworking for MintNetworking {
 
         serde_json::to_string(&response).map_err(|e| e.to_string())
     }
+}
 
-    fn refresh_all_keysets(&self, _mint: &str) -> Result<(), String> {
+impl SpilmanKeysetRefresher for MintNetworking {
+    fn refresh(&self, _mint: &str) -> Result<(), String> {
         // Ours, and always current.
         Ok(())
     }

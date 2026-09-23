@@ -29,6 +29,18 @@ DEMAND_START=$((512 * 1024))
 DEMAND_STEP=$((2 * 1024 * 1024))
 DEMAND_STEP_SECONDS=4
 
+# What a gateway's vouchers cost, in sats from the money mint below. A megabyte
+# to the sat, as in the docker topologies — cheap enough that the fake mint's
+# ceiling never gets in the way.
+BYTES_PER_SAT=1000000
+
+# The money. A sat mint with cdk's fake Lightning backend, which pays its own
+# invoices, standing in for something like minibits: the client mints sats
+# here and trades them at the gateway's market for byte vouchers.
+SAT_MINT_PORT=8085
+SAT_MINT="http://127.0.0.1:$SAT_MINT_PORT"
+SAT_MINT_CONTAINER=tollgate-demo-sat-mint
+
 # Traffic every peer gets without paying. Keep it small — it is given away, and
 # it is what a peer falls back to whenever its grant lapses.
 MINIMUM_FLOW=4096
@@ -36,10 +48,16 @@ MINIMUM_FLOW=4096
 cleanup() {
   [[ -n "${GATEWAY_PID:-}" ]] && kill "$GATEWAY_PID" 2>/dev/null || true
   [[ -n "${CLIENT_PID:-}" ]] && kill "$CLIENT_PID" 2>/dev/null || true
+  docker rm -f "$SAT_MINT_CONTAINER" >/dev/null 2>&1 || true
   wait 2>/dev/null || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT INT TERM
+
+if ! docker info >/dev/null 2>&1; then
+  echo "the demo needs docker, to run the sat mint the client pays with" >&2
+  exit 1
+fi
 
 echo "building..."
 cargo build --release --bin tollgated --bin tolltop --manifest-path "$ROOT/Cargo.toml" 2>&1 | tail -1
@@ -77,6 +95,15 @@ grants:
   # The payer picks any window in this range, per grant, without negotiating.
   window_range_ms: [200, 30000]
   max_rate: $GATEWAY_MAX_RATE
+market:
+  # What the gateway sells its vouchers for.
+  accept:
+    - mint: "$SAT_MINT"
+      unit: sat
+      bytes_per_unit: $BYTES_PER_SAT
+wallet:
+  mint: "$SAT_MINT"
+  unit: sat
 network:
   listen: "127.0.0.1:4747"
 YAML
@@ -99,6 +126,12 @@ buying:
   # A short window keeps the forfeit small when the rate is raised early.
   window_ms: 1000
   renew_lead_ms: 300
+wallet:
+  # Where the client buys the sats it pays the gateway's market with. Empty to
+  # begin with; the first purchase tops it up, which the fake backend settles
+  # at once.
+  mint: "$SAT_MINT"
+  unit: sat
 network:
   listen: "127.0.0.1:4749"
 peers:
@@ -113,6 +146,22 @@ LOG_LEVEL="info"
 # long name overruns it.
 GATEWAY_SOCK=/tmp/tollgate-demo-gateway.sock
 CLIENT_SOCK=/tmp/tollgate-demo-client.sock
+
+docker rm -f "$SAT_MINT_CONTAINER" >/dev/null 2>&1 || true
+docker run -d --name "$SAT_MINT_CONTAINER" -p "127.0.0.1:$SAT_MINT_PORT:8085" \
+  -e CDK_MINTD_URL="$SAT_MINT" \
+  -v "$ROOT/testing/mint/mintd.toml:/etc/cdk/mintd.toml:ro" \
+  cashubtc/mintd:latest cdk-mintd --config /etc/cdk/mintd.toml >/dev/null
+
+for _ in $(seq 50); do
+  curl -sf "$SAT_MINT/v1/keys" >/dev/null 2>&1 && break
+  sleep 0.2
+done
+if ! curl -sf "$SAT_MINT/v1/keys" >/dev/null 2>&1; then
+  echo "the sat mint did not start:" >&2
+  docker logs "$SAT_MINT_CONTAINER" >&2
+  exit 1
+fi
 
 RUST_LOG="$LOG_LEVEL" "$BIN" -c "$WORK/gateway.yaml" --control-socket "$GATEWAY_SOCK" > "$WORK/gateway.log" 2>&1 &
 GATEWAY_PID=$!
@@ -158,11 +207,12 @@ cat <<BANNER
 
   gateway  control 4747, data 4748, mint 3338   sells access, max_rate $(rate "$GATEWAY_MAX_RATE") to one peer
   client   control 4749, data 4750, mint 3339   demand from $(rate "$DEMAND_START"), +$(rate "$DEMAND_STEP") every ${DEMAND_STEP_SECONDS}s
+  sat mint $SAT_MINT_PORT (docker, fake Lightning)             the money: $BYTES_PER_SAT bytes of the gateway's vouchers to the sat
 
   Each node runs its own Cashu mint with a byte-denominated keyset. The client
-  acquires the gateway's vouchers from the gateway's mint, funds a Spilman
-  channel with them, and every purchase below is a signed balance update on
-  that channel.
+  mints sats at the sat mint, trades them at the gateway's market for the
+  gateway's vouchers, funds a Spilman channel with them, and every purchase
+  below is a signed balance update on that channel.
 
   demand   what the client's traffic generator wants. The only input; everything
            else below is a consequence of it.
