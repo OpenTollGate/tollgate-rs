@@ -71,13 +71,13 @@
 
   <!-- Traits bar at bottom -->
   <rect x="60" y="240" width="581" height="35" rx="4" class="callout" stroke="#d0a040" stroke-width="1.5"/>
-  <text x="350" y="262" text-anchor="middle" class="mlabel" fill="#d0a040">Traits: Wallet    NetworkAdapter</text>
+  <text x="350" y="262" text-anchor="middle" class="mlabel" fill="#d0a040">Host traits: ChannelBackend    ResourceAdapter</text>
 
   <!-- Implementation row -->
   <text x="350" y="310" text-anchor="middle" class="tlabel">Implementation provides:</text>
 
   <rect x="80" y="320" width="150" height="30" rx="4" class="callout" stroke="#404060" stroke-width="1"/>
-  <text x="155" y="340" text-anchor="middle" class="mdesc" fill="#909090">Cashu Wallet</text>
+  <text x="155" y="340" text-anchor="middle" class="mdesc" fill="#909090">Channel Backend</text>
 
   <rect x="275" y="320" width="150" height="30" rx="4" class="callout" stroke="#404060" stroke-width="1"/>
   <text x="350" y="340" text-anchor="middle" class="mdesc" fill="#909090">FIPS / IP Adapter</text>

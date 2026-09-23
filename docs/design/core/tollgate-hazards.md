@@ -8,14 +8,23 @@ Read this before adding anything that prices, routes, or gives capacity away.
 
 ---
 
-## Never Pay A Peer To Send Or Accept Traffic
+## Never Pay A Peer A Bonus To Send Or Accept Traffic
 
-The design makes this **unrepresentable** rather than merely forbidden: the
-`received_multiplier` is unsigned, so a node can charge more for carrying a
-peer's traffic, charge nothing, but never pay for it
+The design makes a **bonus** for sending traffic unrepresentable rather than
+merely forbidden: the `received_multiplier` is unsigned, so a node can charge
+more for carrying a peer's traffic, or charge nothing, but can never pay a peer
+on top of what it owes for delivery
 ([tollgate-vouchers.md](tollgate-vouchers.md)). The section stays because the
 temptation recurs, and because anything added later must preserve the
 property.
+
+What remains is the base rule itself. Each side pays for what it receives, so
+with the default multiplier of `0` a node pays a peer 1× for the traffic that
+peer uploads to it. A peer can therefore push traffic nobody asked for and have
+it drawn against a grant the receiver bought. That exposure is bounded by the
+receiver alone: it is never more than the grant the receiver chose to buy from
+that peer, and a node that does not want to pay for a peer's uploads sets the
+multiplier to `1` (free) or higher (charged).
 Accepting traffic can be faked — the peer takes it, bills for it, and discards
 it, having done no work. Under such a price, discarding becomes the most
 profitable thing it can do, and metering cannot tell the difference because it
@@ -115,9 +124,9 @@ Any spending condition on a proof — P2PK or otherwise — only holds if it
 survives every swap **including change**. Otherwise the holder swaps the
 locked proof for something else and the lock is gone in one step.
 
-This is why the minimum flow allowance is issued unlocked: standard Cashu
-mints do not preserve locks that way, so locking it would need modified mint
-software ([tollgate-vouchers.md](tollgate-vouchers.md)).
+Standard Cashu mints do not preserve locks that way, so any design that relies
+on a lock to restrict who can spend a proof needs modified mint software or a
+scheme that does not depend on the lock surviving.
 
 ---
 
@@ -138,7 +147,7 @@ deposit, or an operator allowlist. None is specified.
 
 | Rule | Prevents |
 |---|---|
-| Never pay a peer to send or accept traffic | Peers profiting from traffic nobody wants |
+| Never pay a peer a bonus to send or accept traffic | Peers profiting from traffic nobody wants |
 | No price-aware routing | Cheapest route being a blackhole |
 | Metrics never price inputs | A peer degrading its link to move its own price |
 | Unspent capacity expires, and windows are capped | Buying capacity off-peak to present at peak |

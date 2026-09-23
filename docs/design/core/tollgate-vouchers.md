@@ -569,7 +569,7 @@ purchased is a per-provider score that informs which peerings are worth keeping
 
 ## Minimum Flow Allowance
 
-A small amount of traffic every peer gets without paying. It serves two
+A small, free rate of traffic every peer gets without paying. It serves three
 purposes:
 
 - **Getting started.** A new peer cannot pay until it holds vouchers, and
@@ -592,33 +592,24 @@ It is a rate, not a stored quantity, and it is what a peer falls back to
 whenever its grant is exhausted or expired. That makes it the floor of the
 shaper rather than a separate mechanism.
 
+**No vouchers are issued for it.** The allowance is delivery the node gives
+away, not a payment it makes: nothing is minted, nothing changes hands, and
+nothing is drawn from a grant. Handing out free vouchers is a way of selling
+them, and so belongs to the market ([../market/README.md](../market/README.md)),
+not to the protocol.
+
 ### Abuse
 
 The allowance is given away, so it can be farmed. Identities are free, so N of
-them collect N allowances. Two separate harms follow:
+them collect N allowances: N identities draw N allowances of real bandwidth,
+and one machine can run all N over the same physical link.
 
-- **Consumption.** N identities draw N allowances of real bandwidth, and one
-  machine can run all N over the same physical link.
-- **Resale.** Granted vouchers are bearer instruments, so an attacker can
-  accumulate and sell them, turning free traffic into sats.
+Because the allowance is a rate and never a token, there is nothing to resell:
+an attacker can use the bandwidth while connected, but cannot carry any of it
+away or turn it into sats.
 
-Resale could be closed by issuing the allowance P2PK-locked to the receiving
-peer, so only that peer could spend it. The obstacle is that a lock only
-holds if it survives **every** swap, including change — otherwise the peer
-swaps the locked proof for something else and the lock is gone in one step.
-Standard Cashu mints do not preserve locks that way, so this needs modified
-mint software or a scheme not yet designed. **Future work**, and out of
-scope here.
-
-Until then the allowance is unlocked and resale is bounded by economics
-rather than cryptography. At a realistic size — a few KB per second — what
-an attacker can farm is worth very little, thinly traded, and issued by one
-obscure router, so the effort likely exceeds the return. That argues for
-keeping the allowance small; it is not a guarantee.
-
-Consumption is unaffected either way, and still needs an aggregate cap
-across all unpaid peers plus a cost to holding an identity — proof-of-work,
-a deposit, or an operator allowlist.
+Consumption still needs an aggregate cap across all unpaid peers plus a cost
+to holding an identity — proof-of-work, a deposit, or an operator allowlist.
 
 The allowance does not accumulate. It is a floor on the shaping rate, so an
 unused second of it is gone the same way an unsold second of capacity is —
@@ -640,7 +631,6 @@ here is protocol-side.
 | Choosing a received multiplier | Every node has to decide, per peer, how much to surcharge what that peer pushes at it. New operator work with no obvious default beyond `0`. |
 | Relays holding two kinds of vouchers | A relay that does not accept its upstream's mint sits between two issuers and must keep rebalancing. Accepting it removes the problem; not every relay can. |
 | Minimum-flow abuse | N free identities draw N allowances of real bandwidth, and one machine can run all N over the same link. Needs an aggregate cap across unpaid peers plus a cost to holding an identity. |
-| Locking the allowance | Issuing it P2PK-locked would close the resale route, but a lock only holds if it survives every swap including change, which standard Cashu mints do not do. Needs modified mint software or a scheme not yet designed. |
 | Choosing a window | The payer trades responsiveness against forfeiture and message count, with no obvious default. A provider's `[min_window_ms, max_window_ms]` bounds it but does not choose it. |
 | Under-delivery has no public evidence | A payer measures delivered against purchased from its own counters and can act on it, but cannot show it to anyone else. A provider skimming a few percent from every peer stays invisible outside those peerings. Revisitable as a reporting path if it proves common. |
 | Admission control policy | A provider can refuse a grant that would oversubscribe, but nothing says how it should divide capacity between peers that all want more, or whether an existing grant may be honored at a reduced rate rather than run to its deadline. |
@@ -672,7 +662,7 @@ here is protocol-side.
 | Foreign voucher cost | Gives up free settlement, local double-spend checks, and payment-liveness-equals-service-liveness | Those three properties hold only for own vouchers, so the accepted set should lean toward neighbors and upstreams |
 | Market operations | Separate endpoints and protocol; never TollGate messages | Buying and swapping is not paying for delivery. A node offering neither is fully functional — see [market-protocol.md](../market/market-protocol.md) |
 | Minimum flow allowance | A floor on the shaping rate, not a stored quantity | It is what a peer falls back to when its grant expires, which is what keeps a link alive long enough to send the next TopUp. Being a rate, it cannot be accumulated |
-| Allowance vouchers | Ordinary unlocked vouchers; keep it small | Locking it would need a mint that preserves locks through swaps and change, which standard Cashu does not do. Small size bounds the resale value economically instead |
+| Allowance vouchers | None — the allowance is delivery, not payment | Free vouchers are a market matter. As a rate it cannot be resold or accumulated, so there is nothing to lock |
 | Spilman channels | Kept, to bound the issuer's database rather than to prevent theft | The spent-proof set is ~700× larger without channels |
 | Cryptographic effort | Concentrate on the exchange step | The only step with a real adversary once the issuer redeems its own vouchers |
 | Trust model | Reputation and exposure limits, not cryptography | When the provider is the mint, the only party who can cheat is the one who would honor the refund. Accepted deliberately |

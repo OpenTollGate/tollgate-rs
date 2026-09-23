@@ -64,6 +64,8 @@ This is a data-plane policy, not a control-plane hook. FIPS simply needs to know
 
 **Required FIPS change**: Ability to set a per-peer forwarding policy — `local_only` (blocked) or `full` (allowed). The **default policy for new peers must be `local_only`** — so that a newly connected peer doesn't get full forwarding in the window between FIPS authenticating it and TollGate detecting it. FIPS enforces this in its existing forwarding path.
 
+Until FIPS defaults new peers to `local_only` ([FIPS_FEATURE_REQUESTS.md](../FIPS_FEATURE_REQUESTS.md), feature 1), TollGate closes that window with the **minimum flow allowance**: it sets FIPS's default for any peer it has not yet named to the allowance rate. A peer FIPS has authenticated but TollGate has not yet detected is held to that small, free rate rather than forwarded freely.
+
 ### 2. Bloom Filter Exclusion
 
 TollGate controls which peers appear in bloom filter computation. Unpaid peers (`None`, `Suspended`) are excluded — their node_addr is not added to the bloom filter advertised to other peers. This prevents traffic from being routed toward a peer that will have it dropped at the gate.
@@ -236,7 +238,7 @@ The following FIPS modifications are required for TollGate integration. Full det
 | Per-peer forwarding policy | Set `local_only` or `full` forwarding per peer (default: `local_only`) | Critical |
 | Bloom filter exclusion | Withhold unpaid peers from bloom filter computation | Critical |
 | Per-peer traffic counters | Outbound/inbound byte counts per peer | Critical |
-| Peer lifecycle callbacks | Notify on peer connect/disconnect | Critical |
+| Peer lifecycle callbacks | Notify on peer connect/disconnect | Nice to have |
 | MMP metrics access | Direct read of per-peer MMP state | High |
 | Future: FSP port dispatch | TollGate messages on native FSP port | Low (future, optimization) |
 | Future: payment-aware routing | Well-paying peers get favorable routing | Low (future) |

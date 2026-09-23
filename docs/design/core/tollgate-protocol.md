@@ -201,7 +201,7 @@ First message sent by each peer after network-layer authentication. Identifies t
 }
 ```
 
-Both peers send Announce. If versions don't match, the peer with the lower version sends Reject. No other message exchange occurs before Announce.
+Both peers send Announce. If versions don't match, whichever side notices sends Reject and closes the connection. No other message exchange occurs before Announce.
 
 **Capability bits** (field 4):
 
@@ -667,7 +667,7 @@ service. There is no pre-channel phase.
 
 ## Protocol Versioning
 
-The protocol version is declared in the Announce message (field 1). Both peers must support the same version. If versions don't match, the peer with the lower version sends Reject with reason code 0x09 (protocol version unsupported).
+The protocol version is declared in the Announce message (field 1). Both peers must support the same version. If versions don't match, whichever side notices sends Reject with reason code 0x09 (protocol version unsupported) and closes the connection. Both sides may send it; that is harmless.
 
 Version negotiation is outside scope for v1 — both peers must run the same version. Future versions may add a version negotiation step.
 

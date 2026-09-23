@@ -24,7 +24,7 @@ consumed += delivered + received × received_multiplier
 
 The counters themselves stay raw. The weighting is applied when drawing down the grant, so what the meter reports and what the shaper charges stay separable.
 
-All units crossing the link are metered — including TollGate protocol messages and locally-addressed resources. Distinguishing control plane from data plane at the metering layer adds complexity for negligible savings (protocol messages are tiny relative to delivered resources).
+What is metered is what the node delivers **for or through** the peer. Traffic addressed to or sent by the node itself — TollGate protocol messages, the mint — is not metered, and is **never blocked or shaped**, whatever the peer's access level: blocking it would cut off the payment that restores delivery. Where the delivery path already separates the two, as a kernel does between forwarded and locally-delivered packets, the exemption costs nothing. Where it does not, an implementation may count that traffic, but must still never block it.
 
 ## Cumulative Counter Model
 
@@ -60,31 +60,42 @@ This replaces the two-sided reconciliation of the metered-settlement model, wher
 
 ## ResourceAdapter Trait (Metering Members)
 
-The `ResourceAdapter` trait spans both access control and metering. The metering-related members:
+The `ResourceAdapter` trait spans both access control and metering. It belongs to the host (`tollgate-net`), not to `tollgate-core`: core never does I/O, so the host reads the adapter and hands core what it found. The metering-related members:
 
 ```rust
 pub trait ResourceAdapter: Send + Sync {
-    /// Subscribe to metering counter updates for a peer. The implementation
-    /// pushes cumulative unit counts as they change. Core draws the peer's
-    /// grant down against them and shapes when it is spent.
-    fn subscribe_meter(&self, peer: &Pubkey) -> Result<MeterStream, AdapterError>;
+    /// Cumulative units delivered to and received from a peer. The host reads
+    /// these every tick and core draws the peer's grant down against them.
+    fn counters(&self, peer: PubKey) -> Counters;
 
-    /// Get resource metrics for a peer. Not used for pricing — delivery has
-    /// no price — but available to the operator for capacity and health
+    /// Units per second we want to pull from this peer. Drives the buyer.
+    fn demand(&self, peer: PubKey) -> u64;
+
+    /// The rate a peer is currently shaped to.
+    fn shaping_rate(&self, peer: PubKey) -> u64;
+
+    /// Every peer the adapter is tracking, and forgetting one that has gone.
+    fn peers(&self) -> Vec<PubKey>;
+    fn remove(&self, peer: PubKey);
+
+    /// Resource metrics for a peer. Not used for pricing — delivery has no
+    /// price — but available to the operator for capacity and health
     /// decisions. None for resources without metrics.
-    fn peer_metrics(&self, peer: &Pubkey) -> Option<PeerMetrics>;
+    fn peer_metrics(&self, peer: PubKey) -> Option<PeerMetrics>;
 
     // ... access control members documented in tollgate-access-control.md
 }
 
-/// Continuous metering counter stream. Implementation pushes updates as delivery proceeds.
-pub struct MeterStream {
-    /// Cumulative units delivered TO this peer (outbound)
-    pub delivered: watch::Receiver<u64>,
-    /// Cumulative units received FROM this peer (inbound)
-    pub received: watch::Receiver<u64>,
+/// Defined in tollgate-core, which draws grants down against it.
+pub struct Counters {
+    /// Units delivered TO this peer — its download.
+    pub delivered: u64,
+    /// Units received FROM this peer — its upload.
+    pub received: u64,
 }
 ```
+
+Counters are read, not pushed: reading them once per tick is enough to draw a grant down, and it needs nothing from the delivery path beyond a cumulative count. A delivery path that can push changes as they happen may do so as an optimisation.
 
 ### PeerMetrics
 

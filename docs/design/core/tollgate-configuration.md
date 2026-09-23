@@ -245,7 +245,7 @@ What this node will accept when a peer buys capacity. A grant is a quantity of u
 ```yaml
 grants:
   window_range_ms: [200, 30000]      # payer picks any window in this range, per grant
-  max_rate: null                     # units/second this node will commit to one peer; null = link capacity
+  max_rate: null                     # units/second this node will commit across all buyers; null = link capacity
 ```
 
 `window_range_ms` is advertised in the Offer, and the two ends do different jobs:
@@ -260,7 +260,7 @@ There is no minimum grant size. A short window already bounds message rate, and 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `window_range_ms` | `[200, 30000]` | Payer chooses per grant. Five verifications per second worst case, and no claim held longer than 30 s |
-| `max_rate` | `null` | Rate this node will commit to a single peer. Reached by a TopUp, it is refused with the available rate attached |
+| `max_rate` | `null` | Total rate this node will commit across all buyers at once. A TopUp that would exceed it is refused with the rate still available attached |
 
 There is no transit-loss tolerance. Counters are not exchanged, so there is no second number to disagree with — see [tollgate-metering.md](tollgate-metering.md).
 

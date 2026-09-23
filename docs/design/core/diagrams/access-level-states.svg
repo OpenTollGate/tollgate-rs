@@ -45,7 +45,7 @@
   <!-- ═══ NONE — center top ═══ -->
   <rect x="270" y="75" width="180" height="55" rx="8" class="callout" stroke="#c05050" stroke-width="2"/>
   <text x="360" y="100" text-anchor="middle" class="slabel" fill="#f08080">None</text>
-  <text x="360" y="118" text-anchor="middle" class="sdesc" fill="#909090">blocked, hidden (FIPS)</text>
+  <text x="360" y="118" text-anchor="middle" class="sdesc" fill="#909090">allowance only, hidden (FIPS)</text>
 
   <!-- ═══ ACTIVE — center middle ═══ -->
   <rect x="120" y="225" width="180" height="55" rx="8" class="callout" stroke="#50c050" stroke-width="2"/>
@@ -67,7 +67,7 @@
   <!-- None → Active (down-left) -->
   <line x1="320" y1="130" x2="240" y2="223" stroke="#50c050" stroke-width="1.5" marker-end="url(#ag)"/>
   <text x="220" y="178" text-anchor="end" class="elabel">payment ok</text>
-  <text x="220" y="190" text-anchor="end" class="elabel">(token or channel)</text>
+  <text x="220" y="190" text-anchor="end" class="elabel">(channels funded)</text>
 
   <!-- None → Free (down-right) -->
   <line x1="400" y1="130" x2="480" y2="223" stroke="#50c050" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#ag)"/>
@@ -75,9 +75,9 @@
 
   <!-- Active → Suspended (down) -->
   <line x1="200" y1="280" x2="200" y2="367" stroke="#c05050" stroke-width="1.5" marker-end="url(#ared)"/>
-  <text x="190" y="320" text-anchor="end" class="elabel">balance = 0</text>
-  <text x="190" y="332" text-anchor="end" class="elabel">(or channel exhausted</text>
-  <text x="190" y="344" text-anchor="end" class="elabel">+ rollover timeout)</text>
+  <text x="190" y="320" text-anchor="end" class="elabel">payment lapsed</text>
+  <text x="190" y="332" text-anchor="end" class="elabel">and allowance</text>
+  <text x="190" y="344" text-anchor="end" class="elabel">is zero</text>
 
   <!-- Suspended → Active (up, right side, dashed = recovery) -->
   <line x1="240" y1="370" x2="240" y2="285" stroke="#50c050" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#ag)"/>

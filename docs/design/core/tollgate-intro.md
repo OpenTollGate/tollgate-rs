@@ -10,10 +10,10 @@ TollGate is not a network protocol. It is a payment layer that operates alongsid
 
 | Layer | What it is |
 |---|---|
-| **tollgate-protocol** | Wire format and lifecycle defined in these design documents. Resource-agnostic. Currently lives as a `protocol` module inside `tollgate-core`; it may be extracted into its own crate when there's a real second consumer (a Go or TypeScript implementation, or another Rust crate that needs only message types). |
+| **tollgate-protocol** | Wire format and lifecycle defined in these design documents: messages, CBOR codec, framing. Resource-agnostic, its own `no_std` crate, so another implementation can depend on the message types alone. |
 | **market** | Where vouchers get their money price: acquisition routes, the reliability signal, issuer risk. Specification only — no code depends on it, and a node works without any of it. |
-| **tollgate-core** | Rust library implementing the protocol's resource-agnostic logic: channels, metering, vouchers, access control. Consumers plug in a `Wallet` and a `ResourceAdapter` via traits. |
-| **tollgate-net** | First deployment of TollGate: **(re)selling network access**. Built on `tollgate-core`, it ships the network-forwarding `ResourceAdapter` (traditional IP or a mesh such as [FIPS](https://github.com/nicobao/fips)) and a Cashu wallet. |
+| **tollgate-core** | Rust library implementing the protocol's resource-agnostic logic: grants, buying, metering, access control. Sans-IO: the host feeds it events and carries out the actions it returns, through a `ChannelBackend` and a `ResourceAdapter` it implements. |
+| **tollgate-net** | First deployment of TollGate: **(re)selling network access**. Built on `tollgate-core`, it ships the network-forwarding `ResourceAdapter` (traditional IP or a mesh such as [FIPS](https://github.com/jmcorgan/fips)) and a Spilman `ChannelBackend`. |
 
 A constrained-device variant (`tollgate-net-esp32`) lives in a separate project and consumes the same `tollgate-core`.
 
@@ -63,7 +63,7 @@ Payment flows through **Cashu Spilman channels** — unidirectional payment chan
 
 A peer arrives already holding vouchers for the node it wants service from, or it gets no service. How it acquired them is outside the protocol — see [voucher-acquisition.md](../market/voucher-acquisition.md).
 
-1. **Channel establishment**: The peers open Spilman channels (one per direction). Each peer manages rollover for its own outgoing channel — only the funder needs to initiate, since only the funder puts up new funds. The mint each channel is funded against is the counterparty's own, so it is always reachable.
+1. **Channel establishment**: The peers open Spilman channels (one per direction). Each peer manages rollover for its own outgoing channel — only the funder needs to initiate, since only the funder puts up new funds. Each channel is funded in one of the mints the counterparty lists — usually its own, which is always reachable over the peering link.
 
 2. **Buying capacity**: The payer sends a **TopUp** whenever it wants a rate — a signed channel update carrying a cumulative total and a **window** to spend the new units in. The rate is one divided by the other. A new grant replaces the one in force, so raising the rate mid-window forfeits the remainder; that is what makes the product bandwidth rather than a stored quantity of bytes. Nothing is acknowledged, so a payer can raise its rate and use it in the same breath.
 
@@ -131,7 +131,7 @@ What does *not* survive an outage is acquiring vouchers for a node you have neve
 Non-goals:
 
 - **Routing decisions** — TollGate does not make routing decisions. The underlying system (FIPS, IP, etc.) handles routing. *Future: payment status may influence routing policy (e.g., well-paying peers get favorable routing), but this is an implementation-layer concern, not a TollGate concern.*
-- **Wallet implementation** — `tollgate-core` defines a wallet trait; the implementation provides the actual wallet. Different platforms have different constraints (full Cashu wallet on Linux, constrained wallet on ESP32).
+- **Wallet implementation** — `tollgate-core` holds no wallet and makes no Cashu calls; the host provides them behind its `ChannelBackend`. Different platforms have different constraints (full Cashu wallet on Linux, constrained wallet on ESP32).
 - **Network authentication** — Peers are authenticated by the implementation before TollGate sees them. FIPS uses Noise IK handshakes; a traditional network might use WireGuard; TollGate doesn't care.
 - **Captive portal / user interface** — TollGate is device-to-device. Human-facing UI (captive portals, web dashboards) is built on top, not inside.
 - **Anonymity** — TollGate peers know each other's identities (they have payment channels). Privacy comes from Cashu's blind signatures — the mint cannot link payments to identities.
@@ -145,10 +145,10 @@ The three layers introduced in [What's in this repo](#whats-in-this-repo) — `t
 
 ### tollgate-core (Library)
 
-`tollgate-core` contains all payment logic, pricing, metering, and access control. It is network-agnostic — it does not know about FIPS, IP, or any specific transport. The consumer provides three things via traits:
+`tollgate-core` contains all payment logic, metering, and access control. It is network-agnostic — it does not know about FIPS, IP, or any specific transport — and **sans-IO**: it never does I/O, never reads the clock, and never verifies a signature. The host turns real events into `Event` values, supplies the time, and carries out the `Action`s core returns. To do that, the host implements two traits of its own:
 
-1. **Wallet** — Token operations, Spilman channel funding, balance signing, settlement. Must support token locking (NUT-11 2-of-2 multisig).
-2. **Resource Adapter** — Peer identification, metering counters (units delivered per peer), access control enforcement, and optional metrics for operator visibility.
+1. **ChannelBackend** — Spilman channel funding, balance-update signing and verification, settlement. Must support token locking (NUT-11 2-of-2 multisig). See [tollgate-payment-channels.md](tollgate-payment-channels.md).
+2. **ResourceAdapter** — Peer identification, metering counters (units delivered per peer), access control and shaping enforcement, and optional metrics for operator visibility. See [tollgate-access-control.md](tollgate-access-control.md) and [tollgate-metering.md](tollgate-metering.md).
 3. **Peer Identifiers** — Peers are always identified by their Nostr public key (npub). The consumer provides npubs for connected peers, similar to how FIPS transports provide identifiers to FMP.
 
 ### Separation Model
@@ -189,14 +189,14 @@ tollgate-core (lib)              ← Pure logic, no platform code
 │  │   outbound)  │  │   & Codec    │  │               │    │
 │  └──────────────┘  └──────────────┘  └───────────────┘    │
 │                                                            │
-│  Traits: Wallet, ResourceAdapter                           │
+│  Host traits: ChannelBackend, ResourceAdapter              │
 └────────────────────────────────────────────────────────────┘
 
-  Implementation provides: Cashu Wallet | FIPS/IP Resource Adapter | Operator Config
+  Implementation provides: Spilman Channel Backend | FIPS/IP Resource Adapter | Operator Config
 ```
 </details>
 
-- **Spilman Channel Manager**: Manages the channel pair per peer (one per direction). Handles the full lifecycle: channel funding → active payments → rollover → settlement. Each peer initiates rollover for its own outgoing channel — only the funder needs to act, since only the funder puts up new funds. Delegates cryptographic operations to the Wallet trait. Handles offline scenarios gracefully.
+- **Spilman Channel Manager**: Manages the channel pair per peer (one per direction). Handles the full lifecycle: channel funding → active payments → rollover → settlement. Each peer initiates rollover for its own outgoing channel — only the funder needs to act, since only the funder puts up new funds. Delegates cryptographic operations to the host's ChannelBackend. Handles offline scenarios gracefully.
 
 - **Voucher Mint**: Each node issues vouchers against its own capacity and redeems them on delivery. Redemption is a local spent-proof check — the node is the authority on its own paper.
 
@@ -278,7 +278,7 @@ TollGate uses the [Cashu Spilman channel](https://github.com/SatsAndSports/cashu
 
 ### FIPS (Free Internetworking Peering System)
 
-[FIPS](https://github.com/nicobao/fips) is a self-organizing encrypted mesh that TollGate can run on as one of several supported substrates. See [peering-fips.md](../network-peering/peering-fips.md) for integration details.
+[FIPS](https://github.com/jmcorgan/fips) is a self-organizing encrypted mesh that TollGate can run on as one of several supported substrates. See [peering-fips.md](../network-peering/peering-fips.md) for integration details.
 
 ---
 
@@ -325,5 +325,5 @@ TollGate uses the [Cashu Spilman channel](https://github.com/SatsAndSports/cashu
 - [NUT-11: Spending Conditions](https://github.com/cashubtc/nuts/blob/main/11.md) — P2PK conditions for channel funding
 - [NUT-28: P2BK](https://github.com/cashubtc/nuts/blob/main/28.md) — Pay-to-Blinded-Key for privacy
 - [Spilman Channels (Bitcoin Wiki)](https://en.bitcoin.it/wiki/Payment_channels#Spillman-style_payment_channels) — Original concept
-- [FIPS](https://github.com/nicobao/fips) — Free Internetworking Peering System
+- [FIPS](https://github.com/jmcorgan/fips) — Free Internetworking Peering System
 - [TollGate v1](https://github.com/OpenTollGate/tollgate-module-basic-go) — Original implementation

@@ -120,11 +120,11 @@ TollGate identifies peers by pubkey. The Announce message carries the peer's com
 **Authenticating that pubkey** — proving the peer holds the matching private key — is platform-dependent:
 
 - **On FIPS** (for reference): the pubkey is authenticated by the Noise IK handshake before TollGate sees the peer. Identity is cryptographically tied to the pubkey by the network layer; the peer cannot connect without it.
-- **On IP**: the pubkey in the Announce is self-declared. Without an additional step, anyone can claim any pubkey. Two ways to bind the pubkey to the peer:
-  1. **Challenge-response** at session setup: `tollgate-net` sends a random nonce, the peer signs it with the private key matching the claimed pubkey. Required before granting `Active` access in any deployment where it matters who the peer is.
-  2. **An authenticating transport layer**: run over WireGuard or mTLS where the transport already authenticates the peer's key. The TollGate pubkey can be the same key as the WireGuard/cert key, collapsing the two checks into one layer. See Transport Layer Security below.
+- **On IP**: the pubkey in the Announce is self-declared, and the delivery path gates by IP address. **Impersonation cannot be reliably prevented on a plain IP network.**
 
-For open-hotspot deployments where every peer is anonymous and the only requirement is "they paid," challenge-response can be skipped — the economic exposure is bounded per peer (no pay, no service), and a peer cannot impersonate another peer's channels because Spilman balance updates require the channel funder's private-key signature. Two peers claiming the same pubkey at session setup will collide; implementations should reject duplicate pubkey connections or require challenge-response in high-risk deployments.
+What that exposes: an attacker that announces a paying peer's pubkey, or takes over its IP address, can draw on the service that peer paid for. What it does not expose: the attacker cannot spend or redirect the victim's money, because every balance update needs the channel funder's private-key signature. The loss is bounded by the grant in force — service stolen, not funds. Two sessions claiming the same pubkey collide, and an implementation should refuse the second.
+
+For open-hotspot deployments, where every peer is anonymous and the only requirement is "they paid," that bound is the protection. Where it matters who the peer is, the deployment should run over a network that authenticates peers — FIPS does, and so do WireGuard or mTLS tunnels. Binding the TollGate pubkey to such a layer (challenge-response at session setup, or the TollGate key doubling as the tunnel key) is **future work**.
 
 ### MAC spoofing on IP
 
@@ -164,25 +164,29 @@ Access control is enforced via **firewall rules** (nftables, iptables, pf):
 | `Free` | Allow forwarded traffic from/to this peer's IP. |
 | `Suspended` | Same as `None` — drop forwarded, allow local. |
 
-`set_peer_access()` translates to firewall rule changes. The peer's IP address (from the TollGate session connection) is the identifier. Bloom filter inference is a no-op — bloom filters are not part of the IP model.
+`set_access()` translates to firewall rule changes. The peer's IP address (from the TollGate session connection) is the identifier. Bloom filter inference is a no-op — bloom filters are not part of the IP model.
 
 ### Per-Peer Rate via Traffic Control
 
-`set_shaping_rate()` translates to a **traffic-control class per peer** (`tc`, HTB or HFSC) on the interface facing it, with a filter matching the peer's IP. The firewall decides *whether* a packet is forwarded; the qdisc decides *how fast*.
+`set_shaping_rate()` translates to a **traffic-control class per peer** (`tc` HTB) on the interface facing it. The firewall decides *whether* a packet is forwarded; the qdisc decides *how fast*.
+
+Only **forwarded** traffic is classified. The firewall's forward hook counts each peer's forwarded packets and marks them with that peer's class; a `tc` filter selects the class by the mark. Traffic to and from the node itself — TollGate messages, the mint — never passes the forward hook, is never marked, and falls into an unshaped default class. Shaping it would throttle the payment that restores the peer's rate.
 
 ```
 # Conceptual shaping for customer 02abc... (10.0.0.42) at 3.12 MiB/s:
+nft add rule inet tollgate forward ip daddr 10.0.0.42 \
+    counter meta mark set 0x70110042          # count and mark forwarded packets
 tc class replace dev eth0 parent 1: classid 1:42 htb \
-    rate 3276800bps burst 819200      # ~250 ms of burst, no more
-tc filter replace dev eth0 protocol ip parent 1: prio 1 \
-    u32 match ip dst 10.0.0.42/32 flowid 1:42
+    rate 26214400bit burst 32768              # ~10 ms of burst
+tc filter replace dev eth0 parent 1: protocol ip prio 1 \
+    handle 0x70110042 fw flowid 1:42          # select the class by the mark
 ```
 
 Four properties the shaper has to have, each of which follows from the payment model rather than from networking practice:
 
 - **The rate changes often.** A payer may buy as often as `min_window_ms` allows — 200 ms by default — and a grant takes effect on arrival with no acknowledgement. Updating a class is cheap; tearing down and rebuilding one is not, so the class is created once per peer and only its rate is replaced.
-- **Burst stays well under a second.** Capacity left unused early is *not* banked: a peer that idles and then bursts is precisely what grants exist to prevent. A generous burst would hand back exactly what forfeiture takes away.
-- **Zero is never the rate.** A peer with no live grant falls to the minimum flow allowance, which is what leaves it able to send the TopUp that revives it. The floor is applied by `tollgate-core` before the adapter sees the number, so the adapter always receives a rate it can simply apply.
+- **Burst stays tiny — about 10 ms of the rate.** Capacity left unused early is *not* banked: a peer that idles and then bursts is precisely what grants exist to prevent. Burst is also permission to spend the grant ahead of its window, so a generous one makes the grant lapse early and the transfer it carries stall. It must still pass at least one full-sized packet per timer tick.
+- **The allowance is the floor.** A peer with no live grant falls to the minimum flow allowance. The floor is applied by `tollgate-core` before the adapter sees the number, so the adapter always receives a rate it can simply apply. With the allowance at zero the peer's forwarding is blocked instead — and the TopUp that revives it still gets through, because traffic to the node itself is never shaped or blocked.
 - **Only the peer's download is shaped.** Its upload is charged through the `received_multiplier`, which drains that peer's own grant faster rather than capping its ingress. A peer that pushes harder exhausts its grant sooner and falls to the allowance — no ingress policer is involved.
 
 ### Per-Peer Metering Counters

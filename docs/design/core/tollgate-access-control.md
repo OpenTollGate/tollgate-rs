@@ -6,7 +6,7 @@ This document specifies how TollGate gates delivery per-peer based on payment st
 
 TollGate controls delivery at the peer level. Each peer has an **access level** determined by their payment status. The implementation (FIPS, IP stack, etc.) enforces access control on the delivery path — `tollgate-core` decides *what* to enforce, the resource adapter enforces *how*.
 
-The core principle: **no pay, no delivery**. A peer that hasn't paid cannot have resources delivered through this node. It can only exchange TollGate protocol messages with this node (Announce, Offer, Accept) to establish payment.
+The core principle: **no pay, no delivery** — beyond the minimum flow allowance. A peer that hasn't paid gets at most the allowance: a small, free rate of delivery that lets it reach what it needs to start paying ([tollgate-vouchers.md](tollgate-vouchers.md)). If the node gives no allowance, an unpaid peer gets no delivery at all. Either way it can always exchange TollGate protocol messages with this node (Announce, Offer, Accept) to establish payment.
 
 ---
 
@@ -16,10 +16,10 @@ Each peer is in exactly one access level at any time:
 
 | Level | Delivery | TollGate messages | Bloom filter visibility (FIPS) | When |
 |-------|---------|-------------------|-------------------------------|------|
-| `None` | Blocked | Allowed | Hidden | Peer connected, no payment yet |
-| `Active` | Allowed (metered) | Allowed | Visible | Spilman channels funded |
-| `Free` | Allowed (unmetered) | Allowed | Visible | Neither side charges the other |
-| `Suspended` | Blocked | Allowed | Hidden | Balance exhausted, awaiting top-up or renegotiation |
+| `None` | Minimum flow allowance only; blocked if the allowance is zero | Allowed | Hidden | Peer connected, no payment yet |
+| `Active` | Allowed (metered), never below the allowance | Allowed | Visible | Spilman channels funded |
+| `Free` | Allowed (unmetered) | Allowed | Visible | This node does not charge the peer |
+| `Suspended` | Blocked | Allowed | Hidden | Payment lapsed and the node gives no allowance |
 
 The access level says only whether delivery is allowed and how (metered or not). How much the peer has left to spend is tracked by the payment subsystem and does not surface as an access level.
 
@@ -27,8 +27,8 @@ The access level says only whether delivery is allowed and how (metered or not).
 
 ```
 None --> Active (Spilman channels funded)
-None --> Free (free peering agreed)
-Active --> Suspended (channel exhausted with rollover timeout)
+None --> Free (this node does not charge the peer)
+Active --> Suspended (payment lapsed, allowance zero)
 Suspended --> Active (new channel funded)
 Any --> None (disconnect)
 ```
@@ -38,14 +38,14 @@ Any --> None (disconnect)
 
 ```
                        ┌──────────────┐
-                       │     None     │ (blocked, hidden)
+                       │     None     │ (allowance only, hidden)
                        └──┬─────────┬─┘
               payment ok  │         │ free
                           ▼         ▼
                    ┌──────────┐    ┌───────────┐
                    │  Active  │    │ Free │
                    └────┬─────┘    └───────────┘
-                        │ exhausted (+ timeout for Spilman)
+                        │ payment lapsed, allowance zero
                         ▼
                    ┌──────────┐
                    │ Suspended│ (blocked, hidden)
@@ -60,16 +60,18 @@ Any --> None (disconnect)
 
 ### None (Default)
 
-Every newly connected peer starts at `None`. The peer can exchange TollGate protocol messages — Announce, Offer, Accept — but **no resources are delivered** for or through this peer.
+Every newly connected peer starts at `None`. The peer can exchange TollGate protocol messages — Announce, Offer, Accept — and is delivered at most the **minimum flow allowance** for or through this peer.
 
-This means:
+With a non-zero allowance, the peer's delivery is shaped to that rate. With the allowance at zero:
 - Packets originating from this peer and addressed to other nodes are **dropped**
 - Packets from other nodes destined for or through this peer are **not delivered to it**
-- Only TollGate protocol messages (identified by the implementation) are allowed
+- Only traffic to and from this node itself is allowed, which carries the TollGate protocol messages
 
 ### Active
 
 Spilman channels are funded. Delivery is allowed up to what each side has bought, and each peer's grant is drawn down as traffic passes.
+
+A peer whose payment lapses — its grant ends and nothing replaces it — stays `Active` and is delivered the minimum flow allowance, exactly as an unpaid peer at `None` is. Lapsed payment is not a separate state while the allowance is non-zero.
 
 ### Free
 
@@ -81,18 +83,22 @@ This is a decision about the relationship rather than a price set to zero, and e
 
 ### Suspended
 
-The peer's channel is exhausted and the rollover timeout has expired. Delivery is blocked. The peer can still exchange TollGate messages to fund a new channel.
+The peer's payment has lapsed — its channel is exhausted and nothing replaces it — and this node gives no minimum flow allowance. Delivery is blocked. The peer can still exchange TollGate messages to fund a new channel.
+
+`Suspended` exists only because the allowance can be zero. With a non-zero allowance a lapsed peer keeps the allowance rate and never reaches this state.
 
 ---
 
 ## What "Blocked" Means
 
-When delivery is blocked (`None` or `Suspended`), the node:
+When delivery is blocked (`Suspended`, or `None` with a zero allowance), the node:
 
 1. **Suspends resource delivery from this peer** — packets originating from the peer addressed to other nodes are silently dropped
 2. **Does not deliver to this peer** — packets from other nodes destined for this peer are not delivered (they may be re-routed via other paths)
 3. **Allows control messages** — packets from the peer addressed to *this node* are delivered (this is how TollGate protocol messages reach the node)
 4. **Allows TollGate protocol messages** — the peer must be able to negotiate payment
+
+Traffic addressed to or sent by this node itself is **never blocked**, whatever the peer's access level. It may be measured, but blocking it would cut off the payment that restores delivery.
 
 The implementation decides how to enforce this. In FIPS, this could be a delivery filter that checks the peer's access level before delivering. In a traditional IP network, this could be firewall rules.
 
@@ -111,7 +117,7 @@ In FIPS, bloom filters advertise reachability — "I can reach destination X thr
 | `Free` | Yes — visible (FIPS) |
 | `Suspended` | No — hidden (FIPS) |
 
-Bloom filter visibility is **inferred from the access level** — the implementation maps `set_peer_access(None/Suspended)` to hidden and `set_peer_access(Active/Free)` to visible. No separate API call needed.
+Bloom filter visibility is **inferred from the access level** — the implementation maps `None`/`Suspended` to hidden and `Active`/`Free` to visible when it applies `set_access`. No separate API call needed.
 
 This requires a FIPS modification — the ability to selectively include/exclude peers from bloom filter computation. See [FIPS_FEATURE_REQUESTS.md](../FIPS_FEATURE_REQUESTS.md).
 
@@ -119,32 +125,40 @@ This requires a FIPS modification — the ability to selectively include/exclude
 
 ## ResourceAdapter Trait (Access Control Members)
 
-The `ResourceAdapter` trait spans both access control and metering. The access-control-related members:
+`tollgate-core` never enforces anything itself: it decides, and the host applies the decision through a `ResourceAdapter`. The trait belongs to the host (`tollgate-net`), not to core, so core stays free of I/O. Its access-control members:
 
 ```rust
 pub trait ResourceAdapter: Send + Sync {
-    /// Set the access level for a peer. The implementation enforces delivery rules
-    /// AND infers bloom filter visibility from the access level:
+    /// Apply an access level decided by core. The implementation enforces
+    /// delivery rules AND infers bloom filter visibility from the level:
     /// - None/Suspended -> hidden from bloom filters (FIPS)
     /// - Active/Free -> visible in bloom filters (FIPS)
-    fn set_peer_access(&self, peer: &Pubkey, access: AccessLevel) -> Result<(), AdapterError>;
+    fn set_access(&self, peer: PubKey, access: AccessLevel);
+
+    /// Apply a shaping rate decided by core, in units per second. The rate
+    /// already has the minimum flow allowance as its floor.
+    fn set_shaping_rate(&self, peer: PubKey, rate: u64);
 
     // ... metering members documented in tollgate-metering.md
 }
 
 pub enum AccessLevel {
-    /// No delivery. Only TollGate protocol messages allowed.
+    /// Nothing funded. Minimum flow allowance only; TollGate messages flow.
     None,
     /// Delivery allowed, metered against funded Spilman channels.
     Active,
-    /// Delivery allowed, unmetered. Free peering.
+    /// Delivery allowed, unmetered. This node does not charge the peer.
     Free,
-    /// Delivery blocked. Balance exhausted, awaiting payment.
+    /// Payment lapsed and no allowance is given. Delivery blocked.
     Suspended,
 }
 ```
 
-Counting units delivered, transit-loss reconciliation, and peer metrics are documented in [tollgate-metering.md](tollgate-metering.md).
+An adapter enforces two numbers per peer — the access level and the shaping rate — because a grant buys a rate: a gate alone cannot express what was sold.
+
+Peers are always identified by public key. A delivery path that knows peers by some other address — an IP address, for a firewall — binds the key to that address itself, on the host side; one already keyed by public key, as FIPS is, needs no binding at all.
+
+Counting units delivered and peer metrics are documented in [tollgate-metering.md](tollgate-metering.md).
 
 ---
 
@@ -171,14 +185,14 @@ Counting units delivered, transit-loss reconciliation, and peer metrics are docu
 5. Each side buys grants on its own channel; delivery is shaped to what each has bought
 ```
 
-### Balance Exhausted (Suspended)
+### Payment Lapsed
 
 ```
-1. Channel exhausted + rollover timeout
-2. Set access to Suspended (bloom hidden in FIPS)
-3. Delivery stops
-4. Peer funds a new channel
-5. On payment: transition back to Active
+1. Grant ends and no new one replaces it
+2. Allowance non-zero: shape the peer to the allowance; access stays Active
+   Allowance zero: set access to Suspended (bloom hidden in FIPS), delivery stops
+3. Peer buys a new grant, funding a new channel if needed
+4. On payment: shaped to what was bought (Suspended transitions back to Active)
 ```
 
 ---
@@ -207,9 +221,11 @@ This makes the asymmetric case (`InboundOnly` / `OutboundOnly`) a first-class st
 
 | Decision | Resolution | Rationale |
 |----------|-----------|-----------|
-| Default access | None (blocked) | No pay, no service |
-| Unpaid resources | Only local-addressed + TollGate protocol | Peer must be able to negotiate payment |
+| Default access | None (allowance only) | No pay, no service beyond the allowance |
+| Unpaid resources | Minimum flow allowance + traffic to this node | Peer must be able to reach what it needs to start paying |
+| Traffic to this node | Never blocked | Blocking it would cut off the payment that restores delivery |
 | Bloom filter visibility | Inferred from access level (FIPS) | No separate API — access level implies visibility |
-| Free peers | Skip all payment, go to Active; not transitive | Simplest path for free peering; transitivity would launder free transit |
+| Free peers | Skip all payment, go to Free; not transitive | Simplest path for free peering; transitivity would launder free transit |
+| Lapsed payment | Allowance rate; Suspended only when the allowance is zero | The allowance already covers an unpaid peer; a separate state adds nothing |
 | Suspended state | Blocked but can still negotiate | Peer can recover without reconnecting |
 | Protocol messages | Always allowed regardless of access level | Payment negotiation must work even when blocked |

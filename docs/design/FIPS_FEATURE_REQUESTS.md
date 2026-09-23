@@ -14,7 +14,7 @@ This document consolidates all FIPS modifications required for tollgate-rs integ
 - `local_only`: Only accept traffic FROM this peer addressed TO this node. Drop all transit traffic (addressed to other nodes) from this peer. Do not forward traffic from other nodes to this peer.
 - `full`: Normal forwarding — no restrictions.
 
-**Default for new peers must be `local_only`** — closes the race window between FIPS authenticating a peer and `tollgate-net` setting the access level. No traffic is forwarded for a peer until the operator (`tollgate-net` or any other consumer) explicitly allows it.
+**Default for new peers must be `local_only`** — closes the race window between FIPS authenticating a peer and `tollgate-net` setting the access level. No traffic is forwarded for a peer until the operator (`tollgate-net` or any other consumer) explicitly allows it. Until this lands, `tollgate-net` holds peers it has not yet named to the minimum flow allowance through FIPS's default transit rate, which bounds the window rather than closing it ([peering-fips.md](network-peering/peering-fips.md)).
 
 **Referenced in**: [peering-fips.md](network-peering/peering-fips.md), [tollgate-access-control.md](core/tollgate-access-control.md)
 
@@ -80,7 +80,9 @@ Shaping outside FIPS only reaches part of the traffic. Each node is a distinct `
 - **Peer authenticated**: emitted after Noise IK handshake completes. Provides the peer's compressed public key (33 bytes) and node_addr (16 bytes).
 - **Peer disconnected**: emitted when a peer link is lost (timeout, orderly disconnect, or error). Provides the same identifiers.
 
-**Why**: `tollgate-net` (or any external consumer) needs to create per-peer state on connect (set initial `local_only` policy, begin protocol exchange) and clean up on disconnect (close channels, queue settlement).
+**Why**: `tollgate-net` (or any external consumer) can create per-peer state on connect (set initial `local_only` policy, begin protocol exchange) and clean up on disconnect (close channels, queue settlement) as soon as FIPS knows, rather than when the peer's TollGate connection opens or closes.
+
+**Priority**: nice to have. `tollgate-net` already learns of a peer from its own TollGate control connection and notices it leaving when that connection closes, so this sharpens timing but is not required.
 
 **Referenced in**: [peering-fips.md](network-peering/peering-fips.md)
 
@@ -248,7 +250,7 @@ The physical layer recommendation for TollGate deployments:
 | 2 | **Per-peer forwarding rate (bytes/sec, at the forwarding decision)** | Critical | Medium |
 | 3 | Bloom filter exclusion (inferred from policy) | Critical | Medium |
 | 4 | Per-peer traffic counter livestream (control socket) | Critical | Low — data exists |
-| 5 | Peer lifecycle event stream (control socket) | Critical | Low |
+| 5 | Peer lifecycle event stream (control socket) | Nice to have | Low |
 | 6 | MMP metrics streaming subscription | High | Low |
 | 7 | FSP port dispatch | Future | Medium |
 | 8 | Payment-aware routing | Future | High |

@@ -1,6 +1,6 @@
 # TollGate Payment Channels
 
-This document specifies how TollGate manages Cashu Spilman payment channels between peers — the channel lifecycle, rollover mechanics, offline resilience, and the Wallet trait.
+This document specifies how TollGate manages Cashu Spilman payment channels between peers — the channel lifecycle, rollover mechanics, offline resilience, and the ChannelBackend trait.
 
 What peers pay each other with is documented in [tollgate-vouchers.md](tollgate-vouchers.md). Under vouchers, channels exist to keep the issuer's spent-proof set bounded rather than to prevent theft.
 
@@ -60,7 +60,7 @@ A Spilman channel is already a prepaid instrument — funding it is money commit
 
 ## Channel Pair Lifecycle
 
-The Spilman channel lifecycle begins after peers have exchanged Announce and Offer messages. Each channel is funded against the counterparty's own mint, which is reachable over the peering link by definition.
+The Spilman channel lifecycle begins after peers have exchanged Announce and Offer messages. Each channel is funded in one of the mints the counterparty listed in its Offer — usually its own, which is reachable over the peering link by definition, but any mint on that list will do. A rollover channel is held to the same rule: it may use a different mint from the channel it replaces, but always one the counterparty lists.
 
 ![Channel Pair Lifecycle](diagrams/channel-pair-lifecycle.svg)
 <details><summary>Text version</summary>
@@ -236,7 +236,7 @@ A grant uses whichever channel has remaining capacity. When the old channel hold
 If mint connectivity is lost during rollover:
 - Balance updates on the old channel continue (they don't need the mint)
 - The new channel cannot be funded until mint returns
-- If the old channel exhausts before the new one is funded, delivery pauses for that direction. After a configurable timeout (default: 60 seconds), the session is considered stale and closed.
+- If the old channel exhausts before the new one is funded, that direction falls back to the minimum flow allowance — or pauses, if the allowance is zero ([tollgate-access-control.md](tollgate-access-control.md)). The session stays open: payment can resume as soon as the new channel is funded.
 - Once mint returns: new channel is funded, old channel is settled by the receiver
 
 ---
@@ -360,80 +360,61 @@ The exact growth curve is operator-configurable.
 
 ---
 
-## Wallet Trait
+## ChannelBackend Trait
 
-The core library delegates all Cashu operations to a Wallet trait. The implementation provides the wallet.
+`tollgate-core` does no Cashu operations and no I/O: it decides when a channel should be funded, rolled over or settled, and emits that as an action. The host carries the action out through a `ChannelBackend`, which it owns (`tollgate-net`). A Spilman backend is one implementation; core never learns which one it is talking to.
 
 ```rust
-#[async_trait]
-pub trait Wallet: Send + Sync {
-    /// Receive a voucher token, return value in the keyset's unit
-    async fn receive_token(&self, token: &[u8]) -> Result<Amount, WalletError>;
+pub trait ChannelBackend: Send + Sync {
+    /// Fund a channel to pay `peer` on, against `mint_url` — one of the mints
+    /// the peer listed in its Offer.
+    fn fund(&self, peer: PubKey, mint_url: &str, capacity: u64) -> Result<FundedChannel>;
 
-    /// Create a voucher token of given amount
-    async fn create_token(&self, amount: Amount, mint: &str) -> Result<Vec<u8>, WalletError>;
+    /// Check funding a peer sent us and return the channel it opens.
+    fn verify(&self, peer: PubKey, funding: &[u8]) -> Result<VerifiedChannel>;
 
-    /// Fund a Spilman channel: create 2-of-2 multisig token with NUT-11 conditions
-    async fn fund_channel(&self, params: &ChannelFundParams) -> Result<FundingProof, WalletError>;
+    /// Sign a ratchet turn on a channel we fund.
+    fn sign_update(&self, channel_id: ChannelId, cumulative: u64) -> Result<Signature>;
 
-    /// Verify Spilman funding proofs from a peer (DLEQ, deterministic outputs, policy)
-    async fn verify_funding(&self, proofs: &FundingProof, params: &ChannelFundParams) -> Result<(), WalletError>;
-
-    /// Sign a Spilman balance update (sender side)
-    async fn sign_balance_update(
+    /// Check a peer's ratchet turn on a channel it funds. Called before the
+    /// message reaches core, which trusts what it is handed.
+    fn verify_update(
         &self,
-        channel_id: &ChannelId,
-        new_balance: Amount,
-    ) -> Result<BalanceSignature, WalletError>;
+        peer: PubKey,
+        channel_id: ChannelId,
+        cumulative: u64,
+        signature: Signature,
+    ) -> bool;
 
-    /// Verify a Spilman balance update signature (receiver side)
-    async fn verify_balance_update(
-        &self,
-        channel_id: &ChannelId,
-        balance: Amount,
-        signature: &BalanceSignature,
-    ) -> Result<(), WalletError>;
+    /// Settle a channel: submit the latest signed state to the mint the
+    /// channel was funded in, and reclaim the change.
+    fn settle(&self, channel_id: ChannelId) -> Result<()>;
+}
 
-    /// Settle a channel: receiver submits swap to mint, returns proofs
-    async fn settle_channel(&self, channel_id: &ChannelId) -> Result<SettlementResult, WalletError>;
+pub struct FundedChannel {
+    pub channel_id: ChannelId,
+    pub capacity: u64,
+    /// Opaque funding blob carried in Accept and RolloverInit.
+    pub funding: Vec<u8>,
+}
 
-    /// Check if mint is reachable
-    async fn mint_reachable(&self, mint: &str) -> bool;
-
-    /// Get available balance for a specific mint
-    async fn balance(&self, mint: &str) -> Result<Amount, WalletError>;
-
-    /// Compute channel secret via ECDH (host owns the private key)
-    async fn compute_channel_secret(
-        &self,
-        peer_pubkey: &[u8; 33],
-    ) -> Result<ChannelSecret, WalletError>;
+pub struct VerifiedChannel {
+    pub channel_id: ChannelId,
+    pub capacity: u64,
 }
 ```
 
-### ChannelFundParams
-
-```rust
-pub struct ChannelFundParams {
-    pub mint_url: String,
-    pub mint_unit: String,
-    pub capacity: Amount,
-    pub sender_pubkey: [u8; 33],
-    pub receiver_pubkey: [u8; 33],
-    pub expiry_timestamp: u64,
-    pub channel_secret: ChannelSecret,
-}
-```
+What a channel update commits to is the channel scheme's business, which is why signing lives in the backend: core treats the funding blob and the signature as opaque bytes.
 
 ### Key Operations by State
 
-| State | Wallet operations used |
+| State | Backend operations used |
 |-------|----------------------|
-| Funding | `fund_channel`, `verify_funding`, `compute_channel_secret` |
-| Active | `sign_balance_update`, `verify_balance_update` |
-| Rollover | `fund_channel`, `verify_funding` (new channel), `settle_channel` (old channel) |
-| Settling | `settle_channel` |
-| Offline | `sign_balance_update`, `verify_balance_update` (no mint needed) |
+| Funding | `fund`, `verify` |
+| Active | `sign_update`, `verify_update` |
+| Rollover | `fund`, `verify` (new channel), `settle` (old channel) |
+| Settling | `settle` |
+| Offline | `sign_update`, `verify_update` (no mint needed) |
 
 ---
 
@@ -478,7 +459,7 @@ A payer that receives less than it bought has no protocol recourse: the grant wa
 | Channel ownership | Sender manages own channel lifecycle | Rollover initiated by the funder alone — only the party putting up new funds decides when |
 | Rollover threshold | 80% capacity (configurable, default 20% overlap) | New channel ready before old exhausts |
 | Rollover drain | Old channel drains to 100%, then new channel continues | No wasted capacity |
-| Stale session timeout | 60 seconds (configurable) | Close if rollover can't complete |
+| Stale session timeout | 60 seconds (configurable) | Close a session whose peer has gone silent; a lapsed payment is handled by the allowance, not by closing |
 | Netting | Removed | Prepaid grants are bought at unrelated moments, in different mints, for different windows. There is no shared settlement moment for the two directions to meet in |
 | Grant window | Payer chooses per grant, inside a provider-advertised range | It is the denominator of a rate, not a settlement clock. Nothing is negotiated and no boundary is shared |
 | Provider delivery exposure | None | Payment lands before the traffic it covers, so a peer that vanishes leaves nothing unpaid |
