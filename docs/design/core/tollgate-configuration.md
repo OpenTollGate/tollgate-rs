@@ -93,6 +93,7 @@ mint:
 | `issue_rate_bytes_per_sec` | `125000000` | Vouchers an auto-accepting mint issues per second, across all askers; `0` = unlimited |
 | `issue_burst_bytes` | `4000000000` | Issued at once before the rate applies; never less than one channel's initial capacity |
 | `issue_quotes_per_minute` | `60` | Mint quotes created per minute, a minute's worth at once; `0` = unlimited |
+| `file` | `mint.sqlite` in the state directory, beside the wallet | The mint database: the spent-proof set and the mint quotes issued |
 
 While the market is deferred, `auto_accept` is how a peer comes to hold this
 node's vouchers: a buyer funds a channel by minting at the seller's mint, with
@@ -108,6 +109,10 @@ defaults sit well above honest use: 1 Gbit/s of vouchers is more than the node
 could deliver, 4 GB at once is four default-size channels opening together,
 and one quote a second is far more than a buyer needs, since it asks for one
 per channel it opens.
+
+The keyset is derived from the node's identity, so it survives a restart without the database. The spent-proof set does not: losing `file` makes every voucher this node has already redeemed redeemable again.
+
+The state directory is the first of `/var/lib/tollgate` and `/usr/local/var/lib/tollgate` that exists or can be created, then `$XDG_DATA_HOME/tollgate`, and `/tmp` as a last resort; the wallet's default follows the same rule. A file under `/tmp` does not survive a reboot, and two nodes on one host that both leave `file` empty share one database, so set it explicitly anywhere but a dedicated host.
 
 The unit is fixed by the resource and must match across every node selling it. There is no per-direction unit: what a peer pays to have its outgoing traffic carried is the received multiplier, not a second keyset ([tollgate-vouchers.md](tollgate-vouchers.md)).
 

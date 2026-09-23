@@ -25,6 +25,8 @@ const UNIT: &str = "byte";
 struct Seller {
     mint: Arc<cdk::mint::Mint>,
     url: String,
+    /// Where the mint's database lives, for as long as the mint does.
+    _dir: TempDir,
 }
 
 /// Bring a mint up and serve it, returning once it answers.
@@ -45,12 +47,14 @@ async fn serve_seller(auto_accept: bool, max_amount: u64, issue_limit: IssueLimi
         probe.local_addr().expect("its address")
     };
     let url = format!("http://{listen}");
+    let dir = TempDir::new();
 
     let mint = Arc::new(
         mint::build(&MintConfig {
             url: url.clone(),
             unit: UNIT.into(),
             seed: vec![9; 32],
+            file: dir.path().join("mint.sqlite"),
             max_amount,
             auto_accept,
             issue_limit,
@@ -75,7 +79,11 @@ async fn serve_seller(auto_accept: bool, max_amount: u64, issue_limit: IssueLimi
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    Seller { mint, url }
+    Seller {
+        mint,
+        url,
+        _dir: dir,
+    }
 }
 
 /// A directory that removes itself.
@@ -184,6 +192,7 @@ async fn fund_and_verify(
 ) -> (FundedChannel, VerifiedChannel) {
     let (buyer_id, seller_id) = (Identity::generate(), Identity::generate());
     let seller_dir = TempDir::new();
+    let buyer_mint_dir = TempDir::new();
 
     // The buyer's own mint only matters for channels paid *to* it; here it is
     // simply somewhere to point the config.
@@ -191,6 +200,7 @@ async fn fund_and_verify(
         url: "http://127.0.0.1:1".into(),
         unit: UNIT.into(),
         seed: vec![4; 32],
+        file: buyer_mint_dir.path().join("mint.sqlite"),
         max_amount: 1 << 30,
         auto_accept: false,
         issue_limit: IssueLimit::default(),

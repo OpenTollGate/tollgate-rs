@@ -32,6 +32,10 @@ mint:
   issue_rate_bytes_per_sec: 125000000
   issue_burst_bytes: 4000000000
   issue_quotes_per_minute: 60
+  # The record of which vouchers this mint has already redeemed. The keys come
+  # back from the identity on their own; this does not, and without it every
+  # voucher already paid out redeems again. Kept across a sysupgrade.
+  file: "/etc/tollgate/mint.sqlite"
 
 access:
   minimum_flow:

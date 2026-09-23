@@ -27,6 +27,7 @@ if [ "$PURGE" -eq 1 ]; then
 else
     echo "Removed. Kept:"
     echo "  /usr/local/etc/tollgate      this node's identity"
-    echo "  /usr/local/var/lib/tollgate  its wallet, which is money"
+    echo "  /usr/local/var/lib/tollgate  its wallet, which is money, and its mint's"
+    echo "                               record of vouchers already redeemed"
     echo "Pass --purge to delete those too."
 fi

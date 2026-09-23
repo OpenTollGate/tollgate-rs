@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -97,6 +97,14 @@ pub struct MintSection {
     pub issue_burst_bytes: u64,
     /// Mint quotes an auto-accepting mint creates per minute. `0` is unlimited.
     pub issue_quotes_per_minute: u64,
+    /// Where the mint database lives. Empty picks the state directory the
+    /// packages keep across an upgrade, beside the wallet.
+    ///
+    /// It holds the spent-proof set and the mint quotes the mint has issued.
+    /// The keyset is derived from the identity and comes back on its own, so
+    /// losing this file does not lose the keys: it makes every voucher this
+    /// node has already redeemed redeemable again.
+    pub file: String,
 }
 
 impl Default for MintSection {
@@ -110,6 +118,7 @@ impl Default for MintSection {
             issue_rate_bytes_per_sec: limit.bytes_per_sec,
             issue_burst_bytes: limit.burst_bytes,
             issue_quotes_per_minute: limit.quotes_per_minute,
+            file: String::new(),
         }
     }
 }
@@ -624,6 +633,26 @@ impl File {
     }
 }
 
+/// Where a node keeps one of its state files unless told otherwise.
+///
+/// The first of the directories the packages own that exists or can be made,
+/// so that the wallet and the mint land beside each other and whatever keeps
+/// one across an upgrade keeps the other.
+pub(crate) fn state_file(name: &str) -> PathBuf {
+    for candidate in ["/var/lib/tollgate", "/usr/local/var/lib/tollgate"] {
+        let dir = Path::new(candidate);
+        if dir.is_dir() || std::fs::create_dir_all(dir).is_ok() {
+            return dir.join(name);
+        }
+    }
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
+        && !xdg.is_empty()
+    {
+        return PathBuf::from(format!("{xdg}/tollgate/{name}"));
+    }
+    PathBuf::from(format!("/tmp/tollgate-{name}"))
+}
+
 /// Parse a hex-encoded compressed public key.
 fn parse_pubkey(s: &str) -> Result<PubKey> {
     let bytes = hex::decode(s).with_context(|| format!("peer key {s:?} is not hex"))?;
@@ -766,6 +795,17 @@ mod tests {
             // install time. Anything else in them has to be usable as it is.
             assert_eq!(config.policy.unit, "byte", "{name}");
             assert!(config.policy.minimum_flow > 0, "{name}: no allowance");
+
+            // The mint database sits beside the wallet, where the package
+            // keeps its state across an upgrade.
+            let (mint, wallet) = (Path::new(&file.mint.file), Path::new(&file.wallet.file));
+            assert_eq!(mint.file_name(), Some("mint.sqlite".as_ref()), "{name}");
+            assert_eq!(
+                mint.parent(),
+                wallet.parent(),
+                "{name}: mint and wallet apart"
+            );
+            assert!(mint.is_absolute(), "{name}: a relative mint database");
         }
     }
 

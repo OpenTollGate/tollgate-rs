@@ -737,7 +737,6 @@ mod tests {
     /// purchase, funding and settlement tests below.
     mod live {
         use std::str::FromStr;
-        use std::sync::atomic::{AtomicU64, Ordering};
 
         use cashu::amount::{FeeAndAmounts, SplitTarget};
         use cashu::mint_url::MintUrl;
@@ -746,6 +745,7 @@ mod tests {
 
         use super::*;
         use crate::mint::MintConfig;
+        use crate::tempdir::Dir;
 
         pub(super) const PAYER: [u8; 32] = [1; 32];
         pub(super) const PAYEE: [u8; 32] = [2; 32];
@@ -759,17 +759,20 @@ mod tests {
             )
         }
 
-        /// A byte mint served over HTTP, as a peer reaches it.
-        pub(super) async fn serve_mint(seed: u8) -> (Arc<Mint>, String) {
+        /// A byte mint served over HTTP, as a peer reaches it, with the
+        /// directory its database lives in.
+        pub(super) async fn serve_mint(seed: u8) -> (Arc<Mint>, String, Dir) {
             let addr = std::net::TcpListener::bind("127.0.0.1:0")
                 .and_then(|l| l.local_addr())
                 .expect("a free port");
             let url = format!("http://{addr}");
+            let dir = Dir::new();
             let mint = Arc::new(
                 crate::mint::build(&MintConfig {
                     url: url.clone(),
                     unit: "byte".into(),
                     seed: vec![seed; 32],
+                    file: dir.path().join("mint.sqlite"),
                     max_amount: u64::MAX,
                     auto_accept: true,
                     issue_limit: crate::mint::IssueLimit::default(),
@@ -785,20 +788,11 @@ mod tests {
             ));
             for _ in 0..100 {
                 if tokio::net::TcpStream::connect(addr).await.is_ok() {
-                    return (mint, url);
+                    return (mint, url, dir);
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
             panic!("the mint never came up on {addr}");
-        }
-
-        /// A directory that removes itself, for a wallet nothing reads again.
-        pub(super) struct TempDir(std::path::PathBuf);
-
-        impl Drop for TempDir {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
         }
 
         /// A backend running `mint` at `mint_url` and taking payment in
@@ -808,16 +802,12 @@ mod tests {
             mint_url: &str,
             accepted_mints: Vec<String>,
             secret: [u8; 32],
-        ) -> (SpilmanChannels, TempDir) {
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            let dir = TempDir(std::env::temp_dir().join(format!(
-                "tollgate-spilman-test-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            )));
-            let wallet = crate::wallet::Wallet::open(dir.0.join("wallet.sqlite"), [7; 64], "byte")
-                .await
-                .expect("open a wallet");
+        ) -> (SpilmanChannels, Dir) {
+            let dir = Dir::new();
+            let wallet =
+                crate::wallet::Wallet::open(dir.path().join("wallet.sqlite"), [7; 64], "byte")
+                    .await
+                    .expect("open a wallet");
             let backend = SpilmanChannels::new(SpilmanConfig {
                 mint: Arc::clone(mint),
                 mint_url: mint_url.into(),
@@ -886,12 +876,12 @@ mod tests {
         receiver_key: PubKey,
         payer: SpilmanChannels,
         payer_key: PubKey,
-        _wallets: [live::TempDir; 2],
+        _dirs: [crate::tempdir::Dir; 3],
     }
 
     impl Pair {
         async fn start() -> Self {
-            let (mint, mint_url) = live::serve_mint(3).await;
+            let (mint, mint_url, mint_dir) = live::serve_mint(3).await;
             let accepted = vec![mint_url.clone()];
             let (receiver, receiver_wallet) =
                 live::backend(&mint, &mint_url, accepted.clone(), live::PAYEE).await;
@@ -905,7 +895,7 @@ mod tests {
                 receiver_key: live::pubkey(live::PAYEE),
                 payer,
                 payer_key: live::pubkey(live::PAYER),
-                _wallets: [receiver_wallet, payer_wallet],
+                _dirs: [mint_dir, receiver_wallet, payer_wallet],
             }
         }
 
@@ -1007,7 +997,7 @@ mod tests {
 
         #[tokio::test(flavor = "multi_thread")]
         async fn a_channel_funded_by_one_side_verifies_on_the_other() {
-            let (mint, url) = serve_mint(7).await;
+            let (mint, url, _mint_dir) = serve_mint(7).await;
             let (payer, _payer_wallet) = backend(&mint, &url, vec![url.clone()], PAYER).await;
             let (payee, _payee_wallet) = backend(&mint, &url, vec![url.clone()], PAYEE).await;
 
@@ -1108,8 +1098,8 @@ mod tests {
 
         #[tokio::test(flavor = "multi_thread")]
         async fn a_channel_settles_in_the_mint_it_was_funded_in() {
-            let (ours, ours_url) = serve_mint(7).await;
-            let (theirs, theirs_url) = serve_mint(8).await;
+            let (ours, ours_url, _ours_dir) = serve_mint(7).await;
+            let (theirs, theirs_url, _theirs_dir) = serve_mint(8).await;
             let accepted = vec![ours_url.clone(), theirs_url.clone()];
             let (payer, _payer_wallet) =
                 backend(&theirs, &theirs_url, accepted.clone(), PAYER).await;
@@ -1135,7 +1125,7 @@ mod tests {
 
         #[tokio::test(flavor = "multi_thread")]
         async fn settling_a_channel_with_no_recorded_funding_is_an_error() {
-            let (ours, ours_url) = serve_mint(7).await;
+            let (ours, ours_url, _ours_dir) = serve_mint(7).await;
             let (payee, _payee_wallet) =
                 backend(&ours, &ours_url, vec![ours_url.clone()], PAYEE).await;
             tokio::task::spawn_blocking(move || {

@@ -158,6 +158,12 @@ async fn main() -> Result<()> {
         });
     }
 
+    let mint_path = if file.mint.file.is_empty() {
+        mint::default_path()
+    } else {
+        file.mint.file.clone().into()
+    };
+
     // The mint comes up first. A peer funds its channel against *our* mint, so
     // nothing can be paid for until it is serving.
     let mint = Arc::new(
@@ -167,6 +173,10 @@ async fn main() -> Result<()> {
             // Derived from the identity so a restart keeps issuing against the
             // same keys, and two nodes never share a keyset.
             seed: mint_seed(&config.identity.secret_hex())?,
+            // And the spent-proof set on disk, for the same reason: keys that
+            // survive a restart without it are keys against which every
+            // voucher already redeemed validates again.
+            file: mint_path.clone(),
             max_amount: config.policy.initial_channel_capacity.max(1),
             auto_accept: file.mint.auto_accept,
             issue_limit: file.mint.issue_limit(),
@@ -202,6 +212,7 @@ async fn main() -> Result<()> {
         url = %config.mint_url,
         listen = %config.mint_listen,
         unit = %config.policy.unit,
+        db = %mint_path.display(),
         "mint serving"
     );
 
