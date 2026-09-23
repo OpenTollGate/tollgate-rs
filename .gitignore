@@ -19,6 +19,9 @@ agents/
 
 deploy/
 
+# Local two-node demo; not part of the repository
+demo/
+
 reference/
 
 dist/
