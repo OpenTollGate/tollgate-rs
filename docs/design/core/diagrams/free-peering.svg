@@ -43,8 +43,8 @@
   <rect width="720" height="380" rx="8" class="bg"/>
 
   <!-- Title -->
-  <text x="360" y="28" text-anchor="middle" class="title">Zero-Price Peering</text>
-  <text x="360" y="46" text-anchor="middle" class="subtitle">Both prices = 0 — no funding, no metering, no settlement</text>
+  <text x="360" y="28" text-anchor="middle" class="title">Free Peering</text>
+  <text x="360" y="46" text-anchor="middle" class="subtitle">Neither charges — no funding, no grants, no settlement</text>
 
   <!-- Node headers -->
   <rect x="110" y="65" width="100" height="42" class="node" stroke-width="2" rx="6"/>
@@ -76,10 +76,10 @@
   <text x="40" y="223" text-anchor="middle" class="annot">Pricing</text>
 
   <line x1="170" y1="215" x2="548" y2="215" stroke="#5080c0" stroke-width="1.5" marker-end="url(#aR)"/>
-  <text x="360" y="208" text-anchor="middle" class="alabel" fill="#5080c0">PriceSheet (all prices = 0)</text>
+  <text x="360" y="208" text-anchor="middle" class="alabel" fill="#5080c0">Offer (no charge)</text>
 
   <line x1="550" y1="240" x2="172" y2="240" stroke="#d0a040" stroke-width="1.5" marker-end="url(#aL)"/>
-  <text x="360" y="233" text-anchor="middle" class="alabel" fill="#d0a040">PriceSheet (all prices = 0)</text>
+  <text x="360" y="233" text-anchor="middle" class="alabel" fill="#d0a040">Offer (no charge)</text>
 
   <line x1="70" y1="260" x2="660" y2="260" class="sep"/>
 
@@ -94,5 +94,5 @@
   <text x="360" y="308" text-anchor="middle" class="alabel" fill="#5080c0">Accept (no funding)</text>
 
   <!-- Caption -->
-  <text x="360" y="365" text-anchor="middle" class="caption">Delivery active — no MeteringReport, no BalanceUpdate, no settlement</text>
+  <text x="360" y="365" text-anchor="middle" class="caption">Delivery active — no TopUp, no settlement</text>
 </svg>
