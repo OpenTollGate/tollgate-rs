@@ -1,27 +1,27 @@
-# Sells access. Listens; never dials.
+# A second buyer from the same gateway, started once the first holds the cap.
 identity:
-  secret_key: "78d684aa33cd91c862ca9dd42e969b97e511bf36d4848e6a90d967bc174199c1"
+  secret_key: "36544d0f28de233890c98e7ab5994a4fa6e7ebd9cb409146a4d4c5a935c078a2"
 mint:
-  # Reachable by the client under its compose service name — a peer funds its
-  # channel against this, so it has to resolve from the peer's side.
-  url: "http://gateway:3338"
+  url: "http://client2:3338"
   listen: "0.0.0.0:3338"
   unit: "byte"
 vouchers:
   accepted_mints:
-    - "http://gateway:3338"
-
+    - "http://client2:3338"
 access:
   minimum_flow:
     enabled: true
     bytes_per_second: 4096
-grants:
-  window_range_ms: [200, 30000]
-  # Node-wide: the rate committed across every peer together. The client is
-  # the only peer here, so it is also all the client can buy.
-  max_rate: 3000000
+buying:
+  # Short windows keep the forfeit small and the test quick.
+  window_ms: 1000
+  renew_lead_ms: 300
+
 network:
   listen: "0.0.0.0:4747"
+peers:
+  "02f383c916faa702f91b5e836ed6f12d5f80fb1752ff4db28e6e77997036befd74":
+    endpoint: "gateway:4747"
 market:
   # What this node takes as payment for its own vouchers, and what a unit of it
   # buys. Priced per issuer: paper from a mint you trust less is worth less.

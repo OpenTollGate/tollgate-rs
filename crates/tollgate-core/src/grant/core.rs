@@ -20,7 +20,7 @@ use crate::grant::state::GrantState;
 /// purchase can be honored.
 #[derive(Debug, Clone, Copy)]
 pub struct Admission<'a> {
-    /// Window bounds and the per-peer rate ceiling.
+    /// Window bounds and the node-wide rate ceiling.
     pub policy: &'a GrantPolicy,
     /// Rate already committed to *other* peers, in units per second. Summed by
     /// the host across its live grants.
@@ -28,8 +28,9 @@ pub struct Admission<'a> {
 }
 
 impl Admission<'_> {
-    /// Rate we could still commit to this peer, given what is committed
-    /// elsewhere. `None` in the policy means "whatever the link will bear".
+    /// Rate we could still commit to this peer: the node-wide ceiling less
+    /// what is committed elsewhere. `None` in the policy means "whatever the
+    /// link will bear".
     pub fn rate_available(&self) -> u64 {
         match self.policy.max_rate {
             Some(max) => max.saturating_sub(self.committed_elsewhere),

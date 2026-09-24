@@ -235,8 +235,10 @@ pub struct GrantsSection {
     /// `[min, max]` window in milliseconds. The payer picks any window in this
     /// range, per grant, without negotiating.
     pub window_range_ms: [u32; 2],
-    /// Units per second this node will commit to one peer. Absent means the
-    /// link is the only limit.
+    /// Units per second this node will commit across all its peers together —
+    /// a node-wide ceiling, not a per-peer one, so what one peer can buy is
+    /// what the others' live grants leave. Absent means the link is the only
+    /// limit.
     pub max_rate: Option<u64>,
 }
 

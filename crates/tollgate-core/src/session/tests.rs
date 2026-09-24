@@ -76,6 +76,88 @@ impl Node {
     }
 }
 
+/// Run a set of events, each addressed to a node by id, and everything they
+/// set off, to quiescence. A message goes to the node its `peer` names.
+///
+/// FIFO, because messages arrive in the order they were sent and a LIFO
+/// drain would reorder a node's own Announce behind its Offer.
+fn run(nodes: &mut [&mut Node], now: Millis, initial: impl IntoIterator<Item = (PubKey, Event)>) {
+    let mut queue: VecDeque<(PubKey, Event)> = initial.into_iter().collect();
+
+    while let Some((to, event)) = queue.pop_front() {
+        let node = nodes
+            .iter_mut()
+            .find(|n| n.id == to)
+            .expect("event addressed to a node in the harness");
+        let from = node.id;
+
+        for action in node.sessions.handle(event, now) {
+            match action {
+                // The wire: what one node sends, the other receives.
+                Action::Send { peer, msg } => {
+                    queue.push_back((peer, Event::MessageReceived { peer: from, msg }))
+                }
+
+                // The wallet: funding always succeeds, instantly.
+                Action::FundChannel { peer, capacity, .. } => {
+                    node.next_channel = node.next_channel.wrapping_add(1);
+                    let channel_id = ChannelId([node.next_channel; 32]);
+                    queue.push_back((
+                        from,
+                        Event::OutgoingChannelFunded {
+                            peer,
+                            channel_id,
+                            capacity,
+                            funding: vec![node.next_channel],
+                        },
+                    ));
+                }
+                Action::VerifyFunding { peer, funding } => queue.push_back((
+                    from,
+                    Event::IncomingFundingVerified {
+                        peer,
+                        channel_id: ChannelId([funding[0]; 32]),
+                        capacity: CHANNEL_CAPACITY,
+                    },
+                )),
+
+                // The signer: core decides what to sign, we produce bytes.
+                Action::SignAndSendTopUp {
+                    peer,
+                    ratchets,
+                    window_ms,
+                } => queue.push_back((
+                    peer,
+                    Event::MessageReceived {
+                        peer: from,
+                        msg: Message::TopUp(TopUp {
+                            updates: ratchets
+                                .into_iter()
+                                .map(|(channel_id, cumulative)| ChannelUpdate {
+                                    channel_id,
+                                    cumulative,
+                                    signature: Signature([0; 64]),
+                                })
+                                .collect(),
+                            window_ms,
+                        }),
+                    },
+                )),
+
+                // The resource adapter.
+                Action::SetShapingRate { peer, rate } => {
+                    node.shaping.insert(peer, rate);
+                }
+                Action::SetAccess { peer, access } => {
+                    node.access.insert(peer, access);
+                }
+
+                Action::SettleChannel { .. } | Action::DropPeer { .. } => {}
+            }
+        }
+    }
+}
+
 /// Two nodes and the wire between them.
 struct Link {
     a: Node,
@@ -99,81 +181,12 @@ impl Link {
     }
 
     /// Run a set of events and everything they set off, to quiescence.
-    ///
-    /// FIFO, because messages arrive in the order they were sent and a LIFO
-    /// drain would reorder a node's own Announce behind its Offer.
     fn pump(&mut self, initial: impl IntoIterator<Item = (bool, Event)>) {
-        let mut queue: VecDeque<(bool, Event)> = initial.into_iter().collect();
-
-        while let Some((to_a, event)) = queue.pop_front() {
-            let node = if to_a { &mut self.a } else { &mut self.b };
-            let from = node.id;
-
-            for action in node.sessions.handle(event, self.now) {
-                match action {
-                    // The wire: what one node sends, the other receives.
-                    Action::Send { msg, .. } => {
-                        queue.push_back((!to_a, Event::MessageReceived { peer: from, msg }))
-                    }
-
-                    // The wallet: funding always succeeds, instantly.
-                    Action::FundChannel { peer, capacity, .. } => {
-                        node.next_channel = node.next_channel.wrapping_add(1);
-                        let channel_id = ChannelId([node.next_channel; 32]);
-                        queue.push_back((
-                            to_a,
-                            Event::OutgoingChannelFunded {
-                                peer,
-                                channel_id,
-                                capacity,
-                                funding: vec![node.next_channel],
-                            },
-                        ));
-                    }
-                    Action::VerifyFunding { peer, funding } => queue.push_back((
-                        to_a,
-                        Event::IncomingFundingVerified {
-                            peer,
-                            channel_id: ChannelId([funding[0]; 32]),
-                            capacity: CHANNEL_CAPACITY,
-                        },
-                    )),
-
-                    // The signer: core decides what to sign, we produce bytes.
-                    Action::SignAndSendTopUp {
-                        ratchets,
-                        window_ms,
-                        ..
-                    } => queue.push_back((
-                        !to_a,
-                        Event::MessageReceived {
-                            peer: from,
-                            msg: Message::TopUp(TopUp {
-                                updates: ratchets
-                                    .into_iter()
-                                    .map(|(channel_id, cumulative)| ChannelUpdate {
-                                        channel_id,
-                                        cumulative,
-                                        signature: Signature([0; 64]),
-                                    })
-                                    .collect(),
-                                window_ms,
-                            }),
-                        },
-                    )),
-
-                    // The resource adapter.
-                    Action::SetShapingRate { peer, rate } => {
-                        node.shaping.insert(peer, rate);
-                    }
-                    Action::SetAccess { peer, access } => {
-                        node.access.insert(peer, access);
-                    }
-
-                    Action::SettleChannel { .. } | Action::DropPeer { .. } => {}
-                }
-            }
-        }
+        let (a, b) = (self.a.id, self.b.id);
+        let initial = initial
+            .into_iter()
+            .map(|(to_a, event)| (if to_a { a } else { b }, event));
+        run(&mut [&mut self.a, &mut self.b], self.now, initial);
     }
 
     /// Bring both sides up and run the opening sequence to quiescence.
@@ -482,6 +495,69 @@ fn a_rate_beyond_capacity_is_refused_and_the_payer_re_buys_at_what_was_offered()
         .buyer
         .cumulative();
     assert_eq!(signed, authorized, "payer and provider agree on the total");
+}
+
+#[test]
+fn max_rate_is_shared_by_every_buyer_not_given_to_each() {
+    // grants.max_rate is a node-wide ceiling: what one buyer holds is gone for
+    // the next, and the refusal names only what is left.
+    let mut policy = node_policy("https://s.example/mint");
+    policy.grants.max_rate = Some(5_000_000);
+
+    let mut seller = Node::new(pubkey(0x5E), policy);
+    let mut a = Node::new(pubkey(0xA1), node_policy("https://a.example/mint"));
+    let mut c = Node::new(pubkey(0xC3), node_policy("https://c.example/mint"));
+    let (s, a_id, c_id) = (seller.id, a.id, c.id);
+    let mut nodes = [&mut seller, &mut a, &mut c];
+
+    run(
+        &mut nodes,
+        Millis(0),
+        [
+            (a_id, Event::PeerConnected { peer: s }),
+            (s, Event::PeerConnected { peer: a_id }),
+            (c_id, Event::PeerConnected { peer: s }),
+            (s, Event::PeerConnected { peer: c_id }),
+        ],
+    );
+
+    // A wants 3.2 M/s and buys 4 M/s with its headroom — within the cap.
+    run(
+        &mut nodes,
+        Millis(0),
+        [(
+            a_id,
+            Event::DemandObserved {
+                peer: s,
+                rate: 3_200_000,
+            },
+        )],
+    );
+    assert_eq!(nodes[0].shaping.get(&a_id), Some(&4_000_000));
+
+    // C asks for 5 M/s. Alone it would get all of it; with A holding 4 M/s
+    // the seller refuses and names 1 M/s, and C re-buys at that.
+    run(
+        &mut nodes,
+        Millis(0),
+        [(
+            c_id,
+            Event::DemandObserved {
+                peer: s,
+                rate: 4_000_000,
+            },
+        )],
+    );
+    assert_eq!(
+        nodes[0].shaping.get(&c_id),
+        Some(&1_000_000),
+        "C gets what A left of the cap"
+    );
+    assert_eq!(
+        nodes[0].shaping.get(&a_id),
+        Some(&4_000_000),
+        "A's grant is untouched by C's purchase"
+    );
 }
 
 #[test]

@@ -16,7 +16,7 @@ SKIP_BUILD=1 testing/purchase/test.sh
 |---|---|
 | `peering/` | Two nodes find each other, fund a channel **in each direction**, and reach Active. The client's outgoing channel and the gateway's incoming channel are the same channel — the two ratchets agreeing. |
 | `purchase/` | Demand becomes a purchase and a purchase becomes a shaped rate. The client wants 2 MB/s, buys 125% of it, and the gateway shapes it to exactly that — a number neither node ever sends the other. Real bytes move. |
-| `refusal/` | The gateway sells at most 3 MB/s; the client wants 8. It ends up shaped at the cap rather than blocked, and both sides log the refusal. |
+| `refusal/` | The gateway sells at most 3 MB/s across all its buyers; the client wants 8. It ends up shaped at the cap rather than blocked, and both sides log the refusal. A second client then arrives wanting 2 MB/s: it is refused, and the gateway's buyers together stay within the one cap. |
 | `rollover/` | Channels sized to exhaust in seconds, so the test runs through several. Buying continues across each boundary. |
 | `allowance/` | A client that buys nothing stays on the minimum flow allowance — not blocked, because that allowance is what lets a peer with no vouchers acquire some. |
 | `forwarding/` | The gateway carries somebody else's packets: the client pulls a large file from a third host, every packet crosses the gateway, and nftables and `tc` hold it to the rate it bought. Asserts bytes, not elapsed time. |

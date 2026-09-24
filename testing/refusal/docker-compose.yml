@@ -26,3 +26,18 @@ services:
     depends_on:
       - gateway
       - sat-mint
+
+  # Started by test.sh only after `client` holds the whole cap, so the first
+  # phase still sees one buyer. max_rate is node-wide: this one should be
+  # refused what `client` already holds, not sold a cap of its own.
+  client2:
+    image: tollgate-test:latest
+    profiles: ["second-buyer"]
+    command: ["-c", "/etc/tollgate/client.yaml", "--control-socket", "/run/tollgate.sock", "--demand", "2000000"]
+    volumes:
+      - ./client2.yaml:/etc/tollgate/client.yaml:ro
+    environment:
+      RUST_LOG: "${RUST_LOG:-tollgate_net=debug,info}"
+    depends_on:
+      - gateway
+      - sat-mint

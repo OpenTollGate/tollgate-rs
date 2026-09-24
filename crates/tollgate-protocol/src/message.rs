@@ -114,7 +114,9 @@ pub struct TopUpReject {
     /// one, since a purchase may span several. Signatures are not echoed —
     /// the payer already holds them and this message is rare.
     pub refused: Vec<RefusedUpdate>,
-    /// Units per second we would accept, so the payer can re-purchase at once.
+    /// Units per second we would accept, so the payer can re-purchase at once:
+    /// the provider's node-wide ceiling less what its other peers' live grants
+    /// already hold.
     pub max_rate_available: u64,
     /// Why it was refused.
     pub reason: ReasonCode,

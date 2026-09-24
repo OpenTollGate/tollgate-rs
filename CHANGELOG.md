@@ -15,8 +15,9 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 - `tollgate-protocol`: the wire format — messages, the CBOR codec and TCP
   framing — `no_std` + `alloc`. Messages are numbered contiguously, and every
   refusal carries a reason a peer can act on; `TopUpReject` names a rate the
-  seller *would* take, so a buyer asking above `max_rate` re-buys inside one
-  round trip.
+  seller *would* take, so a buyer asking for more than the node-wide
+  `max_rate` leaves after its other peers' grants re-buys inside one round
+  trip.
 
 - `tollgate-core`: grants, buying, metering and admission control, sans-IO and
   `no_std` + `alloc`, with tests written against the design documents' worked

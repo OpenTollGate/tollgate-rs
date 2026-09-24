@@ -56,9 +56,10 @@ Raising a rate mid-window forfeits what was left of the grant in force. That
 is what makes the product bandwidth rather than a stored quantity of bytes,
 and it is why the buyer only jumps early when demand rises by half again.
 
-A seller can cap the rate it commits to buyers (`grants.max_rate`). Asked for more, it
-refuses before taking any money and names a rate it would take, and the buyer
-re-buys at that rate inside one round trip.
+A seller can cap the total rate it commits across all its buyers
+(`grants.max_rate`) — a node-wide ceiling, not a per-buyer one. Asked for more,
+it refuses before taking any money and names a rate it would take, and the
+buyer re-buys at that rate inside one round trip.
 
 The payment protocol never prices anything. A voucher is a claim on one byte
 of a node's capacity, redeemed one for one. What a byte costs in money is set

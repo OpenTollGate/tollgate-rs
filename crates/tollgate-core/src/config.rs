@@ -25,9 +25,11 @@ pub struct GrantPolicy {
     /// Caps how far ahead capacity can be bought, which is what stops a buyer
     /// accumulating off-peak claims and presenting them all at peak.
     pub max_window_ms: u32,
-    /// Units per second this node will commit to a single peer, or `None` for
-    /// "whatever the link will bear". A TopUp asking for more is refused with
-    /// the available rate attached rather than silently shaped.
+    /// Units per second this node will commit across **all** its peers
+    /// together, or `None` for "whatever the link will bear". It is a
+    /// node-wide ceiling, not a per-peer one: what one peer may buy is this
+    /// less what every other live grant already holds. A TopUp asking for more
+    /// is refused with the available rate attached rather than silently shaped.
     pub max_rate: Option<u64>,
 }
 
