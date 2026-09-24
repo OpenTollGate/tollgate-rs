@@ -357,6 +357,34 @@ impl Buyer {
             .map(|(rate, _)| rate)
     }
 
+    /// Whether `id` is the channel being drained.
+    pub fn is_active(&self, id: ChannelId) -> bool {
+        self.active.is_some_and(|c| c.id == id)
+    }
+
+    /// Start a new session over the channels kept from the last one.
+    ///
+    /// The grant bought in the old session is forgotten, as the provider
+    /// forgets it, so the next purchase is a first one and lands at once. The
+    /// channels and what has been signed on them stay.
+    pub fn restart(&mut self) {
+        *self = Self {
+            active: self.active,
+            next: self.next,
+            pending: self.pending,
+            last_grant: self.last_grant,
+            ..Self::new()
+        };
+    }
+
+    /// Forget a channel we funded that the peer never confirmed.
+    ///
+    /// Only for a peer that has come back without knowing it: nothing was
+    /// signed on it, and while it is held no rollover can start.
+    pub fn forget_pending(&mut self) {
+        self.pending = None;
+    }
+
     /// Record a channel we have funded but the peer has not yet confirmed.
     pub fn funded(&mut self, id: ChannelId, capacity: u64, expires_at: Option<Millis>) {
         self.pending = Some(ChannelBuyer::new(id, capacity, expires_at));

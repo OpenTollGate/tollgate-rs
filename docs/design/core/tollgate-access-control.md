@@ -31,7 +31,7 @@ The access level says only whether delivery is allowed and how (metered or not).
 ### Transitions
 
 ```
-None --> Active (Spilman channel funded)
+None --> Active (Spilman channel funded, or kept across a reconnect)
 None --> Free (this node does not charge the peer)
 Active --> None (payment lapsed: last channel full, its grant run out)
 Any --> None (disconnect)

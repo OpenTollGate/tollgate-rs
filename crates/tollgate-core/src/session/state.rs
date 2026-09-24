@@ -102,6 +102,13 @@ pub struct PeerSession {
     pub applied_rate: Option<u64>,
     /// When we last heard anything at all from them.
     pub last_seen: Millis,
+    /// Whether the peer, coming back after an unclean disconnect, said it
+    /// still holds the channel we pay it on.
+    ///
+    /// It says so with a ChannelReady for that channel, sent between its
+    /// Announce and its Offer. The Offer is where we decide whether to fund, so
+    /// by then this is settled one way or the other.
+    pub kept_by_peer: bool,
 }
 
 impl PeerSession {
@@ -121,7 +128,27 @@ impl PeerSession {
             last_meter_at: now,
             applied_rate: None,
             last_seen: now,
+            kept_by_peer: false,
         }
+    }
+
+    /// Start a new session over the state kept from the last one.
+    ///
+    /// Everything about the connection starts again — the opening sequence,
+    /// what the adapter was told, the meter and the demand, which were
+    /// readings of the old link. The channels in both directions are kept, and
+    /// nothing else: the grants are zeroed on both sides as they are for any
+    /// session that starts.
+    pub fn resume(&mut self, policy: PeerPolicy, now: Millis) {
+        let grant = core::mem::take(&mut self.grant);
+        let buyer = self.buyer;
+        *self = Self {
+            grant,
+            buyer,
+            ..Self::new(self.peer, policy, now)
+        };
+        self.grant.restart();
+        self.buyer.restart();
     }
 
     /// Whether the peer has a live grant with us right now.

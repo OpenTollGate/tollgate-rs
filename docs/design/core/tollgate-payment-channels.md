@@ -276,7 +276,11 @@ If mint connectivity is lost during rollover:
 
 Nodes are not expected to persist runtime state between restarts. On reboot, a node loses metering counters, grant state, channel tracking, and any signed TopUps it was holding. The identity key survives (it's in the config file), so the rebooted node has the same pubkey and can be recognized by peers.
 
-The remaining peer (still online) is the only party that holds the latest channel state. Two scenarios apply:
+The remaining peer (still online) is the only party that holds the latest channel state. Two scenarios apply, after a third that needs no recovery at all:
+
+### Blip: both sides still hold state
+
+A dropped link is not a reboot. After an unclean disconnect each side holds the session for `stale_timeout_seconds`, and a peer that reconnects inside that time resumes both channels where they were: nothing is funded, and what was signed on them still counts. The grants are zeroed as for any new session, so each payer buys again as soon as the Offer arrives. The resume is confirmed with ChannelReady, not a new message — see Reconnection in [tollgate-protocol.md](tollgate-protocol.md#raw-tcp). A session held past the grace period is given up, and its incoming channels are settled. A held channel does not wait for that if its own settle point comes first: the receiver settles it at `expiry − safety_margin/2`, held or not, since past its expiry the payer can take it back through the refund path, and a resume then funds a new one in its place.
 
 ### Friendly recovery
 
@@ -364,7 +368,7 @@ After 4 fills:     16 GiB (max_capacity)
 From then on:      16 GiB
 ```
 
-The new size is computed from the capacity of the channel being replaced, so growth is tracked per session and starts again from `initial_capacity` when a peer reconnects. The exact curve is operator-configurable (see [Channel Parameters](tollgate-configuration.md#channel-parameters)).
+The new size is computed from the capacity of the channel being replaced, so growth follows the channel in use: a peer that resumes its channels after a blip keeps growing from where it was, and one that starts a fresh session starts again from `initial_capacity`. The exact curve is operator-configurable (see [Channel Parameters](tollgate-configuration.md#channel-parameters)).
 
 ---
 
@@ -498,7 +502,7 @@ A payer that receives less than it bought has no protocol recourse: the grant wa
 | Channel ownership | Sender manages own channel lifecycle | Rollover initiated by the funder alone — only the party putting up new funds decides when |
 | Rollover threshold | 80% capacity (configurable, default 20% overlap) | New channel ready before old exhausts |
 | Rollover drain | Old channel drains to 100%, then new channel continues | No wasted capacity |
-| Stale session timeout | 60 seconds (configurable) | Close the connection to a peer that has gone silent; a lapsed payment ends the TollGate session but not the connection |
+| Stale session timeout | 60 seconds (configurable) | Close the connection to a peer that has gone silent; a lapsed payment ends the TollGate session but not the connection. The same time is the grace period for resuming channels after an unclean disconnect |
 | Grant window | Payer chooses per grant, inside a provider-advertised range | It is the denominator of a rate, not a settlement clock. Nothing is negotiated and no boundary is shared |
 | Provider delivery exposure | None | Payment lands before the traffic it covers, so a peer that vanishes leaves nothing unpaid |
 | Under-delivery | No recourse in the channel layer | The grant is consumed whether or not packets arrive. The remedy is to stop buying, and the channel layer's job is only to make leaving cheap |

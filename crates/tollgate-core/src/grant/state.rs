@@ -115,6 +115,27 @@ impl GrantState {
         }
     }
 
+    /// Start a new session over the channels kept from the last one.
+    ///
+    /// The grant is zeroed exactly as it is for a session that starts from
+    /// nothing — a new connection is a new session — but the channels and the
+    /// totals signed on them stay, so the payer carries on ratcheting where it
+    /// left off instead of funding again.
+    ///
+    /// Verification failures are not carried over: they count failures in a
+    /// row on one connection, and a payer that lost track of its total is
+    /// exactly the one that reconnects and starts clean.
+    pub fn restart(&mut self) {
+        let mut channels = core::mem::take(&mut self.channels);
+        for channel in &mut channels {
+            channel.failures = 0;
+        }
+        *self = Self {
+            channels,
+            ..Self::new()
+        };
+    }
+
     /// Recognise a channel the peer has funded and we have verified.
     ///
     /// Re-verifying one we already hold refreshes its capacity and expiry

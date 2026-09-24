@@ -10,11 +10,12 @@
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinHandle;
 use tollgate_core::buyer::BuyerPolicy;
 use tollgate_core::config::{GrantPolicy, NodePolicy, PeerPolicy};
 use tollgate_net::adapter::{Loopback, ResourceAdapter};
@@ -108,6 +109,17 @@ async fn spawn_node(mint: &str, peers: Vec<PeerConfig>) -> Spawned {
 /// policy written about a peer names it, so somebody has to be first — or that
 /// sells on terms of its own.
 async fn spawn_node_as(identity: Identity, policy: NodePolicy, peers: Vec<PeerConfig>) -> Spawned {
+    let channels = Arc::new(LocalChannels::new(identity.clone()));
+    spawn_node_with(identity, policy, channels, peers).await
+}
+
+/// The same again, with the channel backend chosen by the test.
+async fn spawn_node_with(
+    identity: Identity,
+    policy: NodePolicy,
+    channels: Arc<dyn ChannelBackend>,
+    peers: Vec<PeerConfig>,
+) -> Spawned {
     let pubkey = identity.pubkey();
     let (control, data) = bind_planes().await;
     let listen = control.local_addr().expect("a bound address");
@@ -129,11 +141,7 @@ async fn spawn_node_as(identity: Identity, policy: NodePolicy, peers: Vec<PeerCo
     };
 
     let adapter = Arc::new(Loopback::new());
-    let node = Node::new(
-        &config,
-        Arc::new(LocalChannels::new(config.identity.clone())),
-        adapter.clone(),
-    );
+    let node = Node::new(&config, channels, adapter.clone());
     let published = node.published();
     spawn_loopback_plane(&config, data, adapter.clone());
     tokio::spawn(async move {
@@ -643,4 +651,211 @@ async fn a_settlement_that_fails_is_retried_until_it_succeeds() {
             "the {side} should have settled on the attempt after its failures: {attempts:?}"
         );
     }
+}
+
+/// `LocalChannels`, counting what it funds — the one number that tells a
+/// resumed channel from a new one.
+#[derive(Debug)]
+struct Counting {
+    inner: LocalChannels,
+    funded: Arc<AtomicUsize>,
+}
+
+impl ChannelBackend for Counting {
+    fn fund(&self, peer: PubKey, mint_url: &str, capacity: u64) -> anyhow::Result<FundedChannel> {
+        self.funded.fetch_add(1, Ordering::Relaxed);
+        self.inner.fund(peer, mint_url, capacity)
+    }
+
+    fn verify(&self, peer: PubKey, funding: &[u8]) -> anyhow::Result<VerifiedChannel> {
+        self.inner.verify(peer, funding)
+    }
+
+    fn sign_update(&self, channel_id: ChannelId, cumulative: u64) -> anyhow::Result<Signature> {
+        self.inner.sign_update(channel_id, cumulative)
+    }
+
+    fn verify_update(
+        &self,
+        peer: PubKey,
+        channel_id: ChannelId,
+        cumulative: u64,
+        signature: Signature,
+    ) -> bool {
+        self.inner
+            .verify_update(peer, channel_id, cumulative, signature)
+    }
+
+    fn record_update(
+        &self,
+        peer: PubKey,
+        channel_id: ChannelId,
+        cumulative: u64,
+        signature: Signature,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .record_update(peer, channel_id, cumulative, signature)
+    }
+
+    fn settle(&self, channel_id: ChannelId) -> anyhow::Result<()> {
+        self.inner.settle(channel_id)
+    }
+}
+
+/// A TCP relay in front of a node's control plane that the test can cut.
+///
+/// Cutting it closes both sides with a bare FIN and no Disconnect, which is
+/// what a Wi-Fi blip looks like from either end. The data plane beside it is a
+/// plain pass-through that is never cut: a peer finds it one port above the
+/// control plane, so the relay needs both.
+#[derive(Clone, Default)]
+struct Relay {
+    connections: Arc<Mutex<Vec<JoinHandle<()>>>>,
+}
+
+impl Relay {
+    /// Relay a node's two planes through a free pair of adjacent ports, and
+    /// return the endpoint a peer should dial instead of the node's own.
+    async fn spawn(target: &Spawned) -> (Self, String) {
+        let target: SocketAddr = target.endpoint.parse().expect("an address");
+        let data_target = SocketAddr::new(target.ip(), target.port() + 1);
+        let (control, data) = bind_planes().await;
+        let endpoint = control.local_addr().expect("a bound address").to_string();
+
+        let relay = Self::default();
+        relay.forward(control, target);
+        // Never cut, so its connections are not tracked.
+        Self::default().forward(data, data_target);
+        (relay, endpoint)
+    }
+
+    fn forward(&self, listener: TcpListener, target: SocketAddr) {
+        let connections = Arc::clone(&self.connections);
+        tokio::spawn(async move {
+            while let Ok((mut inbound, _)) = listener.accept().await {
+                let Ok(mut outbound) = TcpStream::connect(target).await else {
+                    continue;
+                };
+                let pipe = tokio::spawn(async move {
+                    let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                });
+                connections.lock().expect("not poisoned").push(pipe);
+            }
+        });
+    }
+
+    /// Drop every connection through the relay. New ones are still accepted.
+    fn cut(&self) {
+        for pipe in self.connections.lock().expect("not poisoned").drain(..) {
+            pipe.abort();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_link_that_blips_resumes_its_channels_instead_of_funding_new_ones() {
+    // The control plane drops with no Disconnect and the client redials. Both
+    // nodes still hold both channels, so the session carries on over them: no
+    // new funding on either side, and the same channel ids either end.
+    let resumable = |mint: &str| NodePolicy {
+        stale_timeout_ms: 60_000,
+        ..node_policy(mint)
+    };
+    let counting = |identity: &Identity, funded: &Arc<AtomicUsize>| {
+        Arc::new(Counting {
+            inner: LocalChannels::new(identity.clone()),
+            funded: Arc::clone(funded),
+        })
+    };
+
+    let provider_identity = Identity::generate();
+    let provider_funded = Arc::new(AtomicUsize::new(0));
+    let provider_node = spawn_node_with(
+        provider_identity.clone(),
+        resumable("https://provider.example/mint"),
+        counting(&provider_identity, &provider_funded),
+        vec![],
+    )
+    .await;
+    let provider = provider_node.pubkey;
+    let provider_adapter = Arc::clone(&provider_node.adapter);
+    let provider_published = provider_node.published.clone();
+
+    // The client reaches the provider only through the relay.
+    let (relay, relay_endpoint) = Relay::spawn(&provider_node).await;
+
+    let client_identity = Identity::generate();
+    let client_funded = Arc::new(AtomicUsize::new(0));
+    let client_node = spawn_node_with(
+        client_identity.clone(),
+        resumable("https://client.example/mint"),
+        counting(&client_identity, &client_funded),
+        vec![PeerConfig {
+            pubkey: provider,
+            endpoint: Some(relay_endpoint),
+            policy: PeerPolicy::default(),
+        }],
+    )
+    .await;
+    let client = client_node.pubkey;
+    let client_adapter = Arc::clone(&client_node.adapter);
+
+    client_adapter.set_demand(provider, 1_000_000);
+    let probe = Arc::clone(&provider_adapter);
+    wait_for("the first purchase", move || {
+        probe.shaping_rate(client) == 1_250_000
+    })
+    .await;
+    let channels = |published: &tollgate_net::control::Published| {
+        let snapshot = published.load();
+        let peer = snapshot.peers.first()?;
+        Some((
+            peer.incoming_channels.first()?.id.clone(),
+            peer.outgoing_channel.as_ref()?.id.clone(),
+        ))
+    };
+    let probe = provider_published.clone();
+    wait_for("both channels open", move || channels(&probe).is_some()).await;
+    let before = channels(&provider_published).expect("channels");
+    let funded = (
+        provider_funded.load(Ordering::Relaxed),
+        client_funded.load(Ordering::Relaxed),
+    );
+    assert_eq!(funded, (1, 1), "one channel each way");
+
+    relay.cut();
+
+    let probe = provider_published.clone();
+    wait_for("the provider to notice", move || {
+        probe.load().peers.is_empty()
+    })
+    .await;
+
+    // The client redials on its own. Demand was a reading of the old link, so
+    // the host reports it again on the new one.
+    let probe = provider_published.clone();
+    wait_for("the client to come back", move || {
+        !probe.load().peers.is_empty()
+    })
+    .await;
+    client_adapter.set_demand(provider, 1_000_000);
+    let probe = Arc::clone(&provider_adapter);
+    wait_for("buying to resume", move || {
+        probe.shaping_rate(client) == 1_250_000
+    })
+    .await;
+
+    assert_eq!(
+        channels(&provider_published).expect("channels"),
+        before,
+        "the same channels, both ways"
+    );
+    assert_eq!(
+        (
+            provider_funded.load(Ordering::Relaxed),
+            client_funded.load(Ordering::Relaxed),
+        ),
+        funded,
+        "nothing new was funded"
+    );
 }

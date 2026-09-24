@@ -6,6 +6,10 @@
 //! pay on. After that the two payment streams are unsynchronized: each side
 //! tops up on its own schedule, for its own windows, and neither waits for the
 //! other.
+//!
+//! A peer that drops without saying Disconnect is held for a while rather than
+//! forgotten. If it comes back in time, the new session picks up the channels
+//! the old one left — both sides still hold them, so there is nothing to fund.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -17,7 +21,7 @@ use tollgate_protocol::{
 
 use crate::access::AccessLevel;
 use crate::action::Action;
-use crate::buyer::{self, BuyerPolicy, Demand, RolloverReason, WindowBounds};
+use crate::buyer::{self, Buyer, BuyerPolicy, Demand, RolloverReason, WindowBounds};
 use crate::config::{NodePolicy, PeerPolicy};
 use crate::event::Event;
 use crate::grant::{self, Admission, Verdict};
@@ -31,7 +35,18 @@ pub struct Sessions {
     node: NodePolicy,
     buyer_policy: BuyerPolicy,
     peers: BTreeMap<PubKey, PeerSession>,
+    /// Peers that went away uncleanly, held so they can resume their channels
+    /// if they come back within the grace period.
+    parked: BTreeMap<PubKey, Parked>,
     overrides: BTreeMap<PubKey, PeerPolicy>,
+}
+
+/// A session whose transport went away without a Disconnect.
+#[derive(Debug)]
+struct Parked {
+    session: PeerSession,
+    /// When it went.
+    since: Millis,
 }
 
 impl Sessions {
@@ -42,6 +57,7 @@ impl Sessions {
             node,
             buyer_policy,
             peers: BTreeMap::new(),
+            parked: BTreeMap::new(),
             overrides: BTreeMap::new(),
         }
     }
@@ -57,6 +73,22 @@ impl Sessions {
     /// Inspect a peer's session.
     pub fn peer(&self, peer: &PubKey) -> Option<&PeerSession> {
         self.peers.get(peer)
+    }
+
+    /// A peer that went away uncleanly and whose channels are being held in
+    /// case it comes back.
+    pub fn parked(&self, peer: &PubKey) -> Option<&PeerSession> {
+        self.parked.get(peer).map(|p| &p.session)
+    }
+
+    /// How long a peer that went away uncleanly is held for.
+    ///
+    /// The stale timeout, because a bare FIN is treated as an unclean
+    /// disconnect and gets the same cleanup as a timeout — so it gets it on the
+    /// same clock. Zero, which switches the timeout off, holds nothing: holding
+    /// state forever for a peer that never returns is a leak.
+    fn resume_grace_ms(&self) -> u64 {
+        self.node.stale_timeout_ms
     }
 
     /// Every peer we are tracking.
@@ -82,13 +114,7 @@ impl Sessions {
             // Every channel a peer paid us on holds value we can still claim.
             // Settling is the point at which our own spent-proof set stops
             // growing, so it is worth doing before we go.
-            for channel in session.grant.channels() {
-                out.push(Action::SettleChannel {
-                    peer: *peer,
-                    channel_id: channel.id,
-                    expires_at: channel.expires_at,
-                });
-            }
+            Self::discard(*peer, session, &mut out);
 
             out.push(Action::Send {
                 peer: *peer,
@@ -96,6 +122,12 @@ impl Sessions {
                     reason: ReasonCode::Other,
                 }),
             });
+        }
+
+        // A peer held after an unclean disconnect will not find us when it
+        // comes back, so what it paid us is claimed now or not at all.
+        for (peer, mut parked) in core::mem::take(&mut self.parked) {
+            Self::discard(peer, &mut parked.session, &mut out);
         }
         out
     }
@@ -105,9 +137,7 @@ impl Sessions {
         let mut out = Vec::new();
         match event {
             Event::PeerConnected { peer } => self.on_connected(peer, now, &mut out),
-            Event::PeerDisconnected { peer } => {
-                self.peers.remove(&peer);
-            }
+            Event::PeerDisconnected { peer } => self.on_disconnected(peer, now, &mut out),
             Event::MessageReceived { peer, msg } => self.on_message(peer, msg, now, &mut out),
             Event::TopUpSignatureInvalid { peer, channel_id } => {
                 // Still something heard from them, even if it bought nothing.
@@ -192,7 +222,9 @@ impl Sessions {
                         && let Some(session) = self.peers.get(&peer)
                         && now.saturating_since(session.last_seen) > self.node.stale_timeout_ms
                     {
-                        self.peers.remove(&peer);
+                        // Silence is an unclean disconnect too: a link that
+                        // died without a FIN looks exactly like this.
+                        self.park(peer, now, &mut out);
                         out.push(Action::DropPeer { peer });
                         continue;
                     }
@@ -204,9 +236,97 @@ impl Sessions {
                     self.poll_buyer(peer, now, &mut out);
                     self.poll_rollover(peer, now, &mut out);
                 }
+                self.expire_parked(now, &mut out);
             }
         }
         out
+    }
+
+    // -----------------------------------------------------------------------
+    // Going away and coming back
+    // -----------------------------------------------------------------------
+
+    /// The transport went away.
+    ///
+    /// After a Disconnect, sent or received, the session is over: it goes, and
+    /// what the peer paid us is settled. Without one it is held: a Wi-Fi blip
+    /// should not cost both sides a new channel each.
+    fn on_disconnected(&mut self, peer: PubKey, now: Millis, out: &mut Vec<Action>) {
+        let Some(session) = self.peers.get(&peer) else {
+            return;
+        };
+        if session.phase == Phase::Closing {
+            if let Some(mut session) = self.peers.remove(&peer) {
+                Self::discard(peer, &mut session, out);
+            }
+            return;
+        }
+        self.park(peer, now, out);
+    }
+
+    /// Hold a live session for the grace period, or let it go if there is none.
+    fn park(&mut self, peer: PubKey, now: Millis, out: &mut Vec<Action>) {
+        let Some(mut session) = self.peers.remove(&peer) else {
+            return;
+        };
+        if self.resume_grace_ms() == 0 {
+            Self::discard(peer, &mut session, out);
+            return;
+        }
+        self.parked.insert(
+            peer,
+            Parked {
+                session,
+                since: now,
+            },
+        );
+    }
+
+    /// Let go of every held session whose peer did not come back in time.
+    fn expire_parked(&mut self, now: Millis, out: &mut Vec<Action>) {
+        let grace = self.resume_grace_ms();
+        let expired: Vec<PubKey> = self
+            .parked
+            .iter()
+            .filter(|(_, p)| now.saturating_since(p.since) > grace)
+            .map(|(peer, _)| *peer)
+            .collect();
+        for peer in expired {
+            if let Some(mut parked) = self.parked.remove(&peer) {
+                Self::discard(peer, &mut parked.session, out);
+            }
+        }
+
+        // One still inside its grace keeps its channels, but not past the
+        // point where the peer could take them back through the refund path:
+        // a grace period longer than what is left of a channel would otherwise
+        // hand the peer what it already paid us on it. Settled here, the
+        // channel is no longer held, so a resume does not affirm it and the
+        // peer funds afresh.
+        let lead_ms = self.settle_lead_ms();
+        for (peer, parked) in &mut self.parked {
+            Self::settle_expiring_in(*peer, &mut parked.session, now, lead_ms, out);
+        }
+    }
+
+    /// Give up on a session for good.
+    ///
+    /// Every channel the peer paid us on holds value we can still claim, and
+    /// nobody will turn its ratchet again, so it is settled now rather than
+    /// lost with the state — and closed, so it is settled once.
+    fn discard(peer: PubKey, session: &mut PeerSession, out: &mut Vec<Action>) {
+        let settled: Vec<_> = session.grant.channels().iter().map(|c| c.id).collect();
+        for channel_id in settled {
+            let expires_at = session
+                .grant
+                .close_channel(channel_id)
+                .and_then(|c| c.expires_at);
+            out.push(Action::SettleChannel {
+                peer,
+                channel_id,
+                expires_at,
+            });
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -227,7 +347,43 @@ impl Sessions {
             return;
         }
 
-        self.peers.insert(peer, PeerSession::new(peer, policy, now));
+        // A new connection is a fresh session with a fresh Announce. If we still
+        // hold state for this key — the old transport died without a
+        // Disconnect, or has not been noticed dying yet — the session starts
+        // over those channels instead of none.
+        let kept = match self.peers.remove(&peer) {
+            Some(session) if session.phase != Phase::Closing => Some(session),
+            closing => {
+                // One that was ending is over; the new connection does not
+                // revive it, but what the peer paid on it is still ours.
+                if let Some(mut session) = closing {
+                    Self::discard(peer, &mut session, out);
+                }
+                self.parked.remove(&peer).and_then(|mut p| {
+                    if now.saturating_since(p.since) <= self.resume_grace_ms() {
+                        Some(p.session)
+                    } else {
+                        Self::discard(peer, &mut p.session, out);
+                        None
+                    }
+                })
+            }
+        };
+        let session = match kept {
+            Some(mut session) => {
+                session.resume(policy, now);
+                // A channel already due to be settled is not one to carry on
+                // with: settle it now rather than affirm it and settle it on
+                // the next tick.
+                let lead_ms = self.settle_lead_ms();
+                Self::settle_expiring_in(peer, &mut session, now, lead_ms, out);
+                session
+            }
+            None => PeerSession::new(peer, policy, now),
+        };
+        let held: Vec<tollgate_protocol::ChannelId> =
+            session.grant.channels().iter().map(|c| c.id).collect();
+        self.peers.insert(peer, session);
 
         // Blocked until they pay — but the minimum flow allowance still applies
         // as a shaping floor, which is what lets a peer that holds no vouchers
@@ -245,6 +401,20 @@ impl Sessions {
                 capabilities: 0,
             }),
         });
+
+        // The friendly path, for a blip rather than a reboot: say which of the
+        // channels they pay us on we still hold. ChannelReady already means
+        // "the channel you pay me on is live", and sending it before our Offer
+        // means it arrives before theirs is answered — which is where the peer
+        // decides whether to fund. A peer that kept nothing ignores it, since
+        // it has funded nothing yet for it to confirm.
+        for channel_id in held {
+            out.push(Action::Send {
+                peer,
+                msg: Message::ChannelReady(ChannelReady { channel_id }),
+            });
+        }
+
         out.push(Action::Send {
             peer,
             msg: self.our_offer(&policy),
@@ -288,9 +458,16 @@ impl Sessions {
             Message::Accept(m) => self.on_accept(peer, m, now, out),
             Message::ChannelReady(m) => {
                 // The channel we pay them on is live. Nothing to confirm back —
-                // they sent this because they verified our funding.
+                // they sent this because they verified our funding, or, for the
+                // channel we are already draining, because they came back
+                // still holding it.
                 if let Some(session) = self.peers.get_mut(&peer) {
-                    session.buyer.confirmed(m.channel_id);
+                    if !session.buyer.is_active(m.channel_id) {
+                        session.buyer.confirmed(m.channel_id);
+                    }
+                    // Only read at their opening Offer, and in a session that
+                    // started from nothing no ChannelReady can arrive before it.
+                    session.kept_by_peer |= session.buyer.is_active(m.channel_id);
                 }
                 self.poll_buyer(peer, now, out);
             }
@@ -353,6 +530,7 @@ impl Sessions {
                 // had not been confirmed.
             }
             Message::Disconnect(_) => {
+                // Orderly: the session ends here, and is not held for a return.
                 if let Some(session) = self.peers.get_mut(&peer) {
                     session.phase = Phase::Closing;
                 }
@@ -363,6 +541,9 @@ impl Sessions {
 
     fn on_announce(&mut self, peer: PubKey, m: Announce, out: &mut Vec<Action>) {
         if m.version != PROTOCOL_VERSION {
+            if let Some(session) = self.peers.get_mut(&peer) {
+                session.phase = Phase::Closing;
+            }
             out.push(Action::Send {
                 peer,
                 msg: Message::Reject(Reject {
@@ -410,6 +591,31 @@ impl Sessions {
             return;
         }
 
+        // A session resumed after an unclean disconnect. If the peer said it
+        // still holds the channel we pay it on, carry on paying on it: nothing
+        // to fund, and nothing to Accept, since the peer already knows.
+        // Otherwise it has lost it, and what we hold is worth only its refund,
+        // so start over exactly as a new peer would. There is nothing for us
+        // to settle: only the receiver can, and what is left in a channel we
+        // funded comes back only through its refund timelock.
+        //
+        // Nor if there is nothing to buy any more — the peer stopped charging
+        // us while we were away, or we stopped buying. Then we let the channel
+        // go and answer with the empty Accept below, which also tells the peer
+        // to settle what we signed on it.
+        let buying = !m.no_charge && self.buyer_policy.max_rate > 0;
+        if session.buyer.active().is_some() {
+            if session.kept_by_peer && buying {
+                // A channel it never confirmed is one it does not know about.
+                session.buyer.forget_pending();
+                session.phase = Phase::Established;
+                self.refresh(peer, now, out);
+                self.poll_buyer(peer, now, out);
+                return;
+            }
+            session.buyer = Buyer::new();
+        }
+
         // Fund the channel we will pay them on, against the earliest mint in
         // their list we can use. Their own mint need not be in it: a
         // pass-through relay may name only its upstream's, so it can spend what
@@ -419,7 +625,7 @@ impl Sessions {
         // channel, and the empty Accept tells them so.
         let mint = m.accepted_mints.first().cloned();
         match mint {
-            Some(mint_url) if !m.no_charge && self.buyer_policy.max_rate > 0 => {
+            Some(mint_url) if buying => {
                 // Start small: a new peering may not last. The capacity grows
                 // as rollovers show that it does.
                 out.push(Action::FundChannel {
@@ -470,6 +676,14 @@ impl Sessions {
     }
 
     fn on_accept(&mut self, peer: PubKey, m: Accept, now: Millis, out: &mut Vec<Action>) {
+        // An Accept starts the peer's payment stream from nothing. Any channel
+        // it paid us on before is one it has forgotten — it came back without
+        // its state — so settle what it signed rather than wait on a ratchet
+        // nobody will turn again.
+        if let Some(session) = self.peers.get_mut(&peer) {
+            Self::discard(peer, session, out);
+        }
+
         if m.funding.is_empty() {
             // They funded nothing, so they will not be paying us. That is only
             // acceptable if the operator said not to charge them; otherwise
@@ -810,10 +1024,27 @@ impl Sessions {
     /// the receiver protecting earnings it already has. Only the receiver
     /// settles; the funder rolls over earlier and has moved on by now.
     fn settle_expiring(&mut self, peer: PubKey, now: Millis, out: &mut Vec<Action>) {
-        let lead_ms = self.node.settle_lead_ms(self.node.grants.max_window_ms);
-        let Some(session) = self.peers.get_mut(&peer) else {
-            return;
-        };
+        let lead_ms = self.settle_lead_ms();
+        if let Some(session) = self.peers.get_mut(&peer) {
+            Self::settle_expiring_in(peer, session, now, lead_ms, out);
+        }
+    }
+
+    /// How long before a channel's expiry we, as its receiver, settle it.
+    fn settle_lead_ms(&self) -> u64 {
+        self.node.settle_lead_ms(self.node.grants.max_window_ms)
+    }
+
+    /// Settle, and stop recognising, every channel in `session` within
+    /// `lead_ms` of its expiry — live or held, the refund path opens on the
+    /// same clock.
+    fn settle_expiring_in(
+        peer: PubKey,
+        session: &mut PeerSession,
+        now: Millis,
+        lead_ms: u64,
+        out: &mut Vec<Action>,
+    ) {
         let due: Vec<_> = session.grant.expiring_channels(now, lead_ms).collect();
         for channel_id in due {
             let expires_at = session
@@ -887,6 +1118,9 @@ impl Sessions {
     }
 
     fn reject(&mut self, peer: PubKey, reason: ReasonCode, out: &mut Vec<Action>) {
+        if let Some(session) = self.peers.get_mut(&peer) {
+            session.phase = Phase::Closing;
+        }
         out.push(Action::Send {
             peer,
             msg: Message::Disconnect(Disconnect { reason }),

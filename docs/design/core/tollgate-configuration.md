@@ -246,7 +246,7 @@ channels:
   ttl_seconds: 3600                        # channel expiry (default: 1 hour)
   rollover_threshold_pct: 80               # rollover at 80% capacity used
   safety_margin_seconds: 60                # floor of the margin before expiry
-  stale_timeout_seconds: 60                # close a session whose peer has been silent this long
+  stale_timeout_seconds: 60                # close a session whose peer has been silent this long, and hold it as long again for a return
 ```
 
 ### Defaults
@@ -260,11 +260,11 @@ channels:
 | `ttl_seconds` | `3600` | Lifetime of a channel this node funds (1 hour). As a receiver, this node refuses a channel expiring sooner than half its own TTL |
 | `rollover_threshold_pct` | `80` | Trigger rollover at 80% exhaustion |
 | `safety_margin_seconds` | `60` | The floor of the safety margin, which is `max(safety_margin_seconds, 2 × max_window_ms)` — see [Safety Margin](tollgate-payment-channels.md#safety-margin) |
-| `stale_timeout_seconds` | `60` | Session closed if the peer sends nothing for this long |
+| `stale_timeout_seconds` | `60` | Session closed if the peer sends nothing for this long. Also how long a session that ended without a Disconnect is held, so a peer that reconnects can resume its channels; then its incoming channels are settled, as is any held channel that reaches its settle point first. `0` disables both: silence never closes a session, and a disconnect settles at once |
 
 Capacities must satisfy `0 < min_capacity ≤ initial_capacity ≤ max_capacity`, and `ttl_seconds` must be at least twice the safety margin, so a channel is never born inside its own margin.
 
-`capacity_growth_factor` rewards a peer relationship that has proven stable across rollovers. It applies to the channels this node funds — the peer's revenue channels — since only the funder chooses a channel's size. Every channel is funded by the party that owes, so growth always tracks a paying relationship and has nothing to run away on; `max_capacity` bounds it. Growth is tracked per session and starts again from `initial_capacity` when a peer reconnects.
+`capacity_growth_factor` rewards a peer relationship that has proven stable across rollovers. It applies to the channels this node funds — the peer's revenue channels — since only the funder chooses a channel's size. Every channel is funded by the party that owes, so growth always tracks a paying relationship and has nothing to run away on; `max_capacity` bounds it. Growth follows the channel in use: a peer that reconnects within the grace period resumes its channels, so the next rollover grows from where it was, while one that starts a fresh session starts again from `initial_capacity`.
 
 ---
 

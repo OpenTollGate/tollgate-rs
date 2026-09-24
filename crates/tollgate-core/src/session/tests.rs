@@ -53,6 +53,14 @@ fn node_policy(mint: &str) -> NodePolicy {
     }
 }
 
+/// The grace period for an unclean disconnect is the stale timeout.
+fn grace_policy(mint: &str, grace_ms: u64) -> NodePolicy {
+    NodePolicy {
+        stale_timeout_ms: grace_ms,
+        ..node_policy(mint)
+    }
+}
+
 fn buyer_policy() -> BuyerPolicy {
     BuyerPolicy {
         window_ms: 2_000,
@@ -221,6 +229,15 @@ impl Link {
         }
     }
 
+    /// Two nodes that hold a peer's state for `grace_ms` after it drops
+    /// without a Disconnect.
+    fn with_grace(grace_ms: u64) -> Self {
+        let mut link = Self::new();
+        link.a = Node::new(link.a.id, grace_policy("https://a.example/mint", grace_ms));
+        link.b = Node::new(link.b.id, grace_policy("https://b.example/mint", grace_ms));
+        link
+    }
+
     /// Feed one event and run everything it sets off to completion, including
     /// whatever the other node does in reply.
     fn deliver(&mut self, to_a: bool, event: Event) {
@@ -244,6 +261,15 @@ impl Link {
         self.pump([
             (true, Event::PeerConnected { peer: b }),
             (false, Event::PeerConnected { peer: a }),
+        ]);
+    }
+
+    /// Both transports go away with no Disconnect — a Wi-Fi blip, a bare FIN.
+    fn blip(&mut self) {
+        let (a, b) = (self.a.id, self.b.id);
+        self.pump([
+            (true, Event::PeerDisconnected { peer: b }),
+            (false, Event::PeerDisconnected { peer: a }),
         ]);
     }
 
@@ -1780,4 +1806,472 @@ fn the_safety_margin_is_a_minute_or_two_windows_whichever_is_longer() {
     assert_eq!(policy.safety_margin_ms(10_000), 60_000, "the floor");
     assert_eq!(policy.safety_margin_ms(45_000), 90_000, "two windows");
     assert_eq!(policy.settle_lead_ms(45_000), 45_000, "the receiver's half");
+}
+
+// ---------------------------------------------------------------------------
+// Dropping and coming back
+// ---------------------------------------------------------------------------
+
+/// The channel each side pays the other on.
+fn channels_in_use(link: &Link) -> (ChannelId, ChannelId) {
+    let (a, b) = (link.a.id, link.b.id);
+    let a_pays_on = link.a.sessions.peer(&b).expect("session").buyer.active();
+    let b_pays_on = link.b.sessions.peer(&a).expect("session").buyer.active();
+    (
+        a_pays_on.expect("A pays on a channel").id,
+        b_pays_on.expect("B pays on a channel").id,
+    )
+}
+
+#[test]
+fn a_peer_that_blips_and_comes_back_in_time_resumes_its_channels() {
+    // A Wi-Fi blip: both transports go, nobody said Disconnect, and both sides
+    // still hold everything. Funding two new channels to carry on would be
+    // pure waste.
+    let mut link = Link::with_grace(60_000);
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    assert_eq!(link.b_shapes_a(), 1_250_000);
+    let (a_pays_on, b_pays_on) = channels_in_use(&link);
+    let signed_before = link.b.sessions.peer(&a).expect("session").grant.channels()[0].signed;
+    assert_eq!((link.a.funded.len(), link.b.funded.len()), (1, 1));
+
+    link.blip();
+    assert!(link.a.sessions.peer(&b).is_none(), "the link is gone");
+    assert!(
+        link.a.sessions.parked(&b).is_some(),
+        "but its state is held"
+    );
+    assert!(link.b.sessions.parked(&a).is_some());
+
+    link.advance(5_000);
+    link.connect();
+
+    assert_eq!(
+        (link.a.funded.len(), link.b.funded.len()),
+        (1, 1),
+        "neither side funded anything new"
+    );
+    assert_eq!(channels_in_use(&link), (a_pays_on, b_pays_on));
+    assert!(
+        link.a.settled.is_empty() && link.b.settled.is_empty(),
+        "nothing was given up, so nothing was settled"
+    );
+
+    // A picks up buying on the channel it already had, from where it left off.
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    let b_to_a = link.b.sessions.peer(&a).expect("session");
+    assert_eq!(b_to_a.grant.channels().len(), 1);
+    assert_eq!(b_to_a.grant.channels()[0].id, a_pays_on);
+    assert!(
+        b_to_a.grant.channels()[0].signed > signed_before,
+        "the ratchet carried on rather than starting over"
+    );
+    assert_eq!(link.b_shapes_a(), 1_250_000);
+    assert_eq!(link.b.access.get(&a), Some(&AccessLevel::Active));
+    assert_eq!(
+        link.a.sessions.peer(&b).expect("session").phase,
+        Phase::Established
+    );
+}
+
+#[test]
+fn a_grant_does_not_outlive_the_session_it_was_bought_in() {
+    // A new connection is a new session, and a session starts with the grant
+    // zeroed. The channels are what is worth keeping; a grant is at most one
+    // window, and the payer buys again the moment the Offer is in.
+    let mut link = Link::with_grace(60_000);
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    link.blip();
+    let b_to_a = link.b.sessions.parked(&a).expect("held");
+    assert!(b_to_a.grant.started());
+
+    // Demand is a reading of the old link, so the new one starts without it
+    // and nothing is bought until the host reports some.
+    link.connect();
+
+    let b_to_a = link.b.sessions.peer(&a).expect("session");
+    assert!(!b_to_a.grant.started(), "the grant went with the session");
+    assert_eq!(link.b_shapes_a(), 4_096, "back to the allowance");
+    assert_eq!(
+        link.b.access.get(&a),
+        Some(&AccessLevel::Active),
+        "but the channel is still open"
+    );
+}
+
+#[test]
+fn a_peer_that_comes_back_too_late_starts_over_with_new_channels() {
+    let mut link = Link::with_grace(60_000);
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+    let (a_pays_on, b_pays_on) = channels_in_use(&link);
+
+    link.blip();
+    link.advance(60_001);
+
+    assert!(link.a.sessions.parked(&b).is_none(), "the grace ran out");
+    assert!(link.b.sessions.parked(&a).is_none());
+    assert_eq!(link.a.settled, vec![b_pays_on], "A claims what B paid it");
+    assert_eq!(link.b.settled, vec![a_pays_on], "B claims what A paid it");
+
+    link.connect();
+
+    assert_eq!(
+        (link.a.funded.len(), link.b.funded.len()),
+        (2, 2),
+        "one new channel each"
+    );
+    let (a_now, b_now) = channels_in_use(&link);
+    assert_ne!(a_now, a_pays_on);
+    assert_ne!(b_now, b_pays_on);
+    assert_eq!(link.b.access.get(&a), Some(&AccessLevel::Active));
+}
+
+#[test]
+fn an_orderly_disconnect_ends_the_session_and_holds_nothing() {
+    // Disconnect says the peer is going on purpose. There is nothing to come
+    // back to, so the session goes as soon as the transport does.
+    let mut link = Link::with_grace(60_000);
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+
+    for action in link.b.sessions.shutdown() {
+        if let Action::Send { msg, .. } = action {
+            link.deliver(true, Event::MessageReceived { peer: b, msg });
+        }
+    }
+    let (_, b_pays_on) = channels_in_use(&link);
+    link.blip();
+
+    assert!(link.a.sessions.peer(&b).is_none());
+    assert!(
+        link.a.sessions.parked(&b).is_none(),
+        "A holds nothing for B"
+    );
+    assert_eq!(
+        link.a.settled,
+        vec![b_pays_on],
+        "A claims what B paid it as soon as B has gone"
+    );
+    assert!(
+        link.b.sessions.parked(&a).is_none(),
+        "B holds nothing for A"
+    );
+
+    link.connect();
+    assert_eq!(
+        (link.a.funded.len(), link.b.funded.len()),
+        (2, 2),
+        "one new channel each"
+    );
+}
+
+#[test]
+fn a_peer_that_comes_back_without_its_state_gets_fresh_channels() {
+    // The other side of the friendly path: A lost everything — a restart
+    // inside B's grace period — while B still holds both channels. A cannot
+    // resume what it does not remember, so both directions start over, and B
+    // settles the channel A paid it on rather than holding it for nobody. The
+    // one B paid A on is not B's to settle: only a receiver can.
+    let mut link = Link::with_grace(60_000);
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+    let (a_pays_on, b_pays_on) = channels_in_use(&link);
+
+    link.blip();
+    link.a = Node::new(a, grace_policy("https://a.example/mint", 60_000));
+    // Fresh channel ids, as a real backend's nonce would give.
+    link.a.next_channel = 0x50;
+    link.connect();
+
+    assert_eq!(link.a.funded.len(), 1, "A funds the one channel it pays on");
+    assert_eq!(
+        link.b.funded.len(),
+        2,
+        "B could not resume, so it funds again"
+    );
+    assert!(
+        link.b.settled.contains(&a_pays_on),
+        "B claims what A paid it"
+    );
+    assert_eq!(
+        link.b.settled,
+        vec![a_pays_on],
+        "B lets its own go unsettled"
+    );
+
+    let (a_now, b_now) = channels_in_use(&link);
+    assert_ne!(a_now, a_pays_on);
+    assert_ne!(b_now, b_pays_on);
+    let b_to_a = link.b.sessions.peer(&a).expect("session");
+    assert_eq!(b_to_a.grant.channels().len(), 1, "only the new one");
+    assert_eq!(b_to_a.grant.channels()[0].id, a_now);
+
+    // And both can buy.
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    link.deliver(
+        false,
+        Event::DemandObserved {
+            peer: a,
+            rate: 250_000,
+        },
+    );
+    assert_eq!(link.b_shapes_a(), 1_250_000);
+    assert_eq!(link.a_shapes_b(), 312_500);
+}
+
+#[test]
+fn a_second_connection_while_the_first_still_looks_live_resumes_it() {
+    // The old transport died but its FIN has not been noticed yet, so the new
+    // connection arrives while the session is still up. It is the same peer
+    // coming back, and it resumes exactly as a parked one would.
+    let mut link = Link::with_grace(60_000);
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+    let (a_pays_on, b_pays_on) = channels_in_use(&link);
+
+    link.connect();
+
+    assert_eq!(
+        (link.a.funded.len(), link.b.funded.len()),
+        (1, 1),
+        "neither side funded anything new"
+    );
+    assert_eq!(channels_in_use(&link), (a_pays_on, b_pays_on));
+    assert!(link.a.settled.is_empty() && link.b.settled.is_empty());
+    assert!(link.a.sessions.parked(&b).is_none());
+    assert!(link.b.sessions.parked(&a).is_none());
+}
+
+#[test]
+fn a_peer_that_comes_back_late_before_the_tick_notices_starts_over() {
+    // The grace ran out but no tick has expired the session yet. The new
+    // connection must not resume it: the channels are settled there and then.
+    let mut link = Link::with_grace(60_000);
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+    let (a_pays_on, b_pays_on) = channels_in_use(&link);
+
+    link.blip();
+    link.now = link.now + 60_001;
+    link.connect();
+
+    assert_eq!(link.a.settled, vec![b_pays_on], "A claims what B paid it");
+    assert_eq!(link.b.settled, vec![a_pays_on], "B claims what A paid it");
+    assert_eq!(
+        (link.a.funded.len(), link.b.funded.len()),
+        (2, 2),
+        "one new channel each"
+    );
+    assert!(link.a.sessions.parked(&b).is_none());
+    assert!(link.b.sessions.parked(&a).is_none());
+}
+
+#[test]
+fn without_a_stale_timeout_nothing_is_held_and_the_channels_are_settled() {
+    // Zero switches the timeout off, and with it the grace: holding state
+    // forever for a peer that never returns would be a leak.
+    let mut link = Link::new();
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+    let (a_pays_on, b_pays_on) = channels_in_use(&link);
+
+    link.blip();
+
+    assert!(link.a.sessions.parked(&b).is_none());
+    assert!(link.b.sessions.parked(&a).is_none());
+    assert_eq!(link.a.settled, vec![b_pays_on]);
+    assert_eq!(link.b.settled, vec![a_pays_on]);
+}
+
+#[test]
+fn a_silent_peer_is_held_like_one_that_dropped() {
+    // Silence is an unclean disconnect too: a link that died without a FIN
+    // looks exactly like this, so the peer can still come back to its channels.
+    let mut link = Link::with_grace(5_000);
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+    let (a_pays_on, b_pays_on) = channels_in_use(&link);
+
+    link.now = Millis(5_001);
+    let actions = link.b.sessions.handle(Event::Tick, link.now);
+    assert!(actions.iter().any(|x| matches!(x, Action::DropPeer { .. })));
+    assert!(link.b.sessions.peer(&a).is_none());
+    assert!(link.b.sessions.parked(&a).is_some(), "held, not dropped");
+
+    // A notices the drop too, and both come back inside the grace.
+    link.deliver(true, Event::PeerDisconnected { peer: b });
+    link.connect();
+
+    assert_eq!((link.a.funded.len(), link.b.funded.len()), (1, 1));
+    assert_eq!(channels_in_use(&link), (a_pays_on, b_pays_on));
+}
+
+#[test]
+fn shutting_down_settles_what_a_held_peer_paid_us() {
+    // A peer held after a blip will not find us when it comes back, so what it
+    // paid us is claimed on the way out or not at all.
+    let mut link = Link::with_grace(60_000);
+    link.connect();
+    let a = link.a.id;
+    let (a_pays_on, _) = channels_in_use(&link);
+
+    link.blip();
+    assert!(link.b.sessions.parked(&a).is_some());
+
+    let actions = link.b.sessions.shutdown();
+    assert!(
+        actions.iter().any(|x| matches!(
+            x,
+            Action::SettleChannel { peer, channel_id, .. } if *peer == a && *channel_id == a_pays_on
+        )),
+        "the channel A paid us on still holds value we can claim"
+    );
+    assert!(link.b.sessions.parked(&a).is_none());
+}
+
+#[test]
+fn a_held_channel_is_settled_when_its_expiry_comes_round_inside_the_grace() {
+    // A grace period may outlast what is left of a channel. Holding it past its
+    // settle point would let the payer take back through the refund path what
+    // it already paid us on it, so it is settled on the same clock as a live
+    // one — and, no longer held, it is not resumed.
+    let mut link = Link::with_grace(TTL_MS);
+    link.a.ttl_ms = Some(TTL_MS);
+    link.b.ttl_ms = Some(TTL_MS);
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+    let (a_pays_on, b_pays_on) = channels_in_use(&link);
+
+    link.blip();
+    let settle_at = TTL_MS - link.b.sessions.node_policy().settle_lead_ms(30_000);
+    link.advance(settle_at - 1 - link.now.0);
+    assert!(link.a.settled.is_empty() && link.b.settled.is_empty());
+
+    link.advance(1);
+    assert_eq!(link.b.settled, vec![a_pays_on], "B claims what A paid it");
+    assert_eq!(link.a.settled, vec![b_pays_on], "A claims what B paid it");
+    assert_eq!(
+        link.b.settle_deadlines[&a_pays_on],
+        Some(Millis(TTL_MS)),
+        "retried no later than the channel's expiry"
+    );
+    let held = link.b.sessions.parked(&a).expect("still inside the grace");
+    assert!(held.grant.channels().is_empty(), "but no longer held");
+    assert!(link.a.sessions.parked(&b).is_some());
+
+    // Back inside the grace, but with nothing left to resume on: one new
+    // channel each, and nothing settled twice.
+    link.connect();
+    assert_eq!((link.a.funded.len(), link.b.funded.len()), (2, 2));
+    assert_eq!((link.a.settled.len(), link.b.settled.len()), (1, 1));
+    let (a_now, b_now) = channels_in_use(&link);
+    assert_ne!(a_now, a_pays_on);
+    assert_ne!(b_now, b_pays_on);
+}
+
+#[test]
+fn a_resumed_channel_starts_its_verification_failures_over() {
+    // Failures count in a row on one connection. A payer that lost track of
+    // its total is exactly the one that reconnects, so the new session starts
+    // clean rather than one bad TopUp from losing the channel.
+    let mut link = Link::with_grace(60_000);
+    link.connect();
+    let a = link.a.id;
+    let (a_pays_on, _) = channels_in_use(&link);
+
+    let bad = Event::TopUpSignatureInvalid {
+        peer: a,
+        channel_id: a_pays_on,
+    };
+    for _ in 1..MAX_VERIFICATION_FAILURES {
+        link.b.sessions.handle(bad.clone(), link.now);
+    }
+    let failures =
+        |link: &Link| link.b.sessions.peer(&a).expect("session").grant.channels()[0].failures;
+    assert_eq!(failures(&link), MAX_VERIFICATION_FAILURES - 1);
+
+    link.blip();
+    link.connect();
+    assert_eq!(channels_in_use(&link).0, a_pays_on, "resumed");
+    assert_eq!(failures(&link), 0);
+
+    let actions = link.b.sessions.handle(bad, link.now);
+    assert!(
+        !actions
+            .iter()
+            .any(|x| matches!(x, Action::SettleChannel { .. })),
+        "one failure on a clean slate does not close the channel"
+    );
+}
+
+#[test]
+fn a_peer_that_stops_charging_while_we_were_away_lets_the_resumed_channel_go() {
+    // B decided not to charge A while A was away. The Offer on the resumed
+    // session says so, and A has nothing to buy: it funds nothing, pays on
+    // nothing, and its empty Accept tells B to settle what A had signed.
+    let mut link = Link::with_grace(60_000);
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+    let (a_pays_on, b_pays_on) = channels_in_use(&link);
+
+    link.blip();
+    link.b.sessions.set_peer_policy(
+        a,
+        PeerPolicy {
+            no_charge: true,
+            ..PeerPolicy::default()
+        },
+    );
+    link.connect();
+
+    let a_to_b = link.a.sessions.peer(&b).expect("session");
+    assert!(a_to_b.offer.as_ref().expect("B offered").no_charge);
+    assert!(a_to_b.buyer.active().is_none(), "nothing to pay on");
+    assert_eq!(link.a.funded.len(), 1, "and nothing funded");
+    assert_eq!(link.b.settled, vec![a_pays_on], "B claims what A paid it");
+    assert_eq!(link.b.access.get(&a), Some(&AccessLevel::Free));
+
+    // The other direction is untouched: B still pays A on the channel it had.
+    assert_eq!(link.b.funded.len(), 1);
+    assert_eq!(
+        link.b
+            .sessions
+            .peer(&a)
+            .expect("session")
+            .buyer
+            .active()
+            .map(|c| c.id),
+        Some(b_pays_on)
+    );
 }
