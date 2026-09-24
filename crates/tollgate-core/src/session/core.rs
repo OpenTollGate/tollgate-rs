@@ -118,9 +118,19 @@ impl Sessions {
                 peer,
                 channel_id,
                 capacity,
-            } => self.on_incoming_verified(peer, channel_id, capacity, now, &mut out),
-            Event::IncomingFundingRejected { peer } => {
-                self.reject(peer, ReasonCode::FundingInvalid, &mut out);
+                mint_url,
+            } => {
+                // A channel is funded in a mint we list, or not at all: the
+                // mint is the credit risk we took on deliberately. Checked here
+                // rather than trusted to the backend, so it holds for every one.
+                if self.node.accepted_mints.contains(&mint_url) {
+                    self.on_incoming_verified(peer, channel_id, capacity, now, &mut out);
+                } else {
+                    self.reject(peer, ReasonCode::MintNotAccepted, &mut out);
+                }
+            }
+            Event::IncomingFundingRejected { peer, reason } => {
+                self.reject(peer, reason, &mut out);
             }
             Event::Metered { peer, counters } => {
                 let multiplier = match self.peers.get(&peer) {

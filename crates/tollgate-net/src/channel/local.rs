@@ -114,6 +114,7 @@ impl ChannelBackend for LocalChannels {
         Ok(VerifiedChannel {
             channel_id,
             capacity,
+            mint_url,
         })
     }
 
@@ -174,6 +175,10 @@ mod tests {
 
         assert_eq!(verified.channel_id, funded.channel_id);
         assert_eq!(verified.capacity, funded.capacity);
+        assert_eq!(
+            verified.mint_url, "https://b.example/mint",
+            "core checks the mint against its list, so it has to be reported"
+        );
     }
 
     #[test]

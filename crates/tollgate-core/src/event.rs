@@ -4,9 +4,10 @@
 //! callbacks and meter readings into these, feeds them in, and executes the
 //! [`Action`](crate::Action)s that come back.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
-use tollgate_protocol::{ChannelId, Message, PubKey};
+use tollgate_protocol::{ChannelId, Message, PubKey, ReasonCode};
 
 use crate::meter::Counters;
 
@@ -61,12 +62,19 @@ pub enum Event {
         channel_id: ChannelId,
         /// Units it can carry.
         capacity: u64,
+        /// The mint the channel is funded in. Core refuses the channel unless
+        /// it is one of our accepted mints, whatever the backend checked.
+        mint_url: String,
     },
 
     /// Our wallet could not verify a peer's funding.
     IncomingFundingRejected {
         /// The peer whose funding failed.
         peer: PubKey,
+        /// Why, as the peer will be told: [`ReasonCode::MintNotAccepted`] when
+        /// the backend refused the mint, [`ReasonCode::FundingInvalid`] for
+        /// anything else.
+        reason: ReasonCode,
     },
 
     /// Fresh cumulative meter readings for a peer.

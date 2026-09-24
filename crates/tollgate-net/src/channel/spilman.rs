@@ -40,7 +40,7 @@ use cdk_spilman::{
 use tollgate_protocol::{ChannelId, PubKey, Signature};
 use tracing::debug;
 
-use super::{ChannelBackend, FundedChannel, VerifiedChannel};
+use super::{ChannelBackend, FundedChannel, MintNotAccepted, VerifiedChannel};
 
 /// Shortest expiry we will accept on a channel a peer funds to pay us.
 ///
@@ -216,7 +216,7 @@ impl SpilmanChannels {
             .ok_or_else(|| anyhow!("channel parameters name no keyset"))?;
 
         if !self.config.accepted_mints.iter().any(|m| m == mint) {
-            bail!("{mint} is not a mint we take payment in");
+            return Err(MintNotAccepted(mint.to_owned()).into());
         }
 
         let id: cashu::nuts::Id = keyset_id
@@ -476,9 +476,15 @@ impl ChannelBackend for SpilmanChannels {
             )
             .map_err(|e| anyhow!("peer funding did not verify: {e:?}"))?;
 
+        let mint_url = blob.params["mint"]
+            .as_str()
+            .ok_or_else(|| anyhow!("channel parameters name no mint"))?
+            .to_owned();
+
         Ok(VerifiedChannel {
             channel_id: channel_id_from_hex(&blob.channel_id)?,
             capacity: funded.capacity,
+            mint_url,
         })
     }
 

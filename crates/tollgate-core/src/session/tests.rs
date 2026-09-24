@@ -8,7 +8,9 @@
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec;
 
-use tollgate_protocol::{ChannelId, ChannelUpdate, Message, PubKey, Signature, TopUp};
+use tollgate_protocol::{
+    ChannelId, ChannelUpdate, Disconnect, Message, PubKey, ReasonCode, Signature, TopUp,
+};
 
 use super::*;
 use crate::access::AccessLevel;
@@ -118,6 +120,7 @@ fn run(nodes: &mut [&mut Node], now: Millis, initial: impl IntoIterator<Item = (
                         peer,
                         channel_id: ChannelId([funding[0]; 32]),
                         capacity: CHANNEL_CAPACITY,
+                        mint_url: node.sessions.node_policy().accepted_mints[0].clone(),
                     },
                 )),
 
@@ -557,6 +560,48 @@ fn max_rate_is_shared_by_every_buyer_not_given_to_each() {
         nodes[0].shaping.get(&a_id),
         Some(&4_000_000),
         "A's grant is untouched by C's purchase"
+    );
+}
+
+#[test]
+fn a_channel_funded_in_a_mint_we_do_not_list_is_refused() {
+    // Whatever the backend checked, core only opens a channel in a mint it
+    // takes payment in: the mint is the credit risk, and that is ours to pick.
+    let mut link = Link::new();
+    let a = link.a.id;
+    link.b
+        .sessions
+        .handle(Event::PeerConnected { peer: a }, Millis(0));
+
+    let actions = link.b.sessions.handle(
+        Event::IncomingFundingVerified {
+            peer: a,
+            channel_id: ChannelId([0xEE; 32]),
+            capacity: CHANNEL_CAPACITY,
+            mint_url: "https://elsewhere.example/mint".into(),
+        },
+        Millis(0),
+    );
+
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            Action::Send {
+                msg: Message::Disconnect(Disconnect {
+                    reason: ReasonCode::MintNotAccepted
+                }),
+                ..
+            }
+        )),
+        "the peer is told why: {actions:?}"
+    );
+    assert!(matches!(actions.last(), Some(Action::DropPeer { .. })));
+    assert!(
+        link.b
+            .sessions
+            .peer(&a)
+            .is_none_or(|s| s.grant.channels().is_empty()),
+        "no channel was opened"
     );
 }
 

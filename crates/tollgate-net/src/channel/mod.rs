@@ -37,13 +37,28 @@ pub struct FundedChannel {
 }
 
 /// A peer's funding, once we have checked it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedChannel {
     /// The channel they will pay us on.
     pub channel_id: ChannelId,
     /// Units it can carry.
     pub capacity: u64,
+    /// The mint it is funded in, as the funding names it. Core refuses the
+    /// channel unless this is one of our accepted mints.
+    pub mint_url: String,
 }
+
+/// A backend's refusal of funding in a mint we do not accept.
+///
+/// A backend that looks at the mint before it has verified anything else —
+/// Spilman must, before it fetches a keyset from the URL the peer named —
+/// returns this, so the peer is told [`MintNotAccepted`] rather than a generic
+/// funding failure.
+///
+/// [`MintNotAccepted`]: tollgate_protocol::ReasonCode::MintNotAccepted
+#[derive(Debug, thiserror::Error)]
+#[error("{0} is not a mint we take payment in")]
+pub struct MintNotAccepted(pub String);
 
 /// What a payment-channel implementation has to provide.
 ///

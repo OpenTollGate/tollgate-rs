@@ -16,11 +16,11 @@ use tollgate_core::buyer::BuyerPolicy;
 use tollgate_core::config::{NodePolicy, PeerPolicy};
 use tollgate_core::session::Sessions;
 use tollgate_core::{Action, Event, Millis};
-use tollgate_protocol::{ChannelUpdate, Message, PubKey, TopUp, TopUpReject};
+use tollgate_protocol::{ChannelUpdate, Message, PubKey, ReasonCode, TopUp, TopUpReject};
 use tracing::{debug, info, warn};
 
 use crate::adapter::ResourceAdapter;
-use crate::channel::ChannelBackend;
+use crate::channel::{ChannelBackend, MintNotAccepted};
 use crate::control;
 use crate::identity::Identity;
 use crate::wire::{self, Identify, Wire};
@@ -368,10 +368,16 @@ impl Node {
                             peer,
                             channel_id: v.channel_id,
                             capacity: v.capacity,
+                            mint_url: v.mint_url,
                         },
                         Err(e) => {
                             warn!(%peer, error = format!("{e:#}"), "peer funding did not verify");
-                            Event::IncomingFundingRejected { peer }
+                            let reason = if e.downcast_ref::<MintNotAccepted>().is_some() {
+                                ReasonCode::MintNotAccepted
+                            } else {
+                                ReasonCode::FundingInvalid
+                            };
+                            Event::IncomingFundingRejected { peer, reason }
                         }
                     };
                     let _ = done.blocking_send(event);
