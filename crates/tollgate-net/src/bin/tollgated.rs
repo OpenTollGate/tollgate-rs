@@ -168,10 +168,18 @@ async fn main() -> Result<()> {
             // same keys, and two nodes never share a keyset.
             seed: mint_seed(&config.identity.secret_hex())?,
             max_amount: config.policy.initial_channel_capacity.max(1),
+            auto_accept: file.mint.auto_accept,
+            issue_limit: file.mint.issue_limit(),
         })
         .await
         .context("bring up this node's mint")?,
     );
+    if file.mint.auto_accept {
+        // Said once at startup because it is the most consequential setting in
+        // the file: until there is a market, it is what makes this node usable
+        // at all, and it is also what makes its service free.
+        tracing::warn!("the mint issues vouchers to anyone who asks, so service here is free");
+    }
 
     {
         let market = tollgate_net::market::router(
@@ -205,7 +213,9 @@ async fn main() -> Result<()> {
             "taking payment in"
         );
     }
-    if !prices.is_selling() {
+    // Only worth saying when nothing else hands out vouchers either: a mint
+    // that auto-accepts is how peers get them while the market is dormant.
+    if !prices.is_selling() && !file.mint.auto_accept {
         tracing::warn!("this node takes no paper as payment, so nobody can buy its vouchers here");
     }
 
@@ -239,12 +249,6 @@ async fn main() -> Result<()> {
             accepted_mints: config.policy.accepted_mints.clone(),
             secret_key_hex: config.identity.secret_hex(),
             wallet: wallet.clone(),
-            // A node with no money mint configured can still sell; it just
-            // cannot buy, and says so when something asks it to.
-            money: (!file.wallet.mint.is_empty()).then(|| tollgate_net::channel::Money {
-                mint: file.wallet.mint.clone(),
-                unit: file.wallet.unit.clone(),
-            }),
         })
         .context("build the channel backend")?,
     );

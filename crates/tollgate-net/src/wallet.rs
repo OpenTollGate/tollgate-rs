@@ -331,6 +331,64 @@ impl Wallet {
         Ok(minted)
     }
 
+    /// Mint `amount` of an issuer's paper at that issuer, and hold it.
+    ///
+    /// For a mint that issues without being paid, which is how a TollGate
+    /// node's mint hands out its vouchers while there is no market: an ordinary
+    /// NUT-04 quote, already paid when it is checked, and minted at once. A
+    /// mint that does not issue this way says so by advertising no mint quotes
+    /// in `unit`, and that is refused here before anything is asked of it.
+    ///
+    /// A mint caps what one quote may issue, so a larger amount is asked for
+    /// in several. Returns what was minted.
+    pub async fn issue(&self, mint: &str, unit: &str, amount: u64) -> Result<u64> {
+        if amount == 0 {
+            bail!("minting nothing is not an issuance");
+        }
+        let wallet = self.wallet_for(mint, unit).await?;
+        let method = PaymentMethod::Known(KnownMethod::Bolt11);
+
+        let info = wallet
+            .load_mint_info()
+            .await
+            .map_err(|e| anyhow!("read what {mint} offers: {e}"))?;
+        let Some(settings) = info.nuts.nut04.get_settings(&currency_unit(unit), &method) else {
+            bail!("{mint} does not mint {unit} for the asking");
+        };
+        let ceiling = settings
+            .max_amount
+            .map(u64::from)
+            .filter(|max| *max > 0)
+            .unwrap_or(amount);
+
+        let mut minted = 0u64;
+        while minted < amount {
+            let ask = (amount - minted).min(ceiling);
+            let quote = wallet
+                .mint_quote(method.clone(), Some(ask.into()), None, None)
+                .await
+                .map_err(|e| anyhow!("ask {mint} for {ask} {unit}: {e}"))?;
+            let proofs = wallet
+                .mint(&quote.id, SplitTarget::default(), None)
+                .await
+                .map_err(|e| anyhow!("mint {ask} {unit} at {mint}: {e}"))?;
+
+            let got: u64 = proofs
+                .iter()
+                .map(|p| u64::from(p.amount))
+                .fold(0, u64::saturating_add);
+            // A mint that quotes and then issues nothing would otherwise be
+            // asked again forever.
+            if got == 0 {
+                bail!("{mint} issued nothing against a quote for {ask} {unit}");
+            }
+            minted = minted.saturating_add(got);
+        }
+
+        debug!(%mint, %unit, minted, "minted");
+        Ok(minted)
+    }
+
     /// Finish or roll back anything a previous run left half-done.
     ///
     /// cdk drives minting and sending as sagas, and a saga interrupted mid-way

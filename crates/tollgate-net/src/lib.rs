@@ -13,9 +13,10 @@
 //!   to what was bought.
 //! - [`adapter`] — the delivery gate and the meters.
 //! - [`channel`] — payment channels behind a trait.
-//! - [`mint`] — this node's own mint, with a byte-denominated keyset.
+//! - [`mint`] — this node's own mint, with a byte-denominated keyset, which
+//!   by default issues vouchers to anyone who asks.
 //! - [`market`] — selling those vouchers. A separate protocol on its own path,
-//!   and the one piece that is deliberately stubbed.
+//!   dormant while vouchers are minted for the asking.
 //! - [`speedtest`] — a byte source on the mesh, so a client can measure the
 //!   path it paid for rather than the path to somebody's CDN.
 //! - [`node`] — the driver that connects all of it to core.
