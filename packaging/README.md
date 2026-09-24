@@ -57,9 +57,10 @@ About 10 MB packaged, 22 MB installed — most of it the mint. Fine on anything
 with a spare 32 MB of flash; too big for an 8 MB router without trimming.
 
 Dependencies are what the adapter actually uses: `nftables` for the gate and
-the counters, `tc-full` for the shaper, `kmod-sched-core` for the HTB class it
-installs, and `kmod-nf-conntrack` because the forward chain matches on
-established connections.
+the counters, `tc-full` for the shaper, `ip-full` for the routes and
+neighbours an upstream is counted by (BusyBox's `ip` has no JSON output),
+`kmod-sched-core` for the HTB class it installs, and `kmod-nf-conntrack`
+because the forward chain matches on established connections.
 
 First boot generates the identity, rewrites the mint URL to the router's LAN
 address — a peer funds its channel against that mint, so `127.0.0.1` would be

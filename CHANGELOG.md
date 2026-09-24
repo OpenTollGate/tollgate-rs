@@ -66,6 +66,12 @@ Nothing has been released yet. Everything below is on `master` and will ship as
   peer with no session is forwarded at the minimum flow allowance, and dropped
   only when the allowance is zero.
 
+- The kernel path meters an upstream by its link, not its IP: what arrives
+  from its MAC is what it delivered, and what is routed via it as next hop is
+  what it was delivered. A peer is an upstream when some route uses it as a
+  gateway, read from the kernel every few seconds. Customers are still metered
+  by IP. On OpenWrt the package now depends on `ip-full`.
+
 - Selling transit over a [FIPS](docs/design/network-peering/peering-fips.md)
   mesh: the FIPS node gates and shapes each peer to the rate it bought, set
   through its `set_transit_policy` control command. Peers with no session,
