@@ -8,6 +8,12 @@ TollGate controls delivery at the peer level. Each peer has an **access level** 
 
 The core principle: **no pay, no delivery** — beyond the minimum flow allowance. A peer that hasn't paid gets at most the allowance: a small, free rate of delivery that lets it reach what it needs to start paying ([tollgate-vouchers.md](tollgate-vouchers.md)). If the node gives no allowance, an unpaid peer gets no delivery at all. Either way it can always exchange TollGate protocol messages with this node (Announce, Offer, Accept) to establish payment.
 
+### What a TollGate session is
+
+A **TollGate session** exists between two peers only while they have agreed a price and payment is flowing — a funded channel, or a grant it paid for still being delivered — or while they have agreed not to charge at all. The minimum flow allowance is **not** a session: it is what a connected peer gets outside one, so it can reach what it needs to start one. A peer that has never paid and a peer whose payment has lapsed are therefore in the same place, `None`.
+
+The connection that carries TollGate messages is open before a session starts and stays open after one ends, so a peer can pay its way into a session without reconnecting. (In the code, `Sessions` and `PeerSession` track that connection from the moment a peer connects; they are wider than a TollGate session in this sense.)
+
 ---
 
 ## Access Levels
@@ -16,20 +22,18 @@ Each peer is in exactly one access level at any time:
 
 | Level | Delivery | TollGate messages | Bloom filter visibility (FIPS) | When |
 |-------|---------|-------------------|-------------------------------|------|
-| `None` | Minimum flow allowance only; blocked if the allowance is zero | Allowed | Visible while carried at the allowance; hidden if blocked | Peer connected, no payment yet |
-| `Active` | Allowed (metered), never below the allowance | Allowed | Visible | Spilman channels funded |
-| `Free` | Allowed (unmetered) | Allowed | Visible | This node does not charge the peer |
-| `Suspended` | Blocked | Allowed | Hidden | Payment lapsed and the node gives no allowance |
+| `None` | Minimum flow allowance only; blocked if the allowance is zero | Allowed | Visible while carried at the allowance; hidden if blocked | No TollGate session: not paid yet, or payment lapsed |
+| `Active` | Allowed (metered), never below the allowance | Allowed | Visible | Session: a channel funded, or a paid grant still running |
+| `Free` | Allowed (unmetered) | Allowed | Visible | Session: this node does not charge the peer |
 
 The access level says only whether delivery is allowed and how (metered or not). How much the peer has left to spend is tracked by the payment subsystem and does not surface as an access level.
 
 ### Transitions
 
 ```
-None --> Active (Spilman channels funded)
+None --> Active (Spilman channel funded)
 None --> Free (this node does not charge the peer)
-Active --> Suspended (payment lapsed, allowance zero)
-Suspended --> Active (new channel funded)
+Active --> None (payment lapsed: last channel full, its grant run out)
 Any --> None (disconnect)
 ```
 
@@ -37,30 +41,24 @@ Any --> None (disconnect)
 <details><summary>Text version</summary>
 
 ```
-                       ┌──────────────┐
-                       │     None     │ (allowance only)
-                       └──┬─────────┬─┘
-              payment ok  │         │ free
-                          ▼         ▼
-                   ┌──────────┐    ┌───────────┐
-                   │  Active  │    │ Free │
-                   └────┬─────┘    └───────────┘
-                        │ payment lapsed, allowance zero
-                        ▼
-                   ┌──────────┐
-                   │ Suspended│ (blocked, hidden)
-                   └────┬─────┘
-                        │ payment restored
-                        └─────────► Active
+                ┌────────────────┐
+                │      None      │  no session: allowance only
+                └─┬──────▲─────┬─┘
+      payment ok  │      │     │  not charged
+                  ▼      │     ▼
+           ┌──────────┐  │  ┌──────────┐
+           │  Active  ├──┘  │   Free   │
+           └──────────┘     └──────────┘
+                  payment lapsed
 
-  Red = blocked    Green = allowed
+  Active and Free are a TollGate session; None is not.
   Any state → None on disconnect
 ```
 </details>
 
 ### None (Default)
 
-Every newly connected peer starts at `None`. The peer can exchange TollGate protocol messages — Announce, Offer, Accept — and is delivered at most the **minimum flow allowance** for or through this peer.
+Every newly connected peer starts at `None`, and a peer whose payment lapses returns to it. There is no TollGate session. The peer can exchange TollGate protocol messages — Announce, Offer, Accept — and is delivered at most the **minimum flow allowance** for or through this peer.
 
 With a non-zero allowance, the peer's delivery is shaped to that rate. With the allowance at zero:
 - Packets originating from this peer and addressed to other nodes are **dropped**
@@ -69,9 +67,11 @@ With a non-zero allowance, the peer's delivery is shaped to that rate. With the 
 
 ### Active
 
-Spilman channels are funded. Delivery is allowed up to what each side has bought, and each peer's grant is drawn down as traffic passes.
+A TollGate session with payment flowing: the peer has funded a channel to pay on. Delivery is allowed up to what it has bought, and its grant is drawn down as traffic passes.
 
-A peer whose payment lapses — its grant ends and nothing replaces it — stays `Active` and is delivered the minimum flow allowance, exactly as an unpaid peer at `None` is. Lapsed payment is not a separate state while the allowance is non-zero.
+Between grants — one expired, the next not yet bought — the peer stays `Active` and is shaped to the allowance. That is a pause in buying, not the end of the session: the channel is still funded, and the next TopUp restores the rate at once.
+
+The session ends when payment lapses: the last channel is full, nothing replaces it, and the grant that channel paid for has run out. The peer returns to `None`.
 
 ### Free
 
@@ -81,19 +81,13 @@ This is a decision about the relationship rather than a price set to zero, and e
 
 **Free is not transitive.** It means free for *that peer's own traffic*, never free for anything that peer is nominally the beneficiary of — otherwise an uncharged peer becomes a way to launder free transit for others. See [tollgate-hazards.md](tollgate-hazards.md).
 
-### Suspended
-
-The peer's payment has lapsed — its channel is exhausted and nothing replaces it — and this node gives no minimum flow allowance. Delivery is blocked. The peer can still exchange TollGate messages to fund a new channel.
-
-`Suspended` exists only because the allowance can be zero. With a non-zero allowance a lapsed peer keeps the allowance rate and never reaches this state.
-
 ---
 
 ## What "Blocked" Means
 
-When delivery is blocked (`Suspended`, or `None` with a zero allowance), the node:
+When delivery is blocked (`None` with a zero allowance), the node:
 
-1. **Suspends resource delivery from this peer** — packets originating from the peer addressed to other nodes are silently dropped
+1. **Stops resource delivery from this peer** — packets originating from the peer addressed to other nodes are silently dropped
 2. **Does not deliver to this peer** — packets from other nodes destined for this peer are not delivered (they may be re-routed via other paths)
 3. **Allows control messages** — packets from the peer addressed to *this node* are delivered (this is how TollGate protocol messages reach the node)
 4. **Allows TollGate protocol messages** — the peer must be able to negotiate payment
@@ -115,7 +109,6 @@ In FIPS, bloom filters advertise reachability — "I can reach destination X thr
 | `None` | Yes while carried at the allowance; no if the allowance is zero |
 | `Active` | Yes — visible (FIPS) |
 | `Free` | Yes — visible (FIPS) |
-| `Suspended` | No — hidden (FIPS) |
 
 Bloom filter visibility is **inferred from whether the peer is carried** — the level together with its shaping rate — so it needs no separate API call and can never disagree with the gate.
 
@@ -143,14 +136,12 @@ pub trait ResourceAdapter: Send + Sync {
 }
 
 pub enum AccessLevel {
-    /// Nothing funded. Minimum flow allowance only; TollGate messages flow.
+    /// No TollGate session. Minimum flow allowance only; TollGate messages flow.
     None,
-    /// Delivery allowed, metered against funded Spilman channels.
+    /// Session: delivery allowed, metered against funded Spilman channels.
     Active,
-    /// Delivery allowed, unmetered. This node does not charge the peer.
+    /// Session: delivery allowed, unmetered. This node does not charge the peer.
     Free,
-    /// Payment lapsed and no allowance is given. Delivery blocked.
-    Suspended,
 }
 ```
 
@@ -188,12 +179,13 @@ Counting units delivered and peer metrics are documented in [tollgate-metering.m
 ### Payment Lapsed
 
 ```
-1. Grant ends and no new one replaces it
-2. Allowance non-zero: shape the peer to the allowance; access stays Active
-   Allowance zero: set access to Suspended (bloom hidden in FIPS), delivery stops
-3. Peer buys a new grant, funding a new channel if needed
-4. On payment: shaped to what was bought (Suspended transitions back to Active)
+1. The last channel fills, nothing replaces it, and the grant it paid for runs out
+2. Set access to None: the session has ended
+3. Shape the peer to the allowance, still visible in FIPS — or block and hide it, if the allowance is zero
+4. Peer funds a new channel and buys a grant: back to Active
 ```
+
+A grant expiring while a channel is still funded is not a lapse. The peer stays `Active`, shaped to the allowance until it buys again.
 
 ---
 
@@ -222,10 +214,11 @@ This makes the asymmetric case (`InboundOnly` / `OutboundOnly`) a first-class st
 | Decision | Resolution | Rationale |
 |----------|-----------|-----------|
 | Default access | None (allowance only) | No pay, no service beyond the allowance |
+| TollGate session | Agreed price with payment flowing, or agreed not to charge; the allowance is not one | The allowance is how a peer reaches a session, not a kind of session |
 | Unpaid resources | Minimum flow allowance + traffic to this node | Peer must be able to reach what it needs to start paying |
 | Traffic to this node | Never blocked | Blocking it would cut off the payment that restores delivery |
-| Bloom filter visibility | Inferred from access level (FIPS) | No separate API — access level implies visibility |
+| Bloom filter visibility | Inferred from whether the peer is carried (FIPS) | No separate API, and it can never disagree with the gate |
 | Free peers | Skip all payment, go to Free; not transitive | Simplest path for free peering; transitivity would launder free transit |
-| Lapsed payment | Allowance rate; Suspended only when the allowance is zero | The allowance already covers an unpaid peer; a separate state adds nothing |
-| Suspended state | Blocked but can still negotiate | Peer can recover without reconnecting |
+| Lapsed payment | Back to None | The session has ended; an unpaid peer is an unpaid peer, whatever its history. It can still negotiate, so it recovers without reconnecting |
+| Bloom visibility on the allowance | Visible | A peer that is carried but hidden has an allowance nobody can route to |
 | Protocol messages | Always allowed regardless of access level | Payment negotiation must work even when blocked |

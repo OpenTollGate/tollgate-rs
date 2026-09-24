@@ -6,24 +6,31 @@
 //! left to spend lives in [`crate::grant`] and never surfaces here.
 
 /// A peer's delivery status. Exactly one at any time.
+///
+/// `Active` and `Free` are a **TollGate session**: the two sides agreed a
+/// price and payment is flowing, or agreed not to charge. `None` is everything
+/// else — a peer that has not paid yet and one whose payment has lapsed alike.
+/// The minimum flow allowance is not a session; it is what a peer gets at
+/// `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AccessLevel {
-    /// Connected, nothing funded. No delivery; TollGate messages still flow, so
-    /// the peer can negotiate its way out of this state.
+    /// No TollGate session: nothing funded, or every channel drained and none
+    /// replacing it. Only the minimum flow allowance is delivered, and nothing
+    /// if the allowance is zero. TollGate messages always flow, so the peer
+    /// can pay its way into a session without reconnecting.
     #[default]
     None,
-    /// Channels funded. Delivery allowed, metered, shaped to what was bought.
+    /// Channels funded. Delivery allowed, metered, shaped to what was bought —
+    /// never below the allowance, including between grants.
     Active,
     /// Neither side charges the other. Delivery allowed and unmetered — a
     /// decision about the relationship, not a price set to zero.
     Free,
-    /// Channel exhausted past the rollover timeout. Delivery blocked, but the
-    /// peer can still negotiate, so it recovers without reconnecting.
-    Suspended,
 }
 
 impl AccessLevel {
-    /// Whether resources may be delivered for or through this peer.
+    /// Whether the peer is in a TollGate session, so resources may be delivered
+    /// for or through it beyond the minimum flow allowance.
     pub fn delivery_allowed(self) -> bool {
         matches!(self, Self::Active | Self::Free)
     }

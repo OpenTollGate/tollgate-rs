@@ -159,10 +159,9 @@ Access control is enforced via **firewall rules** (nftables, iptables, pf):
 
 | Access level | Firewall action |
 |-------------|----------------|
-| `None` | Drop all forwarded traffic from/to this peer's IP. Allow traffic to local ports (TollGate protocol). |
+| `None` | No TollGate session. Forwarded traffic from/to this peer's IP is shaped to the minimum flow allowance, or dropped if the allowance is zero. Traffic to the node itself (TollGate protocol, the mint) is always allowed. |
 | `Active` | Allow forwarded traffic from/to this peer's IP. |
 | `Free` | Allow forwarded traffic from/to this peer's IP. |
-| `Suspended` | Same as `None` — drop forwarded, allow local. |
 
 `set_access()` translates to firewall rule changes. The peer's IP address (from the TollGate session connection) is the identifier. Bloom filter inference is a no-op — bloom filters are not part of the IP model.
 

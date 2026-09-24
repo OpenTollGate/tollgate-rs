@@ -52,7 +52,7 @@ TollGate hooks into FIPS at five points:
 
 ### 1. Per-Peer Forwarding Policy
 
-TollGate sets a per-peer forwarding policy in FIPS. For blocked peers (`None`, `Suspended`), FIPS restricts the peer to **local-only traffic**:
+TollGate sets a per-peer forwarding policy in FIPS. A peer with no TollGate session (`None`) is carried at the minimum flow allowance — FIPS's per-peer transit rate set to the allowance. With the allowance at zero it is blocked, and FIPS restricts the peer to **local-only traffic**:
 
 - Traffic **from** this peer addressed **to this node**: Allowed (the peer can still communicate with us — TollGate protocol, payment negotiation)
 - Traffic **from** this peer addressed **to other nodes** (transit): Dropped
@@ -68,12 +68,13 @@ Until FIPS defaults new peers to `local_only` ([FIPS_FEATURE_REQUESTS.md](../FIP
 
 ### 2. Bloom Filter Exclusion
 
-TollGate controls which peers appear in bloom filter computation. A peer is included exactly when its traffic is carried — including a peer held at the minimum flow allowance. A peer whose delivery is blocked (`Suspended`, or `None` with a zero allowance) is excluded: its node_addr is not added to the bloom filter advertised to other peers. This prevents traffic from being routed toward a peer that will have it dropped at the gate.
+TollGate controls which peers appear in bloom filter computation. A peer is included exactly when its traffic is carried — including a peer held at the minimum flow allowance. A peer whose delivery is blocked (`None` with a zero allowance) is excluded: its node_addr is not added to the bloom filter advertised to other peers. This prevents traffic from being routed toward a peer that will have it dropped at the gate.
 
 When a peer's access level changes:
-- `None` -> `Active`/`Free`: Add to bloom filters immediately, trigger FilterAnnounce
-- `Active` -> `Suspended`: Remove from bloom filters **after a delay** (default: 30 seconds) to avoid flapping. If the peer recovers (tops up, funds new channel) within the delay, the removal is cancelled and the peer stays visible. This prevents rapid bloom filter churn when a peer temporarily exhausts balance.
-- `Suspended` -> `Active`: Re-add to bloom filters immediately (cancel any pending removal)
+- A blocked peer (`None` with a zero allowance) -> `Active`/`Free`: Add to bloom filters immediately, trigger FilterAnnounce
+- `Active` -> `None` (payment lapsed): with a non-zero allowance the peer is still carried, so it stays visible. With a zero allowance it is blocked and removed from bloom filters **after a delay** (default: 30 seconds) to avoid flapping; if the peer pays its way back into a session within the delay, the removal is cancelled.
+
+A grant expiring between purchases does not change the level — the peer stays `Active` while its channel is funded — so buying in short windows never churns the bloom filter.
 
 **Required FIPS change**: An API to include/exclude specific peers from bloom filter computation, inferred from the forwarding policy.
 
@@ -125,7 +126,7 @@ fn set_peer_access(&self, peer: &Pubkey, access: AccessLevel) -> Result<(), Adap
     let node_addr = NodeAddr::from_pubkey(peer);
 
     match access {
-        AccessLevel::None | AccessLevel::Suspended => {
+        AccessLevel::None => {
             // Restrict peer to local-only traffic (no transit forwarding)
             // Bloom filter exclusion is inferred — restricted peers are excluded
             self.node.set_peer_forwarding_policy(node_addr, ForwardingPolicy::LocalOnly);

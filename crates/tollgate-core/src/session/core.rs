@@ -666,14 +666,15 @@ impl Sessions {
 
         let access = if session.policy.no_charge {
             AccessLevel::Free
-        } else if !session.grant.channels().is_empty() {
+        } else if !session.grant.channels().is_empty() || session.grant.is_live(now) {
+            // Paying, or still delivering what was paid for after the last
+            // channel filled — the session lasts until that grant runs out.
             AccessLevel::Active
-        } else if session.grant.started() {
-            // Every channel the peer paid us on has been drained and settled,
-            // and nothing has replaced them. Delivery stops, but the peer can
-            // still negotiate, so it recovers without reconnecting.
-            AccessLevel::Suspended
         } else {
+            // Never paid, or every channel it paid us on has been drained and
+            // settled with nothing replacing it. Either way there is no session
+            // — only the allowance — and the peer can still negotiate one
+            // without reconnecting.
             AccessLevel::None
         };
 

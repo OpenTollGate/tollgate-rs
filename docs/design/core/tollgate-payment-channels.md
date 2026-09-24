@@ -236,7 +236,7 @@ A grant uses whichever channel has remaining capacity. When the old channel hold
 If mint connectivity is lost during rollover:
 - Balance updates on the old channel continue (they don't need the mint)
 - The new channel cannot be funded until mint returns
-- If the old channel exhausts before the new one is funded, that direction falls back to the minimum flow allowance — or pauses, if the allowance is zero ([tollgate-access-control.md](tollgate-access-control.md)). The session stays open: payment can resume as soon as the new channel is funded.
+- If the old channel exhausts before the new one is funded, that direction falls back to the minimum flow allowance — or pauses, if the allowance is zero — once the grant the old channel paid for runs out. That ends the TollGate session ([tollgate-access-control.md](tollgate-access-control.md)), but the connection stays open, so a new one starts as soon as the new channel is funded.
 - Once mint returns: new channel is funded, old channel is settled by the receiver
 
 ---
@@ -459,7 +459,7 @@ A payer that receives less than it bought has no protocol recourse: the grant wa
 | Channel ownership | Sender manages own channel lifecycle | Rollover initiated by the funder alone — only the party putting up new funds decides when |
 | Rollover threshold | 80% capacity (configurable, default 20% overlap) | New channel ready before old exhausts |
 | Rollover drain | Old channel drains to 100%, then new channel continues | No wasted capacity |
-| Stale session timeout | 60 seconds (configurable) | Close a session whose peer has gone silent; a lapsed payment is handled by the allowance, not by closing |
+| Stale session timeout | 60 seconds (configurable) | Close the connection to a peer that has gone silent; a lapsed payment ends the TollGate session but not the connection |
 | Grant window | Payer chooses per grant, inside a provider-advertised range | It is the denominator of a rate, not a settlement clock. Nothing is negotiated and no boundary is shared |
 | Provider delivery exposure | None | Payment lands before the traffic it covers, so a peer that vanishes leaves nothing unpaid |
 | Under-delivery | No recourse in the channel layer | The grant is consumed whether or not packets arrive. The remedy is to stop buying, and the channel layer's job is only to make leaving cheap |

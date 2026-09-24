@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 480" font-family="monospace" font-size="12">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 370" font-family="monospace" font-size="12">
   <style>
     text          { fill: #e0e0e0; }
     text.title    { font-size: 16px; font-weight: bold; }
@@ -36,7 +36,7 @@
   </defs>
 
   <!-- Background -->
-  <rect width="720" height="480" rx="8" class="bg"/>
+  <rect width="720" height="370" rx="8" class="bg"/>
 
   <!-- Title -->
   <text x="360" y="28" text-anchor="middle" class="title">Access Level State Machine</text>
@@ -57,42 +57,29 @@
   <text x="510" y="250" text-anchor="middle" class="slabel" fill="#80e080">Free</text>
   <text x="510" y="268" text-anchor="middle" class="sdesc" fill="#909090">unmetered, visible</text>
 
-  <!-- ═══ SUSPENDED — center bottom ═══ -->
-  <rect x="120" y="370" width="180" height="55" rx="8" class="callout" stroke="#c05050" stroke-width="2"/>
-  <text x="210" y="395" text-anchor="middle" class="slabel" fill="#f08080">Suspended</text>
-  <text x="210" y="413" text-anchor="middle" class="sdesc" fill="#909090">blocked, hidden (FIPS)</text>
-
   <!-- ═══ TRANSITIONS ═══ -->
 
   <!-- None → Active (down-left) -->
   <line x1="320" y1="130" x2="240" y2="223" stroke="#50c050" stroke-width="1.5" marker-end="url(#ag)"/>
-  <text x="220" y="178" text-anchor="end" class="elabel">payment ok</text>
-  <text x="220" y="190" text-anchor="end" class="elabel">(channels funded)</text>
+  <text x="222" y="170" text-anchor="end" class="elabel">payment ok</text>
+  <text x="222" y="182" text-anchor="end" class="elabel">(channel funded)</text>
 
   <!-- None → Free (down-right) -->
   <line x1="400" y1="130" x2="480" y2="223" stroke="#50c050" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#ag)"/>
-  <text x="500" y="178" text-anchor="start" class="elabel">free</text>
+  <text x="500" y="178" text-anchor="start" class="elabel">not charged</text>
 
-  <!-- Active → Suspended (down) -->
-  <line x1="200" y1="280" x2="200" y2="367" stroke="#c05050" stroke-width="1.5" marker-end="url(#ared)"/>
-  <text x="190" y="320" text-anchor="end" class="elabel">payment lapsed</text>
-  <text x="190" y="332" text-anchor="end" class="elabel">and allowance</text>
-  <text x="190" y="344" text-anchor="end" class="elabel">is zero</text>
-
-  <!-- Suspended → Active (up, right side, dashed = recovery) -->
-  <line x1="240" y1="370" x2="240" y2="285" stroke="#50c050" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#ag)"/>
-  <text x="252" y="320" text-anchor="start" class="elabel">payment</text>
-  <text x="252" y="332" text-anchor="start" class="elabel">restored</text>
+  <!-- Active → None (up, the session ends) -->
+  <line x1="270" y1="225" x2="340" y2="133" stroke="#c05050" stroke-width="1.5" marker-end="url(#ared)"/>
+  <text x="318" y="196" text-anchor="start" class="elabel">payment lapsed</text>
+  <text x="318" y="208" text-anchor="start" class="elabel">(last channel full,</text>
+  <text x="318" y="220" text-anchor="start" class="elabel">its grant run out)</text>
 
   <!-- ═══ Legend ═══ -->
-  <line x1="180" y1="455" x2="210" y2="455" stroke="#c05050" stroke-width="2"/>
-  <text x="218" y="459" class="elabel">blocked (no delivery)</text>
+  <line x1="180" y1="320" x2="210" y2="320" stroke="#c05050" stroke-width="2"/>
+  <text x="218" y="324" class="elabel">no session (allowance only)</text>
 
-  <line x1="380" y1="455" x2="410" y2="455" stroke="#50c050" stroke-width="2"/>
-  <text x="418" y="459" class="elabel">allowed (delivery active)</text>
+  <line x1="400" y1="320" x2="430" y2="320" stroke="#50c050" stroke-width="2"/>
+  <text x="438" y="324" class="elabel">TollGate session</text>
 
-  <line x1="180" y1="473" x2="210" y2="473" stroke="#808080" stroke-width="1.5" stroke-dasharray="6,3"/>
-  <text x="218" y="477" class="elabel">recovery / shortcut</text>
-
-  <text x="500" y="477" text-anchor="middle" class="caption">Any state → None on disconnect</text>
+  <text x="360" y="352" text-anchor="middle" class="caption">Any state → None on disconnect</text>
 </svg>

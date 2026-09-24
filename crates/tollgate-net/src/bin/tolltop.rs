@@ -1162,7 +1162,6 @@ fn access_style(access: &str) -> Style {
     match access {
         "active" => Style::default().fg(Color::Green),
         "free" => Style::default().fg(Color::Cyan),
-        "suspended" => Style::default().fg(Color::Red),
         _ => Style::default().fg(Color::DarkGray),
     }
 }

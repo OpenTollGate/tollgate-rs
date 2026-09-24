@@ -411,6 +411,50 @@ fn traffic_draws_the_grant_down_and_exhausting_it_falls_back_to_the_allowance() 
 }
 
 #[test]
+fn a_lapsed_payment_ends_the_session_and_leaves_the_allowance() {
+    // The allowance is not a session. Once the last channel is full and the
+    // grant it paid for has run out, the peer is back where an unpaid one
+    // starts: None, on the allowance, able to pay its way back in.
+    let mut link = Link::new();
+    link.connect();
+
+    let a = link.a.id;
+    let channel_id = link.b.sessions.peer(&a).expect("session").grant.channels()[0].id;
+
+    // A fills its channel in one purchase, and nothing replaces it.
+    link.deliver(
+        false,
+        Event::MessageReceived {
+            peer: a,
+            msg: Message::TopUp(TopUp {
+                updates: vec![ChannelUpdate {
+                    channel_id,
+                    cumulative: CHANNEL_CAPACITY,
+                    signature: Signature([0; 64]),
+                }],
+                window_ms: 1_000,
+            }),
+        },
+    );
+    let session = link.b.sessions.peer(&a).expect("session");
+    assert!(
+        session.grant.channels().is_empty(),
+        "the full channel closed"
+    );
+    assert_eq!(
+        link.b.access.get(&a),
+        Some(&AccessLevel::Active),
+        "still delivering what the last channel paid for"
+    );
+
+    link.now = link.now + 1_001;
+    link.deliver(false, Event::Tick);
+
+    assert_eq!(link.b.access.get(&a), Some(&AccessLevel::None));
+    assert_eq!(link.b_shapes_a(), 4_096, "the allowance, not silence");
+}
+
+#[test]
 fn a_peers_uploads_draw_its_own_grant_when_the_multiplier_is_set() {
     // m = 2 charges an uploaded unit the same as a downloaded one.
     let mut policy = node_policy("https://b.example/mint");

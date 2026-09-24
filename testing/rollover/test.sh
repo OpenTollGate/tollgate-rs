@@ -25,10 +25,13 @@ tollgate::wait_for "the client to move onto a replacement channel" 90 \
 tollgate::wait_for "the rate to still be what was bought, after the rollover" 30 \
   '[[ "$(tollgate::peer_field gateway shaped_rate)" == "2500000" ]]'
 
-# And the peer never dropped out of service while channels were changing.
-tollgate::logs gateway | grep -q "access=Suspended" \
-  && tollgate::fail "the peer was suspended mid-rollover; the replacement was not ready in time"
+# And the peer never dropped out of its session while channels were changing.
+# The gateway logs None once when the peer connects, so only a None logged
+# after it reached Active is a session ending.
+tollgate::logs --no-log-prefix gateway \
+  | awk '/access=Active/ { active = 1 } active && /access=None/ { lapsed = 1 } END { exit !lapsed }' \
+  && tollgate::fail "the session lapsed mid-rollover; the replacement was not ready in time"
 
-echo "  ok: never suspended while rolling over"
+echo "  ok: the session never lapsed while rolling over"
 
 echo "PASS: rollover"

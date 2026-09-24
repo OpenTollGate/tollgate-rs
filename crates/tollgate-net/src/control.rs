@@ -237,7 +237,6 @@ pub fn snapshot(
                     AccessLevel::None => "none",
                     AccessLevel::Active => "active",
                     AccessLevel::Free => "free",
-                    AccessLevel::Suspended => "suspended",
                 }
                 .into(),
 
