@@ -6,9 +6,9 @@ untouched and keeps running; the two systems run side by side.
 
 ## What runs, and why
 
-`act/workflows/rust-test.yml` mirrors the `check` and `no_std` jobs of
-`.github/workflows/ci.yml`, with the same commands in the same order, from the
-workspace root:
+`act/workflows/rust-test.yml` mirrors the `check`, `no_std` and integration
+jobs of `.github/workflows/ci.yml`, with the same commands in the same order,
+from the workspace root:
 
 | Step | Command |
 | --- | --- |
@@ -18,6 +18,14 @@ workspace root:
 | Build | `cargo build --workspace --all-targets` |
 | Test | `cargo test --workspace` |
 | no_std | `cargo build -p tollgate-protocol -p tollgate-core --target thumbv7em-none-eabihf` |
+| Integration | `testing/scripts/build.sh`, then `SKIP_BUILD=1 testing/<suite>/test.sh` for `peering`, `purchase`, `refusal`, `rollover`, `allowance`, `forwarding` |
+
+The integration job needs Docker on the runner, which ngit-ci runners provide.
+Unlike the GitHub workflow it does not fan out over a matrix: one job builds
+`tollgate-test:latest` once and runs every suite against it, so it relies on no
+artifact support. Every suite runs even after one fails, and the job fails if
+any did. `fips` is left out, as on GitHub, because it needs a second image built
+from a FIPS checkout this repository does not carry.
 
 The toolchain is the one the repo pins: `rust-toolchain.toml` → **1.94.1**
 (components `rustfmt`, `clippy`), installed by `dtolnay/rust-toolchain` exactly
@@ -71,11 +79,9 @@ nak req -k 9841 -a "$COORD_HEX" -l 20 wss://relay.ngit.dev   # per-job + log tai
 
 ## Not run here (deliberately)
 
-- **Docker integration suites** (`image` + `integration` jobs in
-  `.github/workflows/ci.yml`: `testing/{peering,purchase,refusal,rollover,allowance,forwarding}/test.sh`,
-  which build `tollgate-test:latest` and run compose topologies). act's job
-  container has no Docker daemon, so these cannot run here. They remain GitHub
-  only — ngit-ci's docs are explicit that `docker` fails in the job container.
+- **The `fips` integration suite.** It needs a second image built from a FIPS
+  checkout this repository does not carry; run it by hand
+  (`testing/README.md`).
 - **macOS and OpenWrt packaging** (`package-macos.yml`, `package-openwrt.yml`).
   macOS labels cannot be served by ngit-ci, and the OpenWrt job needs
   `cargo-zigbuild` + zig for a tag-triggered release build rather than a test.

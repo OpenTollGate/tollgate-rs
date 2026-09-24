@@ -3,9 +3,10 @@ name: Rust test
 # Nostr CI (ngit-ci) workflow. See .ngit/README.md for the authorization
 # policy, how to read results, and the checks deliberately not run here.
 #
-# This mirrors the `check` job of .github/workflows/ci.yml, which is left
-# untouched: the same pinned toolchain (rust-toolchain.toml pins 1.94.1) and
-# the same protoc install and four commands in the same order, run from the workspace root.
+# This mirrors the `check`, `no_std` and integration jobs of
+# .github/workflows/ci.yml, which is left untouched: the same pinned toolchain
+# (rust-toolchain.toml pins 1.94.1), the same protoc install and commands in the
+# same order, run from the workspace root.
 
 on:
   push:
@@ -64,3 +65,40 @@ jobs:
           targets: thumbv7em-none-eabihf
       - name: Build core + protocol for a bare-metal target
         run: cargo build -p tollgate-protocol -p tollgate-core --target thumbv7em-none-eabihf
+
+  # The docker topologies under testing/. The GitHub workflow builds the image
+  # once and fans the suites out over a matrix through an uploaded artifact;
+  # here one job builds the image and runs every suite against it, so nothing
+  # depends on artifact support in the runner. Every suite runs even after one
+  # fails, and the job fails if any did.
+  #
+  # `fips` is left out, as on GitHub: it needs a second image built from a FIPS
+  # checkout this repository does not carry (testing/README.md).
+  integration:
+    runs-on: ubuntu-latest
+    needs: [check]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check docker is available
+        run: docker version && docker compose version
+      - name: Build tollgate-test image
+        run: testing/scripts/build.sh
+      - name: Run the suites
+        # SKIP_BUILD reuses the image built above instead of rebuilding it.
+        run: |
+          failed=""
+          for suite in peering purchase refusal rollover allowance forwarding; do
+            echo "::group::$suite"
+            if SKIP_BUILD=1 "testing/$suite/test.sh"; then
+              echo "PASS: $suite"
+            else
+              echo "FAIL: $suite"
+              failed="$failed $suite"
+            fi
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "failed:$failed"
+            exit 1
+          fi
