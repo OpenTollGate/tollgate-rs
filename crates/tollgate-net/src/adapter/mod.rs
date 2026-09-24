@@ -49,6 +49,10 @@ pub trait ResourceAdapter: Send + Sync + std::fmt::Debug {
     fn register(&self, peer: PubKey, addr: IpAddr);
 
     /// Apply an access level decided by core.
+    ///
+    /// The level alone does not open or close the gate: whether a peer is
+    /// carried is [`AccessLevel::carried`] of the level and the shaping rate
+    /// together, so an unpaid peer still gets the minimum flow allowance.
     fn set_access(&self, peer: PubKey, access: AccessLevel);
 
     /// Apply a shaping rate decided by core, in units per second.

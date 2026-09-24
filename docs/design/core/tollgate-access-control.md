@@ -26,7 +26,7 @@ Each peer is in exactly one access level at any time:
 | `Active` | Allowed (metered), never below the allowance | Allowed | Visible | Session: a channel funded, or a paid grant still running |
 | `Free` | Allowed (unmetered) | Allowed | Visible | Session: this node does not charge the peer |
 
-The access level says only whether delivery is allowed and how (metered or not). How much the peer has left to spend is tracked by the payment subsystem and does not surface as an access level.
+The access level says only whether delivery is allowed and how (metered or not). Whether a peer is carried at all is the level together with the rate core shaped it to (`AccessLevel::carried`): a peer outside a session is carried at the allowance, and only a zero rate shuts it out. How much the peer has left to spend is tracked by the payment subsystem and does not surface as an access level.
 
 ### Transitions
 

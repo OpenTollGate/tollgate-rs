@@ -163,7 +163,7 @@ Access control is enforced via **firewall rules** (nftables, iptables, pf):
 | `Active` | Allow forwarded traffic from/to this peer's IP. |
 | `Free` | Allow forwarded traffic from/to this peer's IP. |
 
-`set_access()` translates to firewall rule changes. The peer's IP address (from the TollGate session connection) is the identifier. Bloom filter inference is a no-op — bloom filters are not part of the IP model.
+`set_access()` and `set_shaping_rate()` both translate to firewall rule changes: whether a peer's IP is forwarded for is `AccessLevel::carried(rate)` — the level together with the rate core shaped it to — so it is re-evaluated when either changes. The peer's IP address (from the TollGate session connection) is the identifier. Bloom filter inference is a no-op — bloom filters are not part of the IP model.
 
 ### Per-Peer Rate via Traffic Control
 

@@ -119,23 +119,20 @@ This approach works today without any FIPS modifications to the session layer.
 
 ### set_peer_access()
 
-Maps TollGate access levels to FIPS forwarding policy and bloom filter state:
+Maps TollGate access levels to FIPS forwarding policy and bloom filter state. The level alone does not decide it: a peer is admitted exactly when core carries it — `AccessLevel::carried(rate)`, the level together with the rate core shaped it to — so a `None` peer on the allowance is admitted at that rate, and only a zero allowance restricts it:
 
 ```rust
-fn set_peer_access(&self, peer: &Pubkey, access: AccessLevel) -> Result<(), AdapterError> {
+fn set_peer_access(&self, peer: &Pubkey, access: AccessLevel, rate: u64) -> Result<(), AdapterError> {
     let node_addr = NodeAddr::from_pubkey(peer);
 
-    match access {
-        AccessLevel::None => {
-            // Restrict peer to local-only traffic (no transit forwarding)
-            // Bloom filter exclusion is inferred — restricted peers are excluded
-            self.node.set_peer_forwarding_policy(node_addr, ForwardingPolicy::LocalOnly);
-        }
-        AccessLevel::Active | AccessLevel::Free => {
-            // Allow full forwarding for this peer
-            // Bloom filter inclusion is inferred — allowed peers are included
-            self.node.set_peer_forwarding_policy(node_addr, ForwardingPolicy::Full);
-        }
+    if access.carried(rate) {
+        // Forward for this peer, at the rate core shaped it to
+        // Bloom filter inclusion is inferred — admitted peers are included
+        self.node.set_peer_forwarding_policy(node_addr, ForwardingPolicy::Full);
+    } else {
+        // Restrict peer to local-only traffic (no transit forwarding)
+        // Bloom filter exclusion is inferred — restricted peers are excluded
+        self.node.set_peer_forwarding_policy(node_addr, ForwardingPolicy::LocalOnly);
     }
     Ok(())
 }
@@ -299,7 +296,8 @@ each peer's admission and rate together in one transit-policy command —
 `set_transit_policy {npub, admitted, rate_bytes_per_sec}` — whenever core
 changes either, so there is never a moment where a peer is admitted at a rate
 it has not bought. Peers it has not named yet get the default transit policy:
-admitted at the minimum flow allowance.
+admitted at the minimum flow allowance, or local-only if the allowance is zero
+— the same verdict a named peer with no session gets.
 
 ---
 
