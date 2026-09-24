@@ -211,28 +211,28 @@ It is a **rate**, and it is the floor of the shaper. A peer whose grant has expi
 
 ```yaml
 channels:
-  min_capacity: 10                         # minimum Spilman channel capacity (vouchers)
-  max_capacity: 10000                      # maximum channel capacity
-  initial_capacity: 10                     # starting capacity for new peers
+  min_capacity: 134217728                  # minimum Spilman channel capacity, bytes (128 MiB)
+  max_capacity: 17179869184                # maximum channel capacity, bytes (16 GiB)
+  initial_capacity: 1073741824             # starting capacity for new peers, bytes (1 GiB)
   capacity_growth_factor: 2.0             # multiply capacity after each successful rollover
   ttl_seconds: 3600                        # channel expiry (default: 1 hour)
   rollover_threshold: 0.80                 # rollover at 80% capacity used
   safety_margin_seconds: 60               # begin emergency rollover this long before expiry
-  stale_timeout_seconds: 60               # close session if rollover can't complete within this time
+  stale_timeout_seconds: 60               # close a session whose peer has been silent this long
 ```
 
 ### Defaults
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `min_capacity` | `10` | Minimum channel funding |
-| `max_capacity` | `10000` | Maximum channel funding |
-| `initial_capacity` | `10` | First channel capacity for new peers |
+| `min_capacity` | `134217728` | Minimum channel funding, in bytes (128 MiB) |
+| `max_capacity` | `17179869184` | Maximum channel funding, in bytes (16 GiB) |
+| `initial_capacity` | `1073741824` | First channel capacity for new peers, in bytes (1 GiB) |
 | `capacity_growth_factor` | `2.0` | Capacity multiplier per successful rollover — **incoming (revenue) channels only** |
 | `ttl_seconds` | `3600` | Channel lifetime (1 hour) |
 | `rollover_threshold` | `0.80` | Trigger rollover at 80% exhaustion |
 | `safety_margin_seconds` | `60` | Emergency rollover window before expiry |
-| `stale_timeout_seconds` | `60` | Session closed if rollover blocked this long |
+| `stale_timeout_seconds` | `60` | Session closed if the peer sends nothing for this long |
 
 `capacity_growth_factor` rewards a peer relationship that has proven stable across rollovers. Every channel is funded by the party that owes, so growth always tracks a paying relationship and has nothing to run away on.
 
@@ -323,8 +323,8 @@ access:
     bytes_per_second: 4096
 
 channels:
-  initial_capacity: 10
-  max_capacity: 5000
+  initial_capacity: 1073741824
+  max_capacity: 8589934592
   ttl_seconds: 3600
   rollover_threshold: 0.80
 

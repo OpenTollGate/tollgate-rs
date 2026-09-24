@@ -653,7 +653,6 @@ here is protocol-side.
 | Grant semantics | A new grant replaces the one in force; the remainder is forfeit | This is what makes the product bandwidth rather than stored volume. Without forfeiture a buyer accumulates claims off-peak and presents them at peak |
 | Rate within a grant | Fixed at `grant / window`, not banked | Otherwise a buyer that waited would be owed an unbounded burst just before the deadline |
 | Reaction latency | One message, no acknowledgment | Cumulative signed state makes TopUp idempotent, so fire-and-forget is safe and a payer can use a rate the moment it buys it |
-| Netting | Removed | Prepaid grants are bought at different moments in different mints for different windows. There is no settlement round for the two directions to meet in, so there is nothing to subtract |
 | Who pays | Each side pays for what it received, in the vouchers of whoever delivered it | Symmetric and unchanged. Both owe by default, so both fund a channel and buy their own grants |
 | Acquiring vouchers | Not a protocol concern — see the market documents | The direct route from the issuer is enough to operate, and checking a voucher takes one hop |
 | Received multiplier | An unsigned surcharge per peer on what that peer pushes at us, applied as a consumption weight on its grant, default `0` | Net rate is `m − 1`, so `1` makes a peer's upload free, `2` charges it like a download, `k + 1` charges it `k` times. Unsigned, so a node can never pay a bonus on top of what it already owes for delivery |

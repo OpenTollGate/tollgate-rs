@@ -38,13 +38,15 @@ Shaping outside FIPS only reaches part of the traffic. Each node is a distinct `
 
 **Complexity**: Medium — the forwarding path exists; this adds a per-peer bucket check before the forward and a control-socket setter.
 
+**Status**: available in the FIPS build TollGate targets, as the transit-policy commands: `set_transit_policy {npub, admitted, rate_bytes_per_sec}` per peer, `set_default_transit_policy` for peers not yet named, `clear_transit_policy` on removal, and `show_transit_policy` for the per-peer counters. `tollgate-net` sets each peer's admission and rate in one command.
+
 **Referenced in**: [peering-fips.md](network-peering/peering-fips.md), [tollgate-vouchers.md](core/tollgate-vouchers.md), [tollgate-access-control.md](core/tollgate-access-control.md)
 
 ---
 
 ### 3. Bloom Filter Exclusion
 
-**What**: Bloom filter inclusion is inferred from the forwarding policy — `local_only` peers are excluded; `full` peers are included. This is a derived behavior of the policy from feature 1, not a separate API.
+**What**: Bloom filter inclusion is inferred from the forwarding policy — `local_only` peers are excluded; `full` peers are included. This is a derived behavior of the policy from feature 1, not a separate API. A peer admitted at any rate — including only the minimum flow allowance — is carried, and so is included.
 
 **Behavior**:
 - Peers with `local_only` policy are excluded from outbound bloom filters (their node_addr is not advertised to other peers)
@@ -116,7 +118,7 @@ Shaping outside FIPS only reaches part of the traffic. Each node is a distinct `
 
 **What**: Register a dedicated FSP (FIPS Session Protocol) port for TollGate message delivery.
 
-**Why**: The initial implementation uses HTTP over the FIPS IPv6 adapter, which works but adds HTTP overhead. A native FSP port would allow direct CBOR message delivery without HTTP framing.
+**Why**: TollGate messages travel as raw TCP over the FIPS IPv6 adapter, which works but pays for a TCP connection per session. A native FSP port would deliver CBOR messages directly, without the TCP layer.
 
 **Priority**: Low — the IPv6 adapter approach works today. This is a performance optimization.
 
@@ -151,9 +153,9 @@ Shaping outside FIPS only reaches part of the traffic. Each node is a distinct `
 **Why not WireGuard**: FIPS provides end-to-end encryption natively. WireGuard adds ~80 bytes/packet of redundant crypto overhead. On constrained links (LoRa, mesh hops) this is significant.
 
 **Phase plan**:
-- **Phase 1**: Binary allow/deny on the tunnel interface. Price = 0. No TollGate payments — just prove connectivity.
-- **Phase 2**: Attach TollGate pricing to the tunnel interface (nft counters, tc shaping, or BPF on the GRE device). Granular Cashu micropayments for metered access.
-- **Phase 3**: Full FIPS-only network — remove all IP internally. Only loopback + FIPS interface + GRE tunnel. Multiple exit nodes form a market (users choose cheapest/best-rated exit).
+- **Phase 1**: Binary allow/deny on the tunnel interface. No TollGate payments — just prove connectivity.
+- **Phase 2**: Sell exit capacity through the tunnel interface as TollGate grants (nft counters, tc shaping, or BPF on the GRE device).
+- **Phase 3**: Full FIPS-only network — remove all IP internally. Only loopback + FIPS interface + GRE tunnel. Multiple exit nodes compete, and users choose between them.
 
 **Referenced in**: [peering-fips.md](network-peering/peering-fips.md)
 
@@ -187,26 +189,22 @@ Shaping outside FIPS only reaches part of the traffic. Each node is a distinct `
 
 ---
 
-### 11. Per-FIPS-Instance Pricing Profiles
+### 11. Per-FIPS-Instance Profiles
 
-**What**: Support for running multiple complete FIPS instances on a single device, each with its own pricing profile, to handle heterogeneous peer media.
+**What**: Support for running multiple complete FIPS instances on a single device, one per physical medium, to handle heterogeneous peer media.
 
-**Problem**: A device peering over LoRa (slow, expensive per MB) and a device peering over fiber (fast, cheap per MB) cannot charge the same price per megabyte. A single FIPS instance has a single pricing model.
+**Problem**: A device peering over LoRa (slow, scarce capacity) and over fiber (fast, plentiful capacity) has very different capacity to sell on each. A single FIPS instance puts both behind one set of limits.
 
-**Solution**: Run multiple complete FIPS instances, each bound to a different physical interface, with its own pricing configuration. The FIPS protocol itself does **not** need to change — instance management is at the TollGate layer.
+**Solution**: Run multiple complete FIPS instances, each bound to a different physical interface. The FIPS protocol itself does **not** need to change — instance management is at the TollGate layer.
 
 **How**: `tollgate-net` manages multiple FIPS daemon processes (or multiple FIPS interfaces within a single daemon), each with:
 - Its own peer set (bound to a specific radio/interface)
-- Its own pricing model (per-MB, per-second, or flat-rate)
+- Its own grant limits (`max_rate`, window range)
 - Its own access policy
 
-**Example**: A reseller router with two upstream peers:
-- Fiber peer: 0.001 sats/MB, high throughput
-- LoRa peer: 0.1 sats/MB, low throughput, backup only
+What a unit of each medium costs in money is set where its vouchers are sold, not in FIPS or in the protocol.
 
-Each FIPS instance advertises independently. Customers connect to whichever instance offers the best price/throughput for their needs.
-
-**Referenced in**: [tollgate-pricing.md](core/tollgate-pricing.md), [peering-fips.md](network-peering/peering-fips.md)
+**Referenced in**: [peering-fips.md](network-peering/peering-fips.md)
 
 ---
 
@@ -222,7 +220,7 @@ Each FIPS instance advertises independently. Customers connect to whichever inst
 **What's needed**:
 - Control-socket query: `ping_proximity <node_addr>` → returns `{srtt_ms, ttl, hop_count_estimate}`
 - Optional per-peer policy: `max_ping_ms` / `max_ttl` thresholds that automatically reject connections from peers too far away
-- Combine with rate limiting and price-based gating for layered DoS protection
+- Combine with rate limiting and payment-based gating for layered DoS protection
 
 **Complexity**: Low — ping data already exists in MMP metrics (`srtt_ms`). TTL extraction requires reading the IP header of incoming packets, which is available at the FIPS transport layer.
 
@@ -256,11 +254,10 @@ The physical layer recommendation for TollGate deployments:
 | 8 | Payment-aware routing | Future | High |
 | 9 | TUN/TAP virtual interface for internet exit | High | Medium |
 | 10 | GRE tunnel setup API (control socket) | High | Medium |
-| 11 | Per-FIPS-instance pricing profiles | Future | Medium |
+| 11 | Per-FIPS-instance profiles | Future | Medium |
 | 12 | TTL/Ping proximity signal | Future | Low |
 
-Feature 2 is the one the voucher model added. Features 1 and 3–5 describe a
-binary gate, which was sufficient when payment bought a balance and service
-stopped once it ran out. A grant now buys a **rate**, so the provider needs to
-deliver an arbitrary bytes-per-second figure rather than an on/off decision, and
-nothing in FIPS can express that today.
+Feature 2 is what makes the payment model deliverable over FIPS. A grant buys a
+**rate**, so the provider has to deliver an arbitrary bytes-per-second figure
+rather than an on/off decision; features 1 and 3 are gates on top of it. Feature
+2 is available as FIPS's transit-policy commands, which `tollgate-net` uses.

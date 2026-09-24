@@ -21,7 +21,7 @@ FIPS="${FIPS_CHECKOUT:-$ROOT/reference/fips}"
 if [[ ! -f "$FIPS/Cargo.toml" ]]; then
     echo "no FIPS checkout at $FIPS" >&2
     echo "clone one there, or point FIPS_CHECKOUT at it:" >&2
-    echo "  git clone https://github.com/nicobao/fips $FIPS" >&2
+    echo "  git clone https://github.com/jmcorgan/fips $FIPS" >&2
     exit 1
 fi
 

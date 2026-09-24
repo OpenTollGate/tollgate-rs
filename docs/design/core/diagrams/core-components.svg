@@ -45,13 +45,13 @@
 
   <!-- Product Catalog & Pricing -->
   <rect x="258" y="95" width="185" height="55" rx="5" class="callout" stroke="#50c050" stroke-width="1.5"/>
-  <text x="350" y="118" text-anchor="middle" class="mlabel" fill="#80e080">Product &amp; Pricing</text>
-  <text x="350" y="133" text-anchor="middle" class="mdesc">catalog, dynamic adjustment</text>
+  <text x="350" y="118" text-anchor="middle" class="mlabel" fill="#80e080">Voucher Mint</text>
+  <text x="350" y="133" text-anchor="middle" class="mdesc">issue &amp; redeem</text>
 
   <!-- Access Control -->
   <rect x="456" y="95" width="185" height="55" rx="5" class="callout" stroke="#c05050" stroke-width="1.5"/>
   <text x="548" y="118" text-anchor="middle" class="mlabel" fill="#f08080">Access Control</text>
-  <text x="548" y="133" text-anchor="middle" class="mdesc">gate, 5 access levels</text>
+  <text x="548" y="133" text-anchor="middle" class="mdesc">gate, 4 access levels</text>
 
   <!-- Row 2 -->
   <!-- Metering -->

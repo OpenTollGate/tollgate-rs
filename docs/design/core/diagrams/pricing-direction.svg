@@ -40,7 +40,7 @@
   <rect width="720" height="300" rx="8" class="bg"/>
 
   <!-- Title -->
-  <text x="360" y="28" text-anchor="middle" class="title">Pricing Direction</text>
+  <text x="360" y="28" text-anchor="middle" class="title">Payment Direction</text>
   <text x="360" y="46" text-anchor="middle" class="subtitle">The provider is paid in its own vouchers — each direction settled independently</text>
 
   <!-- Node A -->

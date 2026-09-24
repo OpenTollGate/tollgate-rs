@@ -460,7 +460,6 @@ A payer that receives less than it bought has no protocol recourse: the grant wa
 | Rollover threshold | 80% capacity (configurable, default 20% overlap) | New channel ready before old exhausts |
 | Rollover drain | Old channel drains to 100%, then new channel continues | No wasted capacity |
 | Stale session timeout | 60 seconds (configurable) | Close a session whose peer has gone silent; a lapsed payment is handled by the allowance, not by closing |
-| Netting | Removed | Prepaid grants are bought at unrelated moments, in different mints, for different windows. There is no shared settlement moment for the two directions to meet in |
 | Grant window | Payer chooses per grant, inside a provider-advertised range | It is the denominator of a rate, not a settlement clock. Nothing is negotiated and no boundary is shared |
 | Provider delivery exposure | None | Payment lands before the traffic it covers, so a peer that vanishes leaves nothing unpaid |
 | Under-delivery | No recourse in the channel layer | The grant is consumed whether or not packets arrive. The remedy is to stop buying, and the channel layer's job is only to make leaving cheap |

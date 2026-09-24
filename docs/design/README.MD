@@ -56,7 +56,7 @@ a node can sell its own vouchers and redeem them without any of this.
 
 | Document | Description |
 | -------- | ----------- |
-| [peering-ip.md](network-peering/peering-ip.md) | Traditional IP networks: open access, HTTP/WebSocket, firewall rules |
+| [peering-ip.md](network-peering/peering-ip.md) | Traditional IP networks: open access, raw TCP, firewall rules |
 | [peering-fips.md](network-peering/peering-fips.md) | FIPS mesh networks: native integration, MMP metrics, bloom filters |
 
 ### FIPS Changes

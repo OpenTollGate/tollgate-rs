@@ -75,7 +75,7 @@ payment in, and one unsigned multiplier saying how much a unit carried
 
 The protocol is transport-agnostic, but each transport needs a concrete spec
 for how CBOR messages are framed, how peers detect failure, and how sessions
-resume. **v1 defines one: raw TCP.** HTTP polling and WebSocket are recorded
+resume. **The protocol defines one: raw TCP.** HTTP polling and WebSocket are recorded
 below as future alternatives for the cases raw TCP cannot reach.
 
 **The transport carries no security burden.** The end goal is FIPS, where a
@@ -196,7 +196,7 @@ First message sent by each peer after network-layer authentication. Identifies t
   0: 0x00,                         // type: Announce
   1: <protocol_version>,           // u8 — current: 1
   2: <pubkey>,                     // bytes(33) — sender's compressed secp256k1 public key
-  3: <unit>,                       // text — "bytes", "wh", "ml", etc.
+  3: <unit>,                       // text — "byte", "wh", "ml", etc.
   4: <capabilities>,               // u32 — bitfield of supported capabilities
 }
 ```
@@ -699,7 +699,7 @@ Plus 2 bytes of length prefix per message. Setup messages are one-time. TopUp is
 | Decision | Resolution | Rationale |
 |----------|-----------|-----------|
 | Encoding | CBOR (RFC 8949) | Compact, self-describing, handles variable strings/arrays, cross-platform |
-| Transport | Raw TCP for v1; HTTP polling and WebSocket recorded as future alternatives | Peerings are adjacent, so nothing sits between the peers to require HTTP dressing. Saves HTTP parsing, an upgrade handshake, a frame parser, masking and ping/pong on constrained devices |
+| Transport | Raw TCP; HTTP polling and WebSocket recorded as future alternatives | Peerings are adjacent, so nothing sits between the peers to require HTTP dressing. Saves HTTP parsing, an upgrade handshake, a frame parser, masking and ping/pong on constrained devices |
 | Framing | 2-byte little-endian length prefix per message | Also caps a message at 65535 bytes, so a peer cannot make the receiver allocate for a claimed huge length |
 | Transport security | None at this layer | FIPS Noise IK authenticates and encrypts before TollGate sees the peer; on plain IP the operator wraps the connection as it sees fit |
 | Keepalive | None | Non-payment is self-enforcing: the grant expires, the peer drops to the minimum flow allowance, and nothing has to detect anything. Setup uses `stale_timeout_seconds`, since no grant exists yet |

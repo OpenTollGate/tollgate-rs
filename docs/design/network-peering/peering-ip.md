@@ -14,7 +14,7 @@ On a traditional IP network, peers connect over plain IP. There is no self-organ
 
 ## Topology
 
-The typical topology is a **tree or chain**: an upstream provider sells connectivity to downstream customers, who may resell further. This is the classic ISP model — but with TollGate, every hop is independently priced and paid for with Cashu ecash.
+The typical topology is a **tree or chain**: an upstream provider sells connectivity to downstream customers, who may resell further. This is the classic ISP model — but with TollGate, every hop is its own commercial relationship, paid for with Cashu ecash.
 
 ![IP Peering Topology](diagrams/ip-topology.svg)
 <details><summary>Text version</summary>
@@ -28,7 +28,7 @@ The typical topology is a **tree or chain**: an upstream provider sells connecti
                   |    / \
                  [d] [e] [f]         Clients
 
-  Each link independently priced. Downstream pays upstream:
+  Each link paid for independently. Downstream pays upstream:
   - a charges b and c
   - b charges d
   - c charges e and f
@@ -109,7 +109,7 @@ peers:
 
 Static peers are attempted on startup and reconnected on failure. This is the right answer for fixed infrastructure peering (a relay that always pays a known upstream gateway) and for multi-hop topologies where dynamic probing on a local subnet wouldn't reach the intended peer.
 
-Each peer relationship is independently priced and negotiated. There is no concept of "upstream" or "downstream" at the TollGate level — pricing determines the economic direction.
+Each peer relationship is independent. There is no concept of "upstream" or "downstream" at the TollGate level — each side pays for what it receives, and which way the money mostly flows follows from who receives more.
 
 ---
 
@@ -138,12 +138,12 @@ Confidentiality and integrity of TollGate messages on the wire is a **separate c
 
 | Choice | What it provides | Risk profile |
 |---|---|---|
-| **Plain HTTP / WS** (default) | None | Spilman funding proofs travel in Accept and RolloverInit, and a voucher is a bearer instrument — whoever has the bytes can redeem them at the issuer. An attacker on the segment can race to redeem intercepted funding, forcing the legitimate peer to re-fund. Amounts are bounded by channel capacity (small for new peers by design), so this is **locally disruptive** rather than economically severe. BalanceUpdates cannot be hijacked — the receiver's multisig key is required to redeem. Metadata (who paid what, when) is also public. |
-| **TLS (HTTPS / WSS)** | Confidentiality + integrity | Standard server-cert TLS; no peer authentication unless mTLS is enabled. |
+| **Plain TCP** (default) | None | Spilman funding proofs travel in Accept and RolloverInit, but they are locked 2-of-2 to both peers' keys, so an eavesdropper cannot redeem them. TopUps cannot be hijacked either — the receiver's key is required to redeem. What is exposed is **metadata**: who funded whom, for how much, and when. An attacker who can modify traffic can still drop or delay messages. |
+| **TLS wrapper** | Confidentiality + integrity | Server-cert TLS around the TCP connection; no peer authentication unless mutual. |
 | **WireGuard tunnel** | Confidentiality + integrity + peer authentication | The WireGuard pubkey can be the same key as the TollGate pubkey, collapsing transport security and peer authentication into one layer. Natural fit for infrastructure peering. |
 | **Mutual TLS** | Confidentiality + integrity + peer authentication | Cert-chain authentication; suitable for managed infrastructure. |
 
-For open hotspots, plain HTTP is functional but leaves funding proofs visible to anyone on the segment. The economic exposure per peer is bounded by channel capacity, but a determined attacker on the local segment can disrupt service by racing to redeem what it intercepts. Operators who want to mitigate this should run TLS/HTTPS at minimum (encrypts the wire so proofs are not visible), or a WireGuard/mTLS tunnel where peer authentication also matters. For infrastructure peering, WireGuard is the natural fit — both transport security and peer authentication in one layer.
+For open hotspots, plain TCP is functional but leaves every payment visible to anyone on the segment. Operators who want to hide that should wrap the connection in TLS at minimum, or use a WireGuard/mTLS tunnel where peer authentication also matters. For infrastructure peering, WireGuard is the natural fit — both transport security and peer authentication in one layer.
 
 ---
 
@@ -237,22 +237,9 @@ These are coarse approximations, and they are not inputs to any price — delive
 
 ## Transport for TollGate Messages
 
-The wire-level transport spec — framing, failure detection, reconnection — is defined in [tollgate-protocol.md](../core/tollgate-protocol.md#transports). v1 uses **raw TCP** on default port **4747**; HTTP polling and WebSocket are recorded there as future alternatives for networks that block unusual ports. This section covers IP-specific deployment notes only.
+The wire-level transport spec — framing, failure detection, reconnection — is defined in [tollgate-protocol.md](../core/tollgate-protocol.md#transports). TollGate messages travel over **raw TCP** on default port **4747**. Peerings are adjacent, so there is no proxy or NAT between the two ends for an HTTP-shaped transport to get through. This section covers IP-specific deployment notes only.
 
-### HTTP polling (`POST /tollgate/v1/exchange`)
-
-- Suitable for constrained clients and open-access hotspot scenarios.
-- Works through NATs, proxies, and firewalls — any HTTP client can participate.
-- Stateless on the server: no need to maintain open connections per peer.
-- Polling cadence is the client's choice, bounded by the grant window it buys; clients may poll more aggressively during initial channel setup.
-
-### WebSocket (`GET /tollgate/v1/ws`)
-
-- Suitable for higher-frequency metering and large numbers of peers.
-- Persistent connection, lower latency than polling.
-- The deployment must accommodate long-lived connections — load balancer timeouts, NAT keepalive, idle disconnects.
-
-### Future: Tunnel-Based Transport
+### Tunnel-Based Transport
 
 For authenticated deployments, raw TCP runs inside an encrypted tunnel (WireGuard, IPsec) exactly as it does bare. The transport spec is unchanged — the tunnel is invisible to TollGate. On FIPS this is what Noise IK already provides, which is why nothing needs wrapping there.
 
@@ -261,7 +248,7 @@ For authenticated deployments, raw TCP runs inside an encrypted tunnel (WireGuar
 ## Limitations
 
 - **No automatic failover**: if an upstream peer goes down, the operator must reconfigure routing. There is no protocol-level rerouting.
-- **No rich link metrics**: without per-link measurement, operator visibility is limited to coarse estimates (ping RTT, loss) or static configuration. This does not affect pricing, which the protocol does not do.
+- **No rich link metrics**: without per-link measurement, operator visibility is limited to coarse estimates (ping RTT, loss) or static configuration. Nothing in the payment path depends on metrics.
 - **Simpler peer discovery**: dynamic probing works on a local network but does not scale to multi-hop topologies. Operators bridging multiple subnets configure peers statically.
 
 ---
@@ -276,5 +263,5 @@ For authenticated deployments, raw TCP runs inside an encrypted tunnel (WireGuar
 | Metering counters | nftables accounting (default) or interface stats | Per-peer granularity at the kernel level |
 | Peer metrics | None by default; optional ICMP / static | No built-in metrics on plain IP |
 | Peer discovery | Dynamic probing, static config, or open access | Local network probing; static config for multi-hop |
-| TollGate transport | HTTP polling (simple) or WebSocket (real-time) | Works without tunnels, through NATs |
+| TollGate transport | Raw TCP, port 4747 | Peerings are adjacent; no HTTP parsing on constrained devices |
 | Routing | OS IP stack | Separation of concerns — TollGate handles payment, not routing |

@@ -68,5 +68,5 @@
   <text x="535" y="115" text-anchor="middle" class="elabel" fill="#d0a040">$</text>
 
   <!-- Caption -->
-  <text x="360" y="200" text-anchor="middle" class="caption">B pays A, C pays B, D pays C — each link independently priced.</text>
+  <text x="360" y="200" text-anchor="middle" class="caption">B pays A, C pays B, D pays C — each link paid for independently.</text>
 </svg>

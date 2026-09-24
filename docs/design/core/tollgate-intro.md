@@ -35,7 +35,7 @@ A constrained-device variant (`tollgate-net-esp32`) lives in a separate project 
 
 TollGate operates on a single principle: **each side pays for what it received, in the vouchers of whoever delivered it**. Both peers owe each other by default, so both fund a channel.
 
-![Pricing Direction](diagrams/pricing-direction.svg)
+![Payment Direction](diagrams/pricing-direction.svg)
 <details><summary>Text version</summary>
 
 ```

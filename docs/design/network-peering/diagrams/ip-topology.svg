@@ -31,7 +31,7 @@
 
   <!-- Title -->
   <text x="360" y="28" text-anchor="middle" class="title">IP Peering Topology</text>
-  <text x="360" y="46" text-anchor="middle" class="subtitle">Tree — every hop independently priced</text>
+  <text x="360" y="46" text-anchor="middle" class="subtitle">Tree — every hop paid for independently</text>
 
   <!-- Internet -->
   <rect x="300" y="65" width="120" height="44" rx="6" class="callout" stroke="#909090" stroke-width="1.5"/>
@@ -90,6 +90,6 @@
   <text x="555" y="320" text-anchor="middle" class="elabel" fill="#d0a040">$</text>
 
   <!-- Caption -->
-  <text x="360" y="425" text-anchor="middle" class="caption">Downstream pays upstream at each hop. $ = Cashu ecash, priced per link.</text>
+  <text x="360" y="425" text-anchor="middle" class="caption">Downstream pays upstream at each hop. $ = Cashu ecash, paid per link.</text>
   <text x="360" y="445" text-anchor="middle" class="caption">a charges b and c. b charges d. c charges e and f. Routing via OS IP stack.</text>
 </svg>

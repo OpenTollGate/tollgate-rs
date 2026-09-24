@@ -16,7 +16,7 @@ Each peer is in exactly one access level at any time:
 
 | Level | Delivery | TollGate messages | Bloom filter visibility (FIPS) | When |
 |-------|---------|-------------------|-------------------------------|------|
-| `None` | Minimum flow allowance only; blocked if the allowance is zero | Allowed | Hidden | Peer connected, no payment yet |
+| `None` | Minimum flow allowance only; blocked if the allowance is zero | Allowed | Visible while carried at the allowance; hidden if blocked | Peer connected, no payment yet |
 | `Active` | Allowed (metered), never below the allowance | Allowed | Visible | Spilman channels funded |
 | `Free` | Allowed (unmetered) | Allowed | Visible | This node does not charge the peer |
 | `Suspended` | Blocked | Allowed | Hidden | Payment lapsed and the node gives no allowance |
@@ -38,7 +38,7 @@ Any --> None (disconnect)
 
 ```
                        ┌──────────────┐
-                       │     None     │ (allowance only, hidden)
+                       │     None     │ (allowance only)
                        └──┬─────────┬─┘
               payment ok  │         │ free
                           ▼         ▼
@@ -108,16 +108,16 @@ The implementation decides how to enforce this. In FIPS, this could be a deliver
 
 In FIPS, bloom filters advertise reachability — "I can reach destination X through peer Y." If an unpaid peer is included in bloom filters, other nodes may route resources through it, only to have them blackholed at the gate.
 
-**Rule: unpaid peers are hidden from bloom filters.**
+**Rule: a peer is in the bloom filters exactly when its traffic is carried.** A peer held at the minimum flow allowance is carried — slowly — so it is advertised; only a peer whose delivery is blocked is hidden.
 
 | Access level | Included in bloom filters? |
 |-------------|---------------------------|
-| `None` | No — hidden (FIPS) |
+| `None` | Yes while carried at the allowance; no if the allowance is zero |
 | `Active` | Yes — visible (FIPS) |
 | `Free` | Yes — visible (FIPS) |
 | `Suspended` | No — hidden (FIPS) |
 
-Bloom filter visibility is **inferred from the access level** — the implementation maps `None`/`Suspended` to hidden and `Active`/`Free` to visible when it applies `set_access`. No separate API call needed.
+Bloom filter visibility is **inferred from whether the peer is carried** — the level together with its shaping rate — so it needs no separate API call and can never disagree with the gate.
 
 This requires a FIPS modification — the ability to selectively include/exclude peers from bloom filter computation. See [FIPS_FEATURE_REQUESTS.md](../FIPS_FEATURE_REQUESTS.md).
 
@@ -130,9 +130,9 @@ This requires a FIPS modification — the ability to selectively include/exclude
 ```rust
 pub trait ResourceAdapter: Send + Sync {
     /// Apply an access level decided by core. The implementation enforces
-    /// delivery rules AND infers bloom filter visibility from the level:
-    /// - None/Suspended -> hidden from bloom filters (FIPS)
-    /// - Active/Free -> visible in bloom filters (FIPS)
+    /// delivery rules AND infers bloom filter visibility (FIPS): a peer whose
+    /// traffic is carried, even only at the allowance, is visible; a blocked
+    /// peer is hidden.
     fn set_access(&self, peer: PubKey, access: AccessLevel);
 
     /// Apply a shaping rate decided by core, in units per second. The rate

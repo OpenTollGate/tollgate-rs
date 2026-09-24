@@ -45,7 +45,7 @@
   <!-- ═══ NONE — center top ═══ -->
   <rect x="270" y="75" width="180" height="55" rx="8" class="callout" stroke="#c05050" stroke-width="2"/>
   <text x="360" y="100" text-anchor="middle" class="slabel" fill="#f08080">None</text>
-  <text x="360" y="118" text-anchor="middle" class="sdesc" fill="#909090">allowance only, hidden (FIPS)</text>
+  <text x="360" y="118" text-anchor="middle" class="sdesc" fill="#909090">allowance only</text>
 
   <!-- ═══ ACTIVE — center middle ═══ -->
   <rect x="120" y="225" width="180" height="55" rx="8" class="callout" stroke="#50c050" stroke-width="2"/>
