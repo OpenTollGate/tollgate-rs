@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 use tollgate_protocol::{ChannelId, Message, PubKey, ReasonCode};
 
 use crate::meter::Counters;
+use crate::time::Millis;
 
 /// An input to the session state machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +68,12 @@ pub enum Event {
         channel_id: ChannelId,
         /// Units it can carry before it must roll over.
         capacity: u64,
+        /// When we can reclaim it through the refund path, on the host's
+        /// clock, or `None` for a channel that never expires.
+        ///
+        /// The backend knows this as a wall-clock timestamp; the host converts
+        /// it, since core only ever sees the time it is handed.
+        expires_at: Option<Millis>,
         /// Opaque funding blob to put in the Accept, interpreted by whatever
         /// channel backend produced it.
         funding: Vec<u8>,
@@ -81,6 +88,10 @@ pub enum Event {
         channel_id: ChannelId,
         /// Units it can carry.
         capacity: u64,
+        /// When the peer can reclaim it, on the host's clock, or `None` for a
+        /// channel that never expires. It has to be settled before then, or
+        /// everything earned on it goes back to the peer.
+        expires_at: Option<Millis>,
         /// The mint the channel is funded in. Core refuses the channel unless
         /// it is one of our accepted mints, whatever the backend checked.
         mint_url: String,
@@ -115,6 +126,7 @@ pub enum Event {
         rate: u64,
     },
 
-    /// Time passed. Drives deadline expiry, renewals and rollover.
+    /// Time passed. Drives deadline expiry, renewals, rollover, and settling
+    /// channels before they expire.
     Tick,
 }

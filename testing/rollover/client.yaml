@@ -18,6 +18,9 @@ buying:
   renew_lead_ms: 300
 channels:
   initial_capacity: 5000000
+  # Far below the default floor, which a channel this small has to come down
+  # with.
+  min_capacity: 1000000
 network:
   listen: "0.0.0.0:4747"
 peers:

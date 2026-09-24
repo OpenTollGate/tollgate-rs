@@ -52,16 +52,21 @@ pub struct IncomingChannel {
     /// Purchases on it that failed verification since the last one that
     /// passed. See [`MAX_VERIFICATION_FAILURES`].
     pub failures: u32,
+    /// When the peer can reclaim it through the refund path, or `None` if it
+    /// never expires. Everything earned on it that has not been settled by
+    /// then goes back to the peer.
+    pub expires_at: Option<Millis>,
 }
 
 impl IncomingChannel {
     /// A freshly verified channel, nothing signed on it yet.
-    pub fn new(id: ChannelId, capacity: u64) -> Self {
+    pub fn new(id: ChannelId, capacity: u64, expires_at: Option<Millis>) -> Self {
         Self {
             id,
             capacity,
             signed: 0,
             failures: 0,
+            expires_at,
         }
     }
 
@@ -112,20 +117,25 @@ impl GrantState {
 
     /// Recognise a channel the peer has funded and we have verified.
     ///
-    /// Re-verifying one we already hold refreshes its capacity without
-    /// disturbing the ratchet, so a repeated ChannelReady is harmless.
-    pub fn open_channel(&mut self, id: ChannelId, capacity: u64) {
+    /// Re-verifying one we already hold refreshes its capacity and expiry
+    /// without disturbing the ratchet, so a repeated ChannelReady is harmless.
+    pub fn open_channel(&mut self, id: ChannelId, capacity: u64, expires_at: Option<Millis>) {
         if let Some(existing) = self.channels.iter_mut().find(|c| c.id == id) {
             existing.capacity = capacity;
+            existing.expires_at = expires_at;
             return;
         }
-        self.channels.push(IncomingChannel::new(id, capacity));
+        self.channels
+            .push(IncomingChannel::new(id, capacity, expires_at));
     }
 
     /// Stop recognising a channel — it has been settled, or the peer replaced
     /// it. Updates naming it are refused from here on.
-    pub fn close_channel(&mut self, id: ChannelId) {
-        self.channels.retain(|c| c.id != id);
+    ///
+    /// Returns the channel as it stood, or `None` if we did not recognise it.
+    pub fn close_channel(&mut self, id: ChannelId) -> Option<IncomingChannel> {
+        let at = self.channels.iter().position(|c| c.id == id)?;
+        Some(self.channels.remove(at))
     }
 
     /// Count a purchase on this channel that failed verification — a bad
@@ -152,6 +162,23 @@ impl GrantState {
     /// Channels drained to their capacity, which can be settled.
     pub fn exhausted_channels(&self) -> impl Iterator<Item = ChannelId> + '_ {
         self.channels.iter().filter(|c| c.exhausted()).map(|c| c.id)
+    }
+
+    /// Channels within `lead_ms` of their expiry, which have to be settled now.
+    ///
+    /// Settling is the receiver's job alone, and past expiry the funder can
+    /// reclaim the whole channel through the refund path — including what it
+    /// already paid us on it. See
+    /// [`NodePolicy::settle_lead_ms`](crate::config::NodePolicy::settle_lead_ms).
+    pub fn expiring_channels(
+        &self,
+        now: Millis,
+        lead_ms: u64,
+    ) -> impl Iterator<Item = ChannelId> + '_ {
+        self.channels
+            .iter()
+            .filter(move |c| c.expires_at.is_some_and(|e| now + lead_ms >= e))
+            .map(|c| c.id)
     }
 
     /// Cumulative units bought across every channel.

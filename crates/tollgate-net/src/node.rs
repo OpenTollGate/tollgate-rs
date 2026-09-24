@@ -20,7 +20,7 @@ use tollgate_protocol::{ChannelUpdate, Message, PubKey, ReasonCode, TopUp, TopUp
 use tracing::{debug, info, warn};
 
 use crate::adapter::ResourceAdapter;
-use crate::channel::{ChannelBackend, MintNotAccepted};
+use crate::channel::{self, ChannelBackend, MintNotAccepted};
 use crate::control;
 use crate::identity::Identity;
 use crate::settle::{Backoff, Settler};
@@ -75,6 +75,10 @@ pub struct NodeConfig {
     pub mint_listen: SocketAddr,
     /// The URL peers reach that mint on, advertised in our Offer.
     pub mint_url: String,
+    /// How long a channel this node funds lives before the refund path opens,
+    /// in seconds. The channel backend applies it; core only ever sees the
+    /// expiry that results.
+    pub channel_ttl_seconds: u64,
     /// Peers to dial. Anyone else has to dial us.
     pub peers: Vec<PeerConfig>,
 }
@@ -163,7 +167,7 @@ impl Node {
     /// Core never reads a clock; this is the only place time enters, and it is
     /// monotonic by construction.
     fn now(&self) -> Millis {
-        Millis(self.started.elapsed().as_millis() as u64)
+        millis_since(self.started)
     }
 
     /// Listen, dial, and run until `shutdown` resolves or something goes badly
@@ -419,13 +423,16 @@ impl Node {
             } => {
                 let channels = Arc::clone(&self.channels);
                 let done = done.clone();
+                let started = self.started;
                 tokio::task::spawn_blocking(move || {
                     match channels.fund(peer, &mint_url, capacity) {
                         Ok(funded) => {
+                            let now = millis_since(started);
                             let _ = done.blocking_send(Event::OutgoingChannelFunded {
                                 peer,
                                 channel_id: funded.channel_id,
                                 capacity: funded.capacity,
+                                expires_at: funded.expiry.map(|e| channel::expires_at(e, now)),
                                 funding: funded.funding,
                             });
                         }
@@ -439,6 +446,7 @@ impl Node {
             Action::VerifyFunding { peer, funding } => {
                 let channels = Arc::clone(&self.channels);
                 let done = done.clone();
+                let started = self.started;
                 tokio::task::spawn_blocking(move || {
                     let event = match channels.verify(peer, &funding) {
                         Ok(v) => Event::IncomingFundingVerified {
@@ -446,6 +454,9 @@ impl Node {
                             channel_id: v.channel_id,
                             capacity: v.capacity,
                             mint_url: v.mint_url,
+                            expires_at: v
+                                .expiry
+                                .map(|e| channel::expires_at(e, millis_since(started))),
                         },
                         Err(e) => {
                             warn!(%peer, error = format!("{e:#}"), "peer funding did not verify");
@@ -461,15 +472,25 @@ impl Node {
                 });
             }
 
-            Action::SettleChannel { peer, channel_id } => {
+            Action::SettleChannel {
+                peer,
+                channel_id,
+                expires_at,
+            } => {
                 // Worth logging: a channel settling far sooner than expected is
                 // what a rollover going wrong looks like from outside.
-                debug!(%peer, ?channel_id, "settling a channel");
+                debug!(%peer, ?channel_id, ?expires_at, "settling a channel");
                 // Core has already let the channel go, so this is the only
                 // place a failed settlement can be tried again, and the settler
-                // keeps trying. No deadline yet: a channel's refund expiry is
-                // the one to pass here once the backend reports it.
-                self.settler.settle(peer, channel_id, None);
+                // keeps trying — until the channel's refund expiry, past which
+                // the funder can reclaim it and settling it buys nothing. Core
+                // hands the expiry over on its own clock, which started with
+                // this node.
+                // An expiry too far off for the clock to represent is none.
+                let deadline = expires_at
+                    .and_then(|at| self.started.checked_add(Duration::from_millis(at.0)))
+                    .map(tokio::time::Instant::from_std);
+                self.settler.settle(peer, channel_id, deadline);
             }
 
             Action::DropPeer { peer } => {
@@ -492,6 +513,12 @@ impl Node {
             warn!(%peer, "outbox full, dropping a message");
         }
     }
+}
+
+/// Milliseconds on the node's clock, for work that finishes off the event loop
+/// and has to stamp its result on the same clock [`Node::now`] reads.
+fn millis_since(started: Instant) -> Millis {
+    Millis(started.elapsed().as_millis() as u64)
 }
 
 /// Which end of a refusal we are.

@@ -239,30 +239,32 @@ It is a **rate**, and it is the floor of the shaper. A peer whose grant has expi
 
 ```yaml
 channels:
-  min_capacity: 134217728                  # minimum Spilman channel capacity, bytes (128 MiB)
-  max_capacity: 17179869184                # maximum channel capacity, bytes (16 GiB)
-  initial_capacity: 1073741824             # starting capacity for new peers, bytes (1 GiB)
-  capacity_growth_factor: 2.0             # multiply capacity after each successful rollover
+  min_capacity: 134217728                  # smallest channel this node funds, bytes (128 MiB)
+  max_capacity: 17179869184                # largest channel this node funds, bytes (16 GiB)
+  initial_capacity: 1073741824             # first channel to a new peer, bytes (1 GiB)
+  capacity_growth_factor: 2.0              # multiply capacity after each rollover forced by use
   ttl_seconds: 3600                        # channel expiry (default: 1 hour)
-  rollover_threshold: 0.80                 # rollover at 80% capacity used
-  safety_margin_seconds: 60               # begin emergency rollover this long before expiry
-  stale_timeout_seconds: 60               # close a session whose peer has been silent this long
+  rollover_threshold_pct: 80               # rollover at 80% capacity used
+  safety_margin_seconds: 60                # floor of the margin before expiry
+  stale_timeout_seconds: 60                # close a session whose peer has been silent this long
 ```
 
 ### Defaults
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `min_capacity` | `134217728` | Minimum channel funding, in bytes (128 MiB) |
-| `max_capacity` | `17179869184` | Maximum channel funding, in bytes (16 GiB) |
-| `initial_capacity` | `1073741824` | First channel capacity for new peers, in bytes (1 GiB) |
-| `capacity_growth_factor` | `2.0` | Capacity multiplier per successful rollover — **incoming (revenue) channels only** |
-| `ttl_seconds` | `3600` | Channel lifetime (1 hour) |
-| `rollover_threshold` | `0.80` | Trigger rollover at 80% exhaustion |
-| `safety_margin_seconds` | `60` | Emergency rollover window before expiry |
+| `min_capacity` | `134217728` | Smallest channel this node funds, in bytes (128 MiB) |
+| `max_capacity` | `17179869184` | Largest channel this node funds, in bytes (16 GiB). Also the most this node's market and mint issue in one swap, since a peer paying us funds a channel of up to this much |
+| `initial_capacity` | `1073741824` | First channel to a new peer, in bytes (1 GiB) |
+| `capacity_growth_factor` | `2.0` | Multiplier applied to a channel this node funds when it is replaced for filling up. A channel replaced because it neared expiry keeps its size. At least `1.0` |
+| `ttl_seconds` | `3600` | Lifetime of a channel this node funds (1 hour). As a receiver, this node refuses a channel expiring sooner than half its own TTL |
+| `rollover_threshold_pct` | `80` | Trigger rollover at 80% exhaustion |
+| `safety_margin_seconds` | `60` | The floor of the safety margin, which is `max(safety_margin_seconds, 2 × max_window_ms)` — see [Safety Margin](tollgate-payment-channels.md#safety-margin) |
 | `stale_timeout_seconds` | `60` | Session closed if the peer sends nothing for this long |
 
-`capacity_growth_factor` rewards a peer relationship that has proven stable across rollovers. Every channel is funded by the party that owes, so growth always tracks a paying relationship and has nothing to run away on.
+Capacities must satisfy `0 < min_capacity ≤ initial_capacity ≤ max_capacity`, and `ttl_seconds` must be at least twice the safety margin, so a channel is never born inside its own margin.
+
+`capacity_growth_factor` rewards a peer relationship that has proven stable across rollovers. It applies to the channels this node funds — the peer's revenue channels — since only the funder chooses a channel's size. Every channel is funded by the party that owes, so growth always tracks a paying relationship and has nothing to run away on; `max_capacity` bounds it. Growth is tracked per session and starts again from `initial_capacity` when a peer reconnects.
 
 ---
 
@@ -354,7 +356,7 @@ channels:
   initial_capacity: 1073741824
   max_capacity: 8589934592
   ttl_seconds: 3600
-  rollover_threshold: 0.80
+  rollover_threshold_pct: 80
 
 grants:
   window_range_ms: [200, 30000]

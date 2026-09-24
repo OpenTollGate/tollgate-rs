@@ -99,6 +99,8 @@ impl ChannelBackend for LocalChannels {
         Ok(FundedChannel {
             channel_id,
             capacity,
+            // Nothing is at stake, so there is nothing to reclaim.
+            expiry: None,
             funding: encode_funding(funder, mint_url, capacity, nonce),
         })
     }
@@ -115,6 +117,7 @@ impl ChannelBackend for LocalChannels {
             channel_id,
             capacity,
             mint_url,
+            expiry: None,
         })
     }
 

@@ -253,24 +253,101 @@ pub struct MinimumFlow {
 }
 
 /// Channel parameters.
+///
+/// Capacities are in the mint's unit — bytes, for forwarding — and default to
+/// powers of two, since a channel is funded with one proof per set bit.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ChannelsSection {
-    /// Units of capacity a new outgoing channel opens with.
+    /// Units of capacity the first outgoing channel to a peer opens with.
+    /// Small, because a new peering may not last.
     pub initial_capacity: u64,
+    /// No outgoing channel is opened smaller than this.
+    pub min_capacity: u64,
+    /// No outgoing channel is opened larger than this, however long the
+    /// peering. Also the most this node's market sells in one swap, since a
+    /// peer paying us funds a channel of up to this much.
+    pub max_capacity: u64,
+    /// Multiply the capacity by this each time a channel fills up and is
+    /// replaced. `1.0` never grows.
+    pub capacity_growth_factor: f64,
+    /// How long a channel this node funds lives before the refund path opens.
+    pub ttl_seconds: u64,
     /// Percentage of capacity at which the funder starts a rollover.
     pub rollover_threshold_pct: u8,
+    /// The shortest safety margin before a channel's expiry, in which the
+    /// funder rolls it over and the receiver settles it. The margin in force is
+    /// this or two of the receiver's longest windows, whichever is longer.
+    pub safety_margin_seconds: u64,
     /// Drop a peer that has sent nothing at all for this long. Zero disables it.
     pub stale_timeout_seconds: u64,
 }
 
 impl Default for ChannelsSection {
     fn default() -> Self {
+        let d = NodePolicy::default();
         Self {
-            initial_capacity: 1_000_000_000,
-            rollover_threshold_pct: 80,
+            initial_capacity: d.initial_channel_capacity,
+            min_capacity: d.min_channel_capacity,
+            max_capacity: d.max_channel_capacity,
+            capacity_growth_factor: d.capacity_growth_pct as f64 / 100.0,
+            ttl_seconds: 3_600,
+            rollover_threshold_pct: d.rollover_threshold_pct,
+            safety_margin_seconds: d.safety_margin_floor_ms / 1_000,
             stale_timeout_seconds: 60,
         }
+    }
+}
+
+impl ChannelsSection {
+    /// Check the channel parameters hang together.
+    ///
+    /// Returns the growth factor as the percentage core works in.
+    fn validate(&self, max_window_ms: u32) -> Result<u32> {
+        let c = self;
+        if c.min_capacity == 0 || c.min_capacity > c.max_capacity {
+            bail!(
+                "channels.min_capacity ({}) must be above zero and no more than \
+                 channels.max_capacity ({})",
+                c.min_capacity,
+                c.max_capacity
+            );
+        }
+        if !(c.min_capacity..=c.max_capacity).contains(&c.initial_capacity) {
+            bail!(
+                "channels.initial_capacity ({}) must lie between channels.min_capacity \
+                 ({}) and channels.max_capacity ({})",
+                c.initial_capacity,
+                c.min_capacity,
+                c.max_capacity
+            );
+        }
+        // A factor below one would shrink a channel for filling up, and a
+        // non-finite one is a typo rather than a policy.
+        if !c.capacity_growth_factor.is_finite() || c.capacity_growth_factor < 1.0 {
+            bail!(
+                "channels.capacity_growth_factor ({}) must be at least 1.0",
+                c.capacity_growth_factor
+            );
+        }
+        // A channel that is born inside its own safety margin is rolled over
+        // the moment it opens, and again for its replacement: a funding loop,
+        // not a short TTL. Twice the margin leaves the channel at least as long
+        // in use as in retirement.
+        let margin_ms = (c.safety_margin_seconds.saturating_mul(1_000))
+            .max((max_window_ms as u64).saturating_mul(2));
+        if c.ttl_seconds.saturating_mul(1_000) < margin_ms.saturating_mul(2) {
+            bail!(
+                "channels.ttl_seconds ({}) must be at least twice the safety margin \
+                 ({} s: the longer of channels.safety_margin_seconds and two of \
+                 grants.window_range_ms's longest window)",
+                c.ttl_seconds,
+                margin_ms / 1_000
+            );
+        }
+        Ok((c.capacity_growth_factor * 100.0)
+            .round()
+            .min(u32::MAX as f64) as u32)
     }
 }
 
@@ -528,6 +605,8 @@ impl File {
             bail!("grants.window_range_ms must be a non-empty range starting above zero");
         }
 
+        let capacity_growth_pct = self.channels.validate(max_window_ms)?;
+
         let policy = NodePolicy {
             unit: self.mint.unit.clone(),
             accepted_mints,
@@ -543,6 +622,10 @@ impl File {
                 max_rate: self.grants.max_rate,
             },
             initial_channel_capacity: self.channels.initial_capacity,
+            min_channel_capacity: self.channels.min_capacity,
+            max_channel_capacity: self.channels.max_capacity,
+            capacity_growth_pct,
+            safety_margin_floor_ms: self.channels.safety_margin_seconds.saturating_mul(1_000),
             stale_timeout_ms: self.channels.stale_timeout_seconds.saturating_mul(1_000),
             rollover_threshold_pct: self.channels.rollover_threshold_pct,
         };
@@ -628,6 +711,7 @@ impl File {
             identify,
             mint_listen,
             mint_url: self.mint.url.clone(),
+            channel_ttl_seconds: self.channels.ttl_seconds,
             peers,
         })
     }
@@ -836,6 +920,85 @@ mod tests {
                 burst_bytes: 7,
                 quotes_per_minute: 3,
             }
+        );
+    }
+
+    #[test]
+    fn channels_default_to_one_gib_growing_to_sixteen_over_an_hour_ttl() {
+        let file: File = serde_yaml::from_str("{}").expect("parse");
+        let config = file.resolve().expect("resolve");
+        let p = &config.policy;
+
+        assert_eq!(p.initial_channel_capacity, 1 << 30, "1 GiB, one proof");
+        assert_eq!(p.min_channel_capacity, 1 << 27, "128 MiB");
+        assert_eq!(p.max_channel_capacity, 1 << 34, "16 GiB");
+        assert_eq!(p.capacity_growth_pct, 200);
+        assert_eq!(p.rollover_threshold_pct, 80);
+        assert_eq!(p.safety_margin_ms(p.grants.max_window_ms), 60_000);
+        assert_eq!(p.stale_timeout_ms, 60_000, "silence only");
+        assert_eq!(config.channel_ttl_seconds, 3_600);
+    }
+
+    #[test]
+    fn the_channel_ttl_comes_from_the_config() {
+        let file: File = serde_yaml::from_str("channels:\n  ttl_seconds: 7200\n").expect("parse");
+        assert_eq!(file.resolve().expect("resolve").channel_ttl_seconds, 7_200);
+    }
+
+    #[test]
+    fn a_ttl_inside_its_own_safety_margin_is_rejected() {
+        // Two minutes against a one-minute margin is the shortest that works;
+        // anything less would roll every channel over as soon as it opened.
+        let ok: File = serde_yaml::from_str("channels:\n  ttl_seconds: 120\n").expect("parse");
+        assert!(ok.resolve().is_ok());
+        let short: File = serde_yaml::from_str("channels:\n  ttl_seconds: 119\n").expect("parse");
+        assert!(short.resolve().is_err());
+
+        // And the margin follows the longest window, not just the floor.
+        let wide: File = serde_yaml::from_str(
+            "channels:\n  ttl_seconds: 200\ngrants:\n  window_range_ms: [200, 60000]\n",
+        )
+        .expect("parse");
+        assert!(wide.resolve().is_err(), "a 120 s margin needs 240 s");
+    }
+
+    #[test]
+    fn the_growth_factor_becomes_a_percentage() {
+        let file: File =
+            serde_yaml::from_str("channels:\n  capacity_growth_factor: 1.5\n").expect("parse");
+        assert_eq!(
+            file.resolve().expect("resolve").policy.capacity_growth_pct,
+            150
+        );
+        let shrinking: File =
+            serde_yaml::from_str("channels:\n  capacity_growth_factor: 0.5\n").expect("parse");
+        assert!(shrinking.resolve().is_err());
+    }
+
+    #[test]
+    fn capacities_out_of_order_are_rejected() {
+        for yaml in [
+            "channels:\n  initial_capacity: 1000\n",
+            "channels:\n  initial_capacity: 34359738368\n",
+            "channels:\n  min_capacity: 0\n",
+            "channels:\n  min_capacity: 34359738368\n",
+        ] {
+            let file: File = serde_yaml::from_str(yaml).expect("parse");
+            assert!(file.resolve().is_err(), "{yaml}");
+        }
+
+        // A deliberately small channel is fine once the floor is lowered with it.
+        let small: File = serde_yaml::from_str(
+            "channels:\n  initial_capacity: 5000000\n  min_capacity: 1000000\n",
+        )
+        .expect("parse");
+        assert_eq!(
+            small
+                .resolve()
+                .expect("resolve")
+                .policy
+                .first_channel_capacity(),
+            5_000_000
         );
     }
 

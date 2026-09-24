@@ -45,6 +45,10 @@ fn node_policy(mint: &str) -> NodePolicy {
             max_rate: None,
         },
         initial_channel_capacity: 10_000_000_000,
+        min_channel_capacity: 1,
+        max_channel_capacity: 1 << 34,
+        capacity_growth_pct: 200,
+        safety_margin_floor_ms: 60_000,
         stale_timeout_ms: 0,
         rollover_threshold_pct: 80,
     }
@@ -120,6 +124,7 @@ async fn spawn_node_as(identity: Identity, policy: NodePolicy, peers: Vec<PeerCo
         // and nothing binds this.
         mint_listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
         mint_url: "http://127.0.0.1/unused".into(),
+        channel_ttl_seconds: 3_600,
         peers,
     };
 
@@ -334,8 +339,10 @@ async fn a_channel_that_fills_up_rolls_over_and_buying_continues() {
     // so that neither side is left at the 10 GB default.
     const CAPACITY: u64 = 5_000_000;
     let small_channels = |mint: &str| NodePolicy {
-        // ~2 seconds of traffic at the rate the client will buy.
+        // ~2 seconds of traffic at the rate the client will buy, and no
+        // bigger on a rollover: each has to fill as fast as the first.
         initial_channel_capacity: CAPACITY,
+        max_channel_capacity: CAPACITY,
         ..node_policy(mint)
     };
 
@@ -563,6 +570,7 @@ async fn spawn_flaky_node(
         // and nothing binds this.
         mint_listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
         mint_url: "http://127.0.0.1/unused".into(),
+        channel_ttl_seconds: 3_600,
         peers,
     };
     let backend = Arc::new(FlakySettle {

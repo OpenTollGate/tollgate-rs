@@ -177,7 +177,11 @@ async fn main() -> Result<()> {
             // survive a restart without it are keys against which every
             // voucher already redeemed validates again.
             file: mint_path.clone(),
-            max_amount: config.policy.initial_channel_capacity.max(1),
+            // A peer funds its channel to us with our vouchers, and a peering
+            // that has proven itself grows to the largest channel we open.
+            // The issue limit's burst is never below this, so one quote of
+            // that size can always be had.
+            max_amount: config.policy.max_channel_capacity.max(1),
             auto_accept: file.mint.auto_accept,
             issue_limit: file.mint.issue_limit(),
         })
@@ -198,7 +202,7 @@ async fn main() -> Result<()> {
             config.mint_url.clone(),
             prices.clone(),
             wallet.clone(),
-            config.policy.initial_channel_capacity.max(1),
+            config.policy.max_channel_capacity.max(1),
         );
         let mint = Arc::clone(&mint);
         let listen = config.mint_listen;
@@ -260,6 +264,7 @@ async fn main() -> Result<()> {
             accepted_mints: config.policy.accepted_mints.clone(),
             secret_key_hex: config.identity.secret_hex(),
             wallet: wallet.clone(),
+            ttl_seconds: config.channel_ttl_seconds,
         })
         .context("build the channel backend")?,
     );

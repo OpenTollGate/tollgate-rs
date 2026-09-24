@@ -7,6 +7,7 @@
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec;
+use alloc::vec::Vec;
 
 use tollgate_protocol::{
     ChannelId, ChannelUpdate, Disconnect, Message, PubKey, ReasonCode, Reject, Signature, TopUp,
@@ -43,6 +44,10 @@ fn node_policy(mint: &str) -> NodePolicy {
             max_rate: None,
         },
         initial_channel_capacity: CHANNEL_CAPACITY,
+        min_channel_capacity: 1,
+        max_channel_capacity: u64::MAX,
+        capacity_growth_pct: 200,
+        safety_margin_floor_ms: 60_000,
         stale_timeout_ms: 0,
         rollover_threshold_pct: 80,
     }
@@ -66,6 +71,16 @@ struct Node {
     access: BTreeMap<PubKey, AccessLevel>,
     /// Next channel id to hand out, so ids stay distinguishable in failures.
     next_channel: u8,
+    /// Capacity of every channel this node funded, in order.
+    funded: Vec<u64>,
+    /// Every channel this node was asked to settle, in order.
+    settled: Vec<ChannelId>,
+    /// The expiry each settlement was asked for with, which the host retries
+    /// it until.
+    settle_deadlines: BTreeMap<ChannelId, Option<Millis>>,
+    /// How long a channel this node funds lives, or `None` for channels that
+    /// never expire — which is what every test not about expiry wants.
+    ttl_ms: Option<u64>,
 }
 
 impl Node {
@@ -76,6 +91,10 @@ impl Node {
             shaping: BTreeMap::new(),
             access: BTreeMap::new(),
             next_channel: id.0[1],
+            funded: Vec::new(),
+            settled: Vec::new(),
+            settle_deadlines: BTreeMap::new(),
+            ttl_ms: None,
         }
     }
 }
@@ -102,29 +121,43 @@ fn run(nodes: &mut [&mut Node], now: Millis, initial: impl IntoIterator<Item = (
                     queue.push_back((peer, Event::MessageReceived { peer: from, msg }))
                 }
 
-                // The wallet: funding always succeeds, instantly.
+                // The wallet: funding always succeeds, instantly. The blob
+                // carries what the other side's wallet would read out of real
+                // funding: the channel, its capacity and its expiry.
                 Action::FundChannel { peer, capacity, .. } => {
                     node.next_channel = node.next_channel.wrapping_add(1);
+                    node.funded.push(capacity);
                     let channel_id = ChannelId([node.next_channel; 32]);
+                    let expires_at = node.ttl_ms.map(|ttl| now + ttl);
+                    let mut funding = vec![node.next_channel];
+                    funding.extend_from_slice(&capacity.to_be_bytes());
+                    funding.extend_from_slice(&expires_at.map_or(0, |e| e.0).to_be_bytes());
                     queue.push_back((
                         from,
                         Event::OutgoingChannelFunded {
                             peer,
                             channel_id,
                             capacity,
-                            funding: vec![node.next_channel],
+                            expires_at,
+                            funding,
                         },
                     ));
                 }
-                Action::VerifyFunding { peer, funding } => queue.push_back((
-                    from,
-                    Event::IncomingFundingVerified {
-                        peer,
-                        channel_id: ChannelId([funding[0]; 32]),
-                        capacity: CHANNEL_CAPACITY,
-                        mint_url: node.sessions.node_policy().accepted_mints[0].clone(),
-                    },
-                )),
+                Action::VerifyFunding { peer, funding } => {
+                    let number = |at: usize| {
+                        u64::from_be_bytes(funding[at..at + 8].try_into().expect("8 bytes"))
+                    };
+                    queue.push_back((
+                        from,
+                        Event::IncomingFundingVerified {
+                            peer,
+                            channel_id: ChannelId([funding[0]; 32]),
+                            capacity: number(1),
+                            expires_at: Some(Millis(number(9))).filter(|e| e.0 > 0),
+                            mint_url: node.sessions.node_policy().accepted_mints[0].clone(),
+                        },
+                    ))
+                }
 
                 // The signer: core decides what to sign, we produce bytes.
                 Action::SignAndSendTopUp {
@@ -157,10 +190,16 @@ fn run(nodes: &mut [&mut Node], now: Millis, initial: impl IntoIterator<Item = (
                     node.access.insert(peer, access);
                 }
 
+                Action::SettleChannel {
+                    channel_id,
+                    expires_at,
+                    ..
+                } => {
+                    node.settled.push(channel_id);
+                    node.settle_deadlines.insert(channel_id, expires_at);
+                }
                 // The channel backend's record, which only settlement reads.
-                Action::RecordUpdates { .. }
-                | Action::SettleChannel { .. }
-                | Action::DropPeer { .. } => {}
+                Action::RecordUpdates { .. } | Action::DropPeer { .. } => {}
             }
         }
     }
@@ -794,6 +833,7 @@ fn a_channel_funded_in_a_mint_we_do_not_list_is_refused() {
             peer: a,
             channel_id: ChannelId([0xEE; 32]),
             capacity: CHANNEL_CAPACITY,
+            expires_at: None,
             mint_url: "https://elsewhere.example/mint".into(),
         },
         Millis(0),
@@ -1557,4 +1597,187 @@ fn a_declined_grant_is_not_counted_against_the_channel() {
     )));
     let grant = &link.b.sessions.peer(&link.a.id).expect("session").grant;
     assert_eq!(grant.channel(channel_id).expect("still open").failures, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Channel expiry and sizing
+// ---------------------------------------------------------------------------
+
+/// One hour, the design's default TTL.
+const TTL_MS: u64 = 3_600_000;
+
+#[test]
+fn a_slowly_drawn_channel_rolls_over_before_expiry_and_is_settled_in_time() {
+    // The case the safety margin exists for: a channel drawn far too slowly to
+    // fill before its expiry. Rolling over on capacity alone, it would outlive
+    // its TTL and the funder could reclaim what it had already paid.
+    let mut link = Link::new();
+    link.a.ttl_ms = Some(TTL_MS);
+    link.b.ttl_ms = Some(TTL_MS);
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000,
+        },
+    );
+    let first = link
+        .a
+        .sessions
+        .peer(&b)
+        .and_then(|s| s.buyer.active())
+        .expect("A pays B on a channel")
+        .id;
+    assert_eq!(link.a.funded.len(), 1);
+
+    // `max(60 s, 2 × 30 s)` before expiry, and not a moment sooner.
+    let margin = link.a.sessions.node_policy().safety_margin_ms(30_000);
+    assert_eq!(margin, 60_000);
+    link.advance(TTL_MS - margin - 1);
+    assert_eq!(link.a.funded.len(), 1, "outside the margin: nothing to do");
+
+    link.advance(1);
+    assert_eq!(link.a.funded.len(), 2, "inside it: a replacement is funded");
+    assert_eq!(
+        link.a.funded[1], link.a.funded[0],
+        "a channel that ran out of time was big enough; it does not grow"
+    );
+
+    // The replacement is confirmed in the same pump, and A moves onto it at
+    // once rather than draining a channel B is about to settle.
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000,
+        },
+    );
+    let now_using = link
+        .a
+        .sessions
+        .peer(&b)
+        .and_then(|s| s.buyer.active())
+        .expect("A still pays B")
+        .id;
+    assert_ne!(now_using, first, "A has moved onto the replacement");
+
+    // B, the receiver, settles the old channel ahead of expiry — half the
+    // margin, leaving a window's worth of time to retry a failed settlement.
+    let settle_at = TTL_MS - link.b.sessions.node_policy().settle_lead_ms(30_000);
+    link.advance(settle_at - 1 - link.now.0);
+    assert!(!link.b.settled.contains(&first), "not settled early");
+    link.advance(1);
+    assert!(
+        link.b.settled.contains(&first),
+        "settled before the funder could reclaim it"
+    );
+    assert!(link.now < Millis(TTL_MS));
+    assert_eq!(
+        link.b.settle_deadlines[&first],
+        Some(Millis(TTL_MS)),
+        "and asked to retry it no later than the channel's expiry"
+    );
+
+    let b_view = link.b.sessions.peer(&a).expect("session");
+    assert!(
+        b_view.grant.channel(first).is_none(),
+        "and no longer honored"
+    );
+    assert!(b_view.grant.channel(now_using).is_some());
+    assert_eq!(
+        link.b.access.get(&a),
+        Some(&AccessLevel::Active),
+        "the peer never lost service over it"
+    );
+}
+
+#[test]
+fn a_channel_that_fills_up_is_replaced_by_a_bigger_one_up_to_the_cap() {
+    // Start small, grow with the relationship: every rollover forced by use
+    // doubles the next channel, and the operator's ceiling stops it.
+    let small = NodePolicy {
+        initial_channel_capacity: 1_000_000,
+        max_channel_capacity: 3_000_000,
+        ..node_policy("https://a.example/mint")
+    };
+    let mut link = Link::new();
+    link.a = Node::new(pubkey(0xA1), small);
+    link.connect();
+    let b = link.b.id;
+
+    for _ in 0..40 {
+        link.deliver(
+            true,
+            Event::DemandObserved {
+                peer: b,
+                rate: 320_000,
+            },
+        );
+        link.advance(1_000);
+    }
+
+    assert!(link.a.funded.len() >= 4, "funded {:?}", link.a.funded);
+    assert_eq!(
+        link.a.funded[..4],
+        [1_000_000, 2_000_000, 3_000_000, 3_000_000],
+        "doubling, clamped to max_channel_capacity"
+    );
+}
+
+#[test]
+fn the_default_sizes_start_at_one_proof_and_double_to_the_ceiling() {
+    // 1 GiB, 2, 4, 8, 16 — and 16 from then on, however long the peering.
+    let policy = NodePolicy::default();
+    let mut capacity = policy.first_channel_capacity();
+    let mut sizes = vec![capacity];
+    for _ in 0..5 {
+        capacity = policy.grown_capacity(capacity);
+        sizes.push(capacity);
+    }
+    assert_eq!(
+        sizes,
+        [1 << 30, 1 << 31, 1 << 32, 1 << 33, 1 << 34, 1 << 34],
+        "powers of two, clamped to max_channel_capacity"
+    );
+}
+
+#[test]
+fn channel_sizes_are_clamped_to_the_operators_bounds() {
+    let policy = NodePolicy {
+        initial_channel_capacity: 10,
+        min_channel_capacity: 1_000,
+        max_channel_capacity: 5_000,
+        capacity_growth_pct: 300,
+        ..NodePolicy::default()
+    };
+    assert_eq!(
+        policy.first_channel_capacity(),
+        1_000,
+        "raised to the floor"
+    );
+    assert_eq!(policy.grown_capacity(1_000), 3_000);
+    assert_eq!(policy.grown_capacity(3_000), 5_000, "held at the ceiling");
+    assert_eq!(
+        policy.grown_capacity(u64::MAX),
+        5_000,
+        "and the arithmetic cannot overflow on the way there"
+    );
+
+    let flat = NodePolicy {
+        capacity_growth_pct: 100,
+        ..policy
+    };
+    assert_eq!(flat.grown_capacity(2_000), 2_000, "100% never grows");
+}
+
+#[test]
+fn the_safety_margin_is_a_minute_or_two_windows_whichever_is_longer() {
+    let policy = NodePolicy::default();
+    assert_eq!(policy.safety_margin_ms(30_000), 60_000);
+    assert_eq!(policy.safety_margin_ms(10_000), 60_000, "the floor");
+    assert_eq!(policy.safety_margin_ms(45_000), 90_000, "two windows");
+    assert_eq!(policy.settle_lead_ms(45_000), 45_000, "the receiver's half");
 }
