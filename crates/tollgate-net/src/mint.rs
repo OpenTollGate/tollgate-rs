@@ -150,10 +150,7 @@ mod tests {
     #[test]
     fn the_network_unit_is_a_custom_keyset_unit() {
         // Cashu has no byte unit of its own; it is the resource that fixes it.
-        assert_eq!(
-            currency_unit("byte"),
-            CurrencyUnit::Custom("byte".into())
-        );
+        assert_eq!(currency_unit("byte"), CurrencyUnit::Custom("byte".into()));
     }
 
     #[test]
