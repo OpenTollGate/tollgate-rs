@@ -410,9 +410,18 @@ windows cut message count and punish misjudgment.
 **`cumulative` is monotonic**, which is what the Spilman ratchet requires — the
 provider always holds the highest-value state and can settle it at any time.
 Monotonicity also makes TopUp idempotent: a lost message costs nothing because
-the next one carries the correct total, and a reordered one is discarded by the
+the next one carries the correct total, and a reordered one buys nothing by the
 `cumulative > authorized` check. **So no acknowledgment is needed**, and a payer
 may raise its rate and start using it without waiting a round trip.
+
+**A TopUp that fails verification** — a signature that does not verify, a total
+that does not increase, or a channel named twice — is refused as a whole with
+Reject (reason 0x06), not TopUpReject: there is no rate the payer could re-buy
+at that would fix it. One failure may be transient, so the channel stays open.
+Failures are counted per channel, and a purchase that verifies clears the count;
+after three in a row the provider stops honoring the channel and settles its
+last verified state (see
+[tollgate-payment-channels.md](tollgate-payment-channels.md#balance-verification-failure)).
 
 `window_ms` is measured **from receipt**, not against a timestamp, so the two
 sides need no clock agreement. Flight time makes the payer's usable window
@@ -440,7 +449,9 @@ is what keeps a link alive between grants.
 ### 0x05 TopUpReject
 
 Sent when the provider will not honor a grant — most often because the rate
-would oversubscribe capacity it has already committed to other peers.
+would oversubscribe capacity it has already committed to other peers. A grant
+that fails verification is not declined but rejected, with Reject (0x06); see
+TopUp above.
 
 ```cbor
 {

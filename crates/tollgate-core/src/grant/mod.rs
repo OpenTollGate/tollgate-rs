@@ -24,4 +24,4 @@ mod tests;
 
 pub use core::{Admission, Verdict, evaluate_topup};
 pub use limits::{grant_for, rate_from, units_in};
-pub use state::{GrantState, IncomingChannel};
+pub use state::{GrantState, IncomingChannel, MAX_VERIFICATION_FAILURES};

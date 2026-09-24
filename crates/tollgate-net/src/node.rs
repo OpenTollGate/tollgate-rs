@@ -254,18 +254,28 @@ impl Node {
                 // here — before the message reaches anything that acts on it.
                 // Every update in the purchase, since it is honored or refused
                 // as a whole and one bad signature makes the whole thing
-                // unauthentic.
+                // unauthentic. The message goes no further, but core still
+                // hears of it: the payer is owed a Reject, and a channel that
+                // keeps failing is closed.
                 if let Message::TopUp(ref t) = msg
-                    && !t.updates.iter().all(|u| {
-                        self.channels
+                    && let Some(bad) = t.updates.iter().find(|u| {
+                        !self
+                            .channels
                             .verify_update(peer, u.channel_id, u.cumulative, u.signature)
                     })
                 {
-                    warn!(%peer, "discarding a TopUp whose signatures do not verify");
+                    warn!(%peer, "refusing a TopUp that does not verify");
+                    let channel_id = bad.channel_id;
+                    self.dispatch(Event::TopUpSignatureInvalid { peer, channel_id }, done)
+                        .await;
                     return;
                 }
-                if let Message::TopUpReject(ref r) = msg {
-                    log_refusal(peer, r, Side::Received);
+                match msg {
+                    Message::TopUpReject(ref r) => log_refusal(peer, r, Side::Received),
+                    Message::Reject(ref r) => {
+                        warn!(%peer, reason = ?r.reason, rejected_type = r.rejected_type, "a peer rejected our message");
+                    }
+                    _ => {}
                 }
                 self.dispatch(Event::MessageReceived { peer, msg }, done)
                     .await;
@@ -309,8 +319,14 @@ impl Node {
     async fn execute(&mut self, action: Action, done: &mpsc::Sender<Event>) {
         match action {
             Action::Send { peer, msg } => {
-                if let Message::TopUpReject(ref r) = msg {
-                    log_refusal(peer, r, Side::Sent);
+                match msg {
+                    Message::TopUpReject(ref r) => log_refusal(peer, r, Side::Sent),
+                    // Kept for operator review: a peer whose purchases keep
+                    // failing verification is broken or probing.
+                    Message::Reject(ref r) => {
+                        warn!(%peer, reason = ?r.reason, rejected_type = r.rejected_type, "rejected a peer's message");
+                    }
+                    _ => {}
                 }
                 self.send(peer, msg).await
             }

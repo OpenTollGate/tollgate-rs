@@ -435,11 +435,13 @@ If settlement fails (mint swap rejected):
 
 ### Balance Verification Failure
 
-If a received TopUp fails signature verification, or its cumulative total does not exceed the current one:
+If a received TopUp fails signature verification, or its cumulative total does not exceed the current one (including a channel named twice in one purchase):
 - Send Reject (reason: grant signature invalid, or cumulative not increasing)
 - Do NOT close the channel — this could be a transient error
 - Log the failure for operator review
 - If repeated failures: close the channel
+
+The signature is checked by the host; core is only told which channel failed. Failures are counted per channel and only in a row: a purchase that verifies resets the count. At three (`MAX_VERIFICATION_FAILURES`) the provider stops recognising the channel and settles the last state that did verify, so nothing the channel already paid for is lost. No ChannelClose is sent — the provider holds no final signature to put in it — so the payer learns of the close only by having its later purchases over that channel refused: with Reject once the channel backend has closed the channel, otherwise with TopUpReject (channel funding invalid).
 
 ### Grant Rejected
 

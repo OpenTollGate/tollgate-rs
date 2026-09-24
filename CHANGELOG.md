@@ -42,6 +42,12 @@ Nothing has been released yet. Everything below is on `master` and will ship as
   peers, and backs off from a rate ceiling a peer refused for `cap_hold_ms`
   before trying it again.
 
+- A `TopUp` that fails verification — a signature that does not verify, a
+  total that does not increase, or a channel named twice — is answered with
+  `Reject` (0x06) instead of being dropped in silence, and every `Reject` sent
+  or received is logged. A channel that fails three purchases in a row is no
+  longer honored and is settled at its last verified state.
+
 - A Cashu mint in every node, with a byte-denominated keyset, and payment over
   real Cashu Spilman channels: a channel is a 2-of-2 multisig token, each
   ratchet turn a signed balance update the receiver can take to the mint. The
