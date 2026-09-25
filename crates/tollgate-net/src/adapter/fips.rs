@@ -112,12 +112,13 @@ impl Fips {
 
         // A floor of zero is a node that gives unpaid peers nothing at all,
         // which is still a floor worth stating: without the default they would
-        // get everything.
+        // get everything. The gate is core's, as it is for a named peer, so an
+        // unnamed peer is admitted exactly when a named unpaid one would be.
         adapter
             .request(
                 "set_default_transit_policy",
                 serde_json::json!({
-                    "admitted": true,
+                    "admitted": AccessLevel::None.carried(minimum_flow),
                     "rate_bytes_per_sec": minimum_flow,
                 }),
             )
@@ -181,14 +182,7 @@ impl Fips {
     /// decides them together, and sending one at a time would leave a window
     /// where a peer was admitted at a rate it had not been granted.
     fn apply(&self, peer: &Peer) {
-        let result = self.request(
-            "set_transit_policy",
-            serde_json::json!({
-                "npub": peer.npub,
-                "admitted": peer.access.delivery_allowed(),
-                "rate_bytes_per_sec": rate_for_fips(peer.rate),
-            }),
-        );
+        let result = self.request("set_transit_policy", policy(peer));
         if let Err(e) = result {
             warn!(npub = %peer.npub, error = format!("{e:#}"), "could not set a peer's transit policy");
         }
@@ -245,6 +239,20 @@ impl Fips {
     }
 }
 
+/// A peer's `set_transit_policy` parameters.
+///
+/// Admission is core's [`AccessLevel::carried`], not the level alone: a peer
+/// that is not paying is still admitted at the minimum flow allowance, which is
+/// also what an unnamed peer gets by default. Not admitted leaves it local-only,
+/// so it can always reach this node to pay.
+fn policy(peer: &Peer) -> serde_json::Value {
+    serde_json::json!({
+        "npub": peer.npub,
+        "admitted": peer.access.carried(peer.rate),
+        "rate_bytes_per_sec": rate_for_fips(peer.rate),
+    })
+}
+
 /// A rate as FIPS wants it: a number, or `null` for unshaped.
 ///
 /// Core says `u64::MAX` when a peer is not metered at all — an operator's own
@@ -289,7 +297,7 @@ impl ResourceAdapter for Fips {
             let Some(entry) = peers.get_mut(&peer) else {
                 return;
             };
-            if entry.access.delivery_allowed() == access.delivery_allowed() {
+            if entry.access.carried(entry.rate) == access.carried(entry.rate) {
                 entry.access = access;
                 return;
             }
@@ -391,6 +399,38 @@ mod tests {
         // Zero is a real policy — carried, but nothing gets through — and not
         // the same thing as no ceiling at all.
         assert_eq!(rate_for_fips(0), serde_json::json!(0));
+    }
+
+    fn peer(access: AccessLevel, rate: u64) -> Peer {
+        Peer {
+            npub: "npub1test".into(),
+            node_addr: String::new(),
+            access,
+            rate,
+            demand: 0,
+            counters: Counters::default(),
+        }
+    }
+
+    #[test]
+    fn an_unpaid_peer_is_admitted_at_the_allowance() {
+        // The same peer the default policy admits before it is named; naming it
+        // must not take that away.
+        let policy = policy(&peer(AccessLevel::None, 4_096));
+        assert_eq!(policy["admitted"], true);
+        assert_eq!(policy["rate_bytes_per_sec"], 4_096);
+    }
+
+    #[test]
+    fn with_no_allowance_an_unpaid_peer_is_local_only() {
+        assert_eq!(policy(&peer(AccessLevel::None, 0))["admitted"], false);
+    }
+
+    #[test]
+    fn a_paying_peer_is_admitted_at_what_it_bought() {
+        let policy = policy(&peer(AccessLevel::Active, 1_250_000));
+        assert_eq!(policy["admitted"], true);
+        assert_eq!(policy["rate_bytes_per_sec"], 1_250_000);
     }
 
     #[test]

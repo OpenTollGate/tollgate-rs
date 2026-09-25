@@ -1,9 +1,10 @@
 //! The delivery gate.
 //!
 //! Core decides *what* to enforce; the host's resource adapter decides *how* —
-//! a FIPS delivery filter, an nftables rule, a token bucket. The level says only
-//! whether delivery is allowed and whether it is metered. How much a peer has
-//! left to spend lives in [`crate::grant`] and never surfaces here.
+//! a FIPS delivery filter, an nftables rule, a token bucket. The level says
+//! whether a peer is in a TollGate session and whether it is metered; with the
+//! shaping rate it says whether the peer is carried and advertised. How much a
+//! peer has left to spend lives in [`crate::grant`] and never surfaces here.
 
 /// A peer's delivery status. Exactly one at any time.
 ///
@@ -15,9 +16,10 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AccessLevel {
     /// No TollGate session: nothing funded, or every channel drained and none
-    /// replacing it. Only the minimum flow allowance is delivered, and nothing
-    /// if the allowance is zero. TollGate messages always flow, so the peer
-    /// can pay its way into a session without reconnecting.
+    /// replacing it. Nothing is metered; the peer is carried at the minimum
+    /// flow allowance if there is one, and not at all if the allowance is zero.
+    /// TollGate messages always flow, so the peer can pay its way into a
+    /// session without reconnecting.
     #[default]
     None,
     /// Channels funded. Delivery allowed, metered, shaped to what was bought —
@@ -30,9 +32,23 @@ pub enum AccessLevel {
 
 impl AccessLevel {
     /// Whether the peer is in a TollGate session, so resources may be delivered
-    /// for or through it beyond the minimum flow allowance.
+    /// for or through it beyond the minimum flow allowance. The gate an adapter
+    /// applies is [`carried`](Self::carried).
     pub fn delivery_allowed(self) -> bool {
         matches!(self, Self::Active | Self::Free)
+    }
+
+    /// Whether a peer's traffic is carried at all, given the rate core shaped
+    /// it to. This is the gate every adapter applies.
+    ///
+    /// Not the same question as [`delivery_allowed`](Self::delivery_allowed).
+    /// A peer that is not paying is still carried at the minimum flow
+    /// allowance, because the allowance is a rate rather than a level — so it
+    /// is the rate, not the level, that closes the gate, and only when the
+    /// allowance is zero. Traffic to and from this node itself is never gated
+    /// by this: the peer must always be able to reach us to pay.
+    pub fn carried(self, rate: u64) -> bool {
+        self == Self::Free || rate > 0
     }
 
     /// Whether traffic is drawn against a grant. `Free` peers are delivered to
@@ -41,13 +57,63 @@ impl AccessLevel {
         matches!(self, Self::Active)
     }
 
-    /// Whether the peer should appear in reachability advertisements.
+    /// Whether the peer should appear in reachability advertisements, given
+    /// the rate core shaped it to.
     ///
     /// In FIPS this is bloom-filter inclusion: advertising a peer we will not
-    /// deliver through invites other nodes to route into a blackhole. It is
-    /// inferred from the level rather than set separately, so the two can never
-    /// disagree.
-    pub fn advertise(self) -> bool {
-        self.delivery_allowed()
+    /// deliver through invites other nodes to route into a blackhole, and
+    /// hiding one we do deliver through makes its allowance unreachable. So it
+    /// is exactly [`carried`](Self::carried) — a peer on the minimum flow
+    /// allowance is advertised, and only a peer that is shut out is hidden —
+    /// and the two can never disagree. That includes an `Active` peer between
+    /// grants when the allowance is zero: shaped to zero, it is hidden until
+    /// its next grant.
+    pub fn advertise(self, rate: u64) -> bool {
+        self.carried(rate)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unpaid_peer_is_carried_at_the_allowance() {
+        assert!(AccessLevel::None.carried(4_096), "at the allowance");
+        assert!(
+            AccessLevel::None.advertise(4_096),
+            "and in the bloom filters"
+        );
+        assert!(
+            !AccessLevel::None.metered(),
+            "but not drawn against a grant"
+        );
+    }
+
+    #[test]
+    fn with_no_allowance_an_unpaid_peer_is_not_carried() {
+        assert!(!AccessLevel::None.carried(0), "with the allowance disabled");
+        assert!(
+            !AccessLevel::None.advertise(0),
+            "and hidden, so nothing routes into it"
+        );
+    }
+
+    #[test]
+    fn a_lapsed_grant_with_no_allowance_closes_the_gate_too() {
+        // Active with nothing live is a peer between grants — a channel still
+        // funded but its grant run out — and core shapes it to the allowance;
+        // zero allowance leaves it nothing.
+        assert!(AccessLevel::Active.carried(1_250_000));
+        assert!(AccessLevel::Active.advertise(1_250_000));
+        assert!(!AccessLevel::Active.carried(0));
+        assert!(!AccessLevel::Active.advertise(0));
+    }
+
+    #[test]
+    fn a_free_peer_is_always_carried() {
+        assert!(AccessLevel::Free.carried(u64::MAX));
+        assert!(AccessLevel::Free.carried(0));
+        assert!(AccessLevel::Free.advertise(u64::MAX));
     }
 }

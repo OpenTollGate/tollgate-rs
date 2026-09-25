@@ -372,6 +372,36 @@ fn an_expired_grant_drops_the_peer_to_the_allowance_not_to_silence() {
 }
 
 #[test]
+fn with_the_allowance_disabled_a_lapsed_peer_is_not_carried() {
+    // The allowance is the only thing that carries a peer that stopped paying,
+    // so with none there is nothing left: every adapter closes the gate.
+    let mut policy = node_policy("https://b.example/mint");
+    policy.minimum_flow = 0;
+
+    let mut link = Link::new();
+    link.b = Node::new(link.b.id, policy);
+    link.connect();
+
+    let (a, b) = (link.a.id, link.b.id);
+    let carried = |link: &Link| link.b.access[&a].carried(link.b_shapes_a());
+    assert!(!carried(&link), "nothing bought and no allowance");
+
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    assert!(carried(&link), "carried at what it bought");
+
+    link.deliver(true, Event::DemandObserved { peer: b, rate: 0 });
+    link.advance(3_000);
+    assert_eq!(link.b_shapes_a(), 0);
+    assert!(!carried(&link), "the grant lapsed and there is no floor");
+}
+
+#[test]
 fn traffic_draws_the_grant_down_and_exhausting_it_falls_back_to_the_allowance() {
     let mut link = Link::new();
     link.connect();

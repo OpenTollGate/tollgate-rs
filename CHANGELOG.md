@@ -62,14 +62,17 @@ Nothing has been released yet. Everything below is on `master` and will ship as
   invoice as a QR.
 
 - Selling transit on the kernel forwarding path: nftables gates each peer and
-  `tc` shapes only what the node forwards, leaving the payment path alone.
+  `tc` shapes only what the node forwards, leaving the payment path alone. A
+  peer with no session is forwarded at the minimum flow allowance, and dropped
+  only when the allowance is zero.
 
 - Selling transit over a [FIPS](docs/design/network-peering/peering-fips.md)
   mesh: the FIPS node gates and shapes each peer to the rate it bought, set
-  through its `set_transit_policy` control command. Unnamed peers are held at
-  the allowance from their first packet, and a peer's announced key is checked
-  against the mesh address it arrived from. Needs a FIPS build with per-peer
-  transit policy.
+  through its `set_transit_policy` control command. Peers with no session,
+  named or not, are held at the allowance from their first packet, or kept
+  local-only when it is zero. A peer's announced key is checked against the
+  mesh address it arrived from. Needs a FIPS build with per-peer transit
+  policy.
 
 - Packages for OpenWrt (`.ipk`) and macOS (`.pkg`). The OpenWrt package sells
   out of the box at 1000 sat for an hour at 5 MB/s; a Mac, once configured with

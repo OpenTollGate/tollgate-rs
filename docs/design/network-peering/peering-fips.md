@@ -72,9 +72,11 @@ TollGate controls which peers appear in bloom filter computation. A peer is incl
 
 When a peer's access level changes:
 - A blocked peer (`None` with a zero allowance) -> `Active`/`Free`: Add to bloom filters immediately, trigger FilterAnnounce
-- `Active` -> `None` (payment lapsed): with a non-zero allowance the peer is still carried, so it stays visible. With a zero allowance it is blocked and removed from bloom filters **after a delay** (default: 30 seconds) to avoid flapping; if the peer pays its way back into a session within the delay, the removal is cancelled.
+- `Active` -> `None` (payment lapsed): with a non-zero allowance the peer is still carried, so it stays visible. With a zero allowance it is blocked and removed from bloom filters.
 
-A grant expiring between purchases does not change the level — the peer stays `Active` while its channel is funded — so buying in short windows never churns the bloom filter.
+A grant expiring between purchases does not change the level — the peer stays `Active` while its channel is funded — but it does change the rate, to the allowance. With a non-zero allowance that changes nothing here: the peer is still carried and stays in the bloom filters. **With a zero allowance an `Active` peer between grants is shaped to zero, so it is not carried, not admitted, and not advertised** until its next grant arrives. A buyer renewing in short windows on such a node therefore leaves and rejoins the bloom filters at every gap it lets open; a node that wants stable reachability for its paying peers should keep a non-zero allowance.
+
+Removal is immediate. `tollgate-net` applies no delay or hysteresis before hiding a peer; any damping of bloom-filter churn would have to come from FIPS itself, as the 30-second removal delay asked for in [FIPS_FEATURE_REQUESTS.md](../FIPS_FEATURE_REQUESTS.md) (feature 3) would.
 
 **Required FIPS change**: An API to include/exclude specific peers from bloom filter computation, inferred from the forwarding policy.
 
@@ -119,23 +121,20 @@ This approach works today without any FIPS modifications to the session layer.
 
 ### set_peer_access()
 
-Maps TollGate access levels to FIPS forwarding policy and bloom filter state:
+Maps TollGate access levels to FIPS forwarding policy and bloom filter state. The level alone does not decide it: a peer is admitted exactly when core carries it — `AccessLevel::carried(rate)`, the level together with the rate core shaped it to — so a `None` peer on the allowance is admitted at that rate, and only a zero allowance restricts it:
 
 ```rust
-fn set_peer_access(&self, peer: &Pubkey, access: AccessLevel) -> Result<(), AdapterError> {
+fn set_peer_access(&self, peer: &Pubkey, access: AccessLevel, rate: u64) -> Result<(), AdapterError> {
     let node_addr = NodeAddr::from_pubkey(peer);
 
-    match access {
-        AccessLevel::None => {
-            // Restrict peer to local-only traffic (no transit forwarding)
-            // Bloom filter exclusion is inferred — restricted peers are excluded
-            self.node.set_peer_forwarding_policy(node_addr, ForwardingPolicy::LocalOnly);
-        }
-        AccessLevel::Active | AccessLevel::Free => {
-            // Allow full forwarding for this peer
-            // Bloom filter inclusion is inferred — allowed peers are included
-            self.node.set_peer_forwarding_policy(node_addr, ForwardingPolicy::Full);
-        }
+    if access.carried(rate) {
+        // Forward for this peer, at the rate core shaped it to
+        // Bloom filter inclusion is inferred — admitted peers are included
+        self.node.set_peer_forwarding_policy(node_addr, ForwardingPolicy::Full);
+    } else {
+        // Restrict peer to local-only traffic (no transit forwarding)
+        // Bloom filter exclusion is inferred — restricted peers are excluded
+        self.node.set_peer_forwarding_policy(node_addr, ForwardingPolicy::LocalOnly);
     }
     Ok(())
 }
@@ -275,7 +274,7 @@ The following FIPS modifications are required for TollGate integration. Full det
 | Counter delivery | FIPS livestreams per-peer rx/tx over the control socket | `tollgate-net` always has a fresh value to draw each grant down against, without polling |
 | Forwarding policy | Per-peer `local_only` or `full`, enforced by FIPS | Simple data-plane policy, not a control-plane hook |
 | Default new-peer policy | `local_only` | Closes race window between FIPS auth and TollGate detection |
-| Bloom filter control | Inferred from forwarding policy, with 30s removal delay | Prevents flapping on temporary balance exhaustion |
+| Bloom filter control | Inferred from forwarding policy, exactly when the peer is carried; no removal delay | Never advertise a peer the gate drops, nor hide one it carries |
 | Metering counters | Per-peer watch channels from FIPS | Continuous push, drawn against the peer's grant |
 | Metrics | Streaming subscription on the control socket | Operator tools read cached values; no per-call IPC |
 | Message transport (initial) | Raw TCP over the FIPS IPv6 adapter | Works today with no FIPS session-layer changes, and needs no TLS — Noise IK already encrypts the link |
@@ -299,7 +298,8 @@ each peer's admission and rate together in one transit-policy command —
 `set_transit_policy {npub, admitted, rate_bytes_per_sec}` — whenever core
 changes either, so there is never a moment where a peer is admitted at a rate
 it has not bought. Peers it has not named yet get the default transit policy:
-admitted at the minimum flow allowance.
+admitted at the minimum flow allowance, or local-only if the allowance is zero
+— the same verdict a named peer with no session gets.
 
 ---
 

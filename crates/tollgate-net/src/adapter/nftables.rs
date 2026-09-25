@@ -5,7 +5,9 @@
 //!
 //! - **nftables** decides *whether* a packet is forwarded, and counts what was.
 //!   Membership of a named set is the gate, so changing a peer's access is one
-//!   set element rather than a rule rewrite.
+//!   set element rather than a rule rewrite. What goes in the set is core's
+//!   [`AccessLevel::carried`], so a peer that is not paying is still forwarded
+//!   at the minimum flow allowance, and dropped only when there is none.
 //! - **`tc`** decides *how fast*. One HTB class per peer, whose rate is
 //!   replaced as grants arrive.
 //!
@@ -90,6 +92,8 @@ struct Peer {
     classid: u16,
     access: AccessLevel,
     rate: u64,
+    /// Whether the address is in the `allowed` set right now.
+    carried: bool,
 }
 
 /// Gates with nftables, shapes with `tc`.
@@ -292,6 +296,7 @@ impl ResourceAdapter for Nftables {
                 classid,
                 access: AccessLevel::None,
                 rate: 0,
+                carried: false,
             },
         );
         debug!(%peer, %addr, classid, "peer registered with the kernel");
@@ -302,24 +307,8 @@ impl ResourceAdapter for Nftables {
         let Some(entry) = peers.get_mut(&peer) else {
             return;
         };
-        // Only act on a change. nftables refuses to delete an element that is
-        // not there, so re-applying the same level would log an error for
-        // having done nothing.
-        if entry.access.delivery_allowed() == access.delivery_allowed() {
-            entry.access = access;
-            return;
-        }
         entry.access = access;
-
-        let element = format!("{{ {} }}", entry.addr);
-        let result = if access.delivery_allowed() {
-            nft(&["add", "element", "inet", TABLE, "allowed", &element])
-        } else {
-            nft(&["delete", "element", "inet", TABLE, "allowed", &element])
-        };
-        if let Err(e) = result {
-            warn!(%peer, ?access, error = %e, "could not update the allowed set");
-        }
+        gate(peer, entry);
     }
 
     fn set_shaping_rate(&self, peer: PubKey, rate: u64) {
@@ -328,11 +317,15 @@ impl ResourceAdapter for Nftables {
             return;
         };
         entry.rate = rate;
+        // The rate opens and closes the gate as much as the level does: an
+        // unpaid peer is forwarded exactly when it has an allowance.
+        gate(peer, entry);
 
         // tc wants bits per second, and refuses a rate of zero. The floor is
         // the minimum flow allowance, which core has already applied, so zero
-        // here means an adapter call arrived before any grant — one byte per
-        // second is the closest honest thing to "effectively nothing".
+        // here means there is no allowance and the gate above has already shut
+        // the peer out — one byte per second is the closest honest thing to
+        // "effectively nothing" for a class nothing reaches.
         let bits = rate.saturating_mul(8).max(8);
         let burst = rate.saturating_mul(BURST_MS) / 1_000;
 
@@ -447,6 +440,32 @@ impl Drop for Nftables {
         // no longer running.
         let _ = nft(&["delete", "table", "inet", TABLE]);
         let _ = tc(&["qdisc", "delete", "dev", &self.interface, "root"]);
+    }
+}
+
+/// Put a peer in or take it out of the `allowed` set, to match what core says
+/// about its level and rate together.
+///
+/// Only acts on a change. nftables refuses to delete an element that is not
+/// there, so re-applying the same verdict would log an error for having done
+/// nothing.
+fn gate(peer: PubKey, entry: &mut Peer) {
+    let carried = entry.access.carried(entry.rate);
+    if carried == entry.carried {
+        return;
+    }
+
+    let element = format!("{{ {} }}", entry.addr);
+    let result = if carried {
+        nft(&["add", "element", "inet", TABLE, "allowed", &element])
+    } else {
+        nft(&["delete", "element", "inet", TABLE, "allowed", &element])
+    };
+    match result {
+        Ok(_) => entry.carried = carried,
+        Err(e) => {
+            warn!(%peer, access = ?entry.access, rate = entry.rate, error = %e, "could not update the allowed set")
+        }
     }
 }
 

@@ -23,10 +23,10 @@ Each peer is in exactly one access level at any time:
 | Level | Delivery | TollGate messages | Bloom filter visibility (FIPS) | When |
 |-------|---------|-------------------|-------------------------------|------|
 | `None` | Minimum flow allowance only; blocked if the allowance is zero | Allowed | Visible while carried at the allowance; hidden if blocked | No TollGate session: not paid yet, or payment lapsed |
-| `Active` | Allowed (metered), never below the allowance | Allowed | Visible | Session: a channel funded, or a paid grant still running |
+| `Active` | Allowed (metered), never below the allowance | Allowed | Visible while carried; hidden between grants if the allowance is zero | Session: a channel funded, or a paid grant still running |
 | `Free` | Allowed (unmetered) | Allowed | Visible | Session: this node does not charge the peer |
 
-The access level says only whether delivery is allowed and how (metered or not). How much the peer has left to spend is tracked by the payment subsystem and does not surface as an access level.
+The access level says only whether delivery is allowed and how (metered or not). Whether a peer is carried at all is the level together with the rate core shaped it to (`AccessLevel::carried`): a peer outside a session is carried at the allowance, and only a zero rate shuts it out. How much the peer has left to spend is tracked by the payment subsystem and does not surface as an access level.
 
 ### Transitions
 
@@ -69,7 +69,7 @@ With a non-zero allowance, the peer's delivery is shaped to that rate. With the 
 
 A TollGate session with payment flowing: the peer has funded a channel to pay on. Delivery is allowed up to what it has bought, and its grant is drawn down as traffic passes.
 
-Between grants — one expired, the next not yet bought — the peer stays `Active` and is shaped to the allowance. That is a pause in buying, not the end of the session: the channel is still funded, and the next TopUp restores the rate at once.
+Between grants — one expired, the next not yet bought — the peer stays `Active` and is shaped to the allowance. That is a pause in buying, not the end of the session: the channel is still funded, and the next TopUp restores the rate at once. With a zero allowance the pause carries nothing: the peer's forwarding is blocked and it is hidden from bloom filters until that TopUp.
 
 The session ends when payment lapses: the last channel is full, nothing replaces it, and the grant that channel paid for has run out. The peer returns to `None`.
 
@@ -102,12 +102,12 @@ The implementation decides how to enforce this. In FIPS, this could be a deliver
 
 In FIPS, bloom filters advertise reachability — "I can reach destination X through peer Y." If an unpaid peer is included in bloom filters, other nodes may route resources through it, only to have them blackholed at the gate.
 
-**Rule: a peer is in the bloom filters exactly when its traffic is carried.** A peer held at the minimum flow allowance is carried — slowly — so it is advertised; only a peer whose delivery is blocked is hidden.
+**Rule: a peer is in the bloom filters exactly when its traffic is carried.** A peer held at the minimum flow allowance is carried — slowly — so it is advertised; only a peer whose delivery is blocked is hidden. That includes an `Active` peer between grants on a node with a zero allowance: it is shaped to zero, so it is hidden until its next grant arrives, and is advertised again then. There is no removal delay.
 
 | Access level | Included in bloom filters? |
 |-------------|---------------------------|
 | `None` | Yes while carried at the allowance; no if the allowance is zero |
-| `Active` | Yes — visible (FIPS) |
+| `Active` | Yes while carried; no between grants if the allowance is zero |
 | `Free` | Yes — visible (FIPS) |
 
 Bloom filter visibility is **inferred from whether the peer is carried** — the level together with its shaping rate — so it needs no separate API call and can never disagree with the gate.
@@ -185,7 +185,7 @@ Counting units delivered and peer metrics are documented in [tollgate-metering.m
 4. Peer funds a new channel and buys a grant: back to Active
 ```
 
-A grant expiring while a channel is still funded is not a lapse. The peer stays `Active`, shaped to the allowance until it buys again.
+A grant expiring while a channel is still funded is not a lapse. The peer stays `Active`, shaped to the allowance until it buys again — and, if the allowance is zero, blocked and hidden in FIPS until then.
 
 ---
 

@@ -147,12 +147,12 @@ impl Loopback {
     /// Refill a peer's bucket for `elapsed_ms` and take out what may be sent now.
     ///
     /// Returns the number of units the data plane is allowed to write. A peer
-    /// whose delivery is blocked gets nothing regardless of its bucket.
+    /// core does not carry gets nothing regardless of its bucket.
     pub fn take_allowance(&self, peer: PubKey, elapsed_ms: u64) -> u64 {
         let mut links = self.links.lock().expect("not poisoned");
         let link = links.entry(peer).or_default();
 
-        if !link.access.delivery_allowed() && link.rate == 0 {
+        if !link.access.carried(link.rate) {
             return 0;
         }
 
