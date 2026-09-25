@@ -109,7 +109,7 @@ peers:
 
 Static peers are attempted on startup and reconnected on failure. This is the right answer for fixed infrastructure peering (a relay that always pays a known upstream gateway) and for multi-hop topologies where dynamic probing on a local subnet wouldn't reach the intended peer.
 
-Each peer relationship is independent. There is no concept of "upstream" or "downstream" at the TollGate level — each side pays for what it receives, and which way the money mostly flows follows from who receives more.
+Each peer relationship is independent. There is no concept of "upstream" or "downstream" at the TollGate level — each side pays for what it receives, and which way the money mostly flows follows from who receives more. The one place the distinction exists is the kernel adapter's counters (see [Per-Peer Metering Counters](#per-peer-metering-counters)), and it reads it from the routing table rather than from the protocol.
 
 ---
 
@@ -129,6 +129,8 @@ For open-hotspot deployments, where every peer is anonymous and the only require
 ### MAC spoofing on IP
 
 On a shared L2 segment (Ethernet, WiFi without WPA), MAC addresses are trivially spoofable. This is hard to prevent without an authentication layer below — WPA-PSK / WPA-EAP at L2, or WireGuard / IPsec at L3. For TollGate this matters mostly during *discovery and probing*: a spoofed MAC can make a host look like a "new device" to ARP-watch hooks, causing repeated probe attempts. It does not weaken peer identity itself (pubkey-bound, not MAC-bound).
+
+It does reach metering. An upstream's received bytes are counted by its MAC, so a host on the same segment that forges that MAC has what it sends through us counted as delivered by the upstream: the node over-reads what it drew and buys more than it needed. A customer cannot escape its own metering this way, since it is still counted by its IP; forging the IP as well is the address takeover above. The adapter trusts the segment's link addresses exactly as far as it trusts its IP addresses, and the same remedies (WPA, or a tunnel per peer) apply.
 
 ---
 
@@ -169,12 +171,12 @@ Access control is enforced via **firewall rules** (nftables, iptables, pf):
 
 `set_shaping_rate()` translates to a **traffic-control class per peer** (`tc` HTB) on the interface facing it. The firewall decides *whether* a packet is forwarded; the qdisc decides *how fast*.
 
-Only **forwarded** traffic is classified. The firewall's forward hook counts each peer's forwarded packets and marks them with that peer's class; a `tc` filter selects the class by the mark. Traffic to and from the node itself — TollGate messages, the mint — never passes the forward hook, is never marked, and falls into an unshaped default class. Shaping it would throttle the payment that restores the peer's rate.
+Only **forwarded** traffic is classified. The firewall's forward hook marks the packets it forwards toward each peer's own address with that peer's class; a `tc` filter selects the class by the mark. (Counting is separate rules in the same hook; see below.) Traffic to and from the node itself — TollGate messages, the mint — never passes the forward hook, is never marked, and falls into an unshaped default class. Shaping it would throttle the payment that restores the peer's rate.
 
 ```
 # Conceptual shaping for customer 02abc... (10.0.0.42) at 3.12 MiB/s:
 nft add rule inet tollgate forward ip daddr 10.0.0.42 \
-    counter meta mark set 0x70110042          # count and mark forwarded packets
+    meta mark set 0x70110042                  # mark forwarded packets
 tc class replace dev eth0 parent 1: classid 1:42 htb \
     rate 26214400bit burst 32768              # ~10 ms of burst
 tc filter replace dev eth0 parent 1: protocol ip prio 1 \
@@ -192,30 +194,30 @@ Four properties the shaper has to have, each of which follows from the payment m
 
 `tollgate-core` requires a `MeterStream` per peer with two cumulative counters: `delivered` (bytes we forwarded toward the peer) and `received` (bytes the peer forwarded toward us). On IP, `tollgate-net` builds these by attaching kernel counters to each connected peer. **How a counter matches the peer's traffic depends on which side of the relationship the peer is on** — and getting this right is what lets several peers share one interface.
 
-**Metering a customer — per-IP (default).** When the peer is the source/sink of the forwarded flow — a downstream peer whose traffic *we* forward — its IP is the source or destination of every forwarded packet. `tollgate-net` adds two `counter` rules on the `FORWARD` chain, one matching the peer's IP as destination (delivered) and one as source (received), tagged with the peer's pubkey:
+Each peer has two **named counters**, and four maps in the forward chain point packet keys at them. One rule per map covers every peer for the life of the node, so moving a peer between the two ways of counting below is a change of map elements, and its totals carry across. The rules sit after the gate, so a dropped packet is not counted, and in the forward hook, so — as with shaping — only forwarded traffic is counted, after conntrack has undone any NAT:
 
 ```
-# Conceptual rules for customer 02abc... (10.0.0.42):
 table inet tollgate {
+  map down_tx { type ipv4_addr  : counter; }   # customer, by destination IP
+  map down_rx { type ipv4_addr  : counter; }   # customer, by source IP
+  map up_tx   { type ipv4_addr  : counter; }   # upstream, by the route's next hop
+  map up_rx   { type ether_addr : counter; }   # upstream, by the frame's source MAC
   chain forward {
-    ip daddr 10.0.0.42 counter comment "tollgate:02abc..."   # delivered to peer
-    ip saddr 10.0.0.42 counter comment "tollgate:02abc..."   # received from peer
+    counter name ip daddr map @down_tx
+    counter name ip saddr map @down_rx
+    counter name rt ip nexthop map @up_tx
+    counter name ether saddr map @up_rx
   }
 }
 ```
 
-**Metering an upstream — per next-hop MAC.** When the peer is one we *buy* from — it forwards our traffic onward — the forwarded packets carry the far endpoints' IPs, **not** the upstream's, so per-IP rules cannot attribute them. The only field that identifies "this arrived from that upstream" is the **next-hop link address**. `tollgate-net` resolves the upstream's IP to its MAC (the neighbor table) and counts received bytes by it. This is what keeps the multi-homed case correct — several upstreams reachable over one shared L2 segment are still metered independently, because each has a distinct MAC:
+**Metering a customer — per-IP (default).** When the peer is the source/sink of the forwarded flow — a downstream peer whose traffic *we* forward — its IP is the source or destination of every forwarded packet. Its IP goes in `down_tx` (delivered) and `down_rx` (received).
 
-```
-# Conceptual rule for upstream 03def... at next-hop 52:54:00:aa:bb:cc:
-table inet tollgate {
-  chain ingress { type filter hook prerouting priority -300;
-    ether saddr 52:54:00:aa:bb:cc counter comment "tollgate:03def..."   # received from upstream
-  }
-}
-```
+**Metering an upstream — per next hop and MAC.** When the peer is one we *buy* from — it forwards our traffic onward — the forwarded packets carry the far endpoints' IPs, **not** the upstream's, so per-IP matching cannot attribute them. What identifies "this arrived from that upstream" is the **link address**: `tollgate-net` resolves the upstream's IP to its MAC (the neighbour table) and counts received bytes by it in `up_rx`. What identifies "we sent this via that upstream" is the **route's next hop**, which the forward hook knows: its IP goes in `up_tx`, and for a destination on the link the next hop is the destination, so traffic addressed to the upstream itself is covered too and no per-IP element is kept. This is what keeps the multi-homed case correct — several upstreams reachable over one shared L2 segment are still metered independently, because each has a distinct MAC and is a distinct next hop.
 
-The egress (`delivered`-to-upstream) direction can't be matched this way — the next-hop MAC isn't resolved until after the output path. That costs less than it used to: counters are **not exchanged** and are not an input to payment ([tollgate-metering.md](../core/tollgate-metering.md)), so there is no figure to reconcile with the upstream and no drift to arbitrate. What the receive-side count is still good for is the payer's own question — delivered against purchased — which it answers from local numbers alone.
+A peer is counted as an upstream exactly when some route (any table, including every hop of a multipath route) uses it as a gateway; everything else is counted per IP. Routes and the neighbour table are re-read every few seconds, and at once when a peer registers, so a late ARP entry or an operator's reroute moves the peer. Until its MAC is known, an upstream's received side stays on its IP. IPv6 peers stay per IP.
+
+These counts are the node's own: counters are **not exchanged** and are not an input to payment ([tollgate-metering.md](../core/tollgate-metering.md)), so there is no figure to reconcile with the upstream and no drift to arbitrate. What they answer is the payer's own question — delivered against purchased — from local numbers alone.
 
 **Interface counters — dedicated link.** If the deployment puts each peer on its own interface (VLAN, GRE tunnel, separate WireGuard peer), the kernel's interface rx/tx byte counters serve as the source directly, with no per-peer rules — simplest when a peer owns its link, but it cannot disambiguate peers that share an interface.
 

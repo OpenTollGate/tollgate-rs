@@ -124,8 +124,9 @@ PKG_SIZE=$(du -sk "$DATA_DIR" | cut -f1)
 
 # Dependencies are what the nftables adapter actually shells out to and what
 # the kernel needs to honour it: nft for the gate and the counters, tc for the
-# shaper, sch_htb for the class the shaper installs, and conntrack because the
-# forward chain matches on established connections.
+# shaper, ip for the routes and neighbours an upstream is counted by (BusyBox's
+# has no JSON output), sch_htb for the class the shaper installs, and
+# conntrack because the forward chain matches on established connections.
 cat > "$CONTROL_DIR/control" <<EOF
 Package: $PKG_NAME
 Version: $PKG_VERSION
@@ -133,7 +134,7 @@ Architecture: $OPENWRT_ARCH
 Maintainer: TollGate
 Section: net
 Priority: optional
-Depends: nftables, tc-full, kmod-sched-core, kmod-nf-conntrack
+Depends: nftables, tc-full, ip-full, kmod-sched-core, kmod-nf-conntrack
 Description: TollGate node — sell network transit for ecash
  Meters and sells this router's forwarding capacity, hop by hop, paid for in
  byte-denominated Cashu vouchers over Spilman payment channels. Gates and
