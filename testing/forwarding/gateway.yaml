@@ -17,7 +17,11 @@ grants:
 forwarding:
   # The real thing: the kernel forwards, nftables gates, tc shapes.
   mode: nftables
-  interface: eth0
+  # The interface facing the client. Docker names interfaces in the order it
+  # attaches networks, and that order differs between docker versions, so the
+  # compose entrypoint finds the one holding 172.28.0.20 and writes its name
+  # here before starting the node.
+  interface: EDGE_INTERFACE
 network:
   listen: "0.0.0.0:4747"
 market:

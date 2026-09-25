@@ -94,13 +94,28 @@ tollgate::wait_for() {
   done
   echo "--- logs ---" >&2
   tollgate::logs >&2
+  tollgate::diagnose
+  echo "TIMED OUT waiting for: $label" >&2
   return 1
 }
 
 tollgate::fail() {
   echo "FAILED: $*" >&2
   tollgate::logs >&2
+  tollgate::diagnose
+  # Again, last: a CI log is often kept only as a tail, and the logs above
+  # would push the reason out of it.
+  echo "FAILED: $*" >&2
   return 1
+}
+
+# What a test can add about the machine it failed on, printed after the logs so
+# it survives in a truncated tail. A topology sets `DIAGNOSE` to a shell
+# snippet; the default is nothing.
+tollgate::diagnose() {
+  [[ -n "${DIAGNOSE:-}" ]] || return 0
+  echo "--- diagnostics ---" >&2
+  eval "$DIAGNOSE" >&2 2>&1 || true
 }
 
 # Standard preamble for a test script: build, tear down on exit, bring up.

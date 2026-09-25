@@ -9,6 +9,21 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/common.sh"
 SERVICES="gateway client origin"
+# The kernel side of the gateway, for when a check here fails: which interface
+# holds which address, and what nftables and tc actually hold.
+forwarding_diagnose() {
+  local g=(docker compose -f "$COMPOSE" exec -T gateway)
+  "${g[@]}" uname -r
+  "${g[@]}" ip -br addr
+  "${g[@]}" ip route
+  "${g[@]}" cat /run/gateway.yaml | grep "interface:"
+  "${g[@]}" nft list tables
+  "${g[@]}" tc qdisc show
+  "${g[@]}" sh -c 'for i in $(ls /sys/class/net | grep "^eth"); do echo "== tc class $i"; tc class show dev "$i"; done'
+  docker compose -f "$COMPOSE" exec -T client ip route
+  docker compose -f "$COMPOSE" logs --no-color gateway 2>&1 | grep -iE "warn|error|nft|tc " | tail -20
+}
+DIAGNOSE=forwarding_diagnose
 tollgate::start
 
 tollgate::wait_for "the client to be paying" 120 \
@@ -18,10 +33,13 @@ tollgate::wait_for "the client to be paying" 120 \
 tollgate::wait_for "the gateway to shape the client to what it bought" 60 \
   '[[ "$(tollgate::peer_field gateway shaped_rate)" == "2500000" ]]'
 
-# The gateway shapes on the interface facing the client, and which kernel name
-# that is comes from docker rather than from us.
-docker compose -f "$COMPOSE" exec -T gateway ip -br addr show eth0 | grep -q "172.28.0.20" \
-  || tollgate::fail "eth0 is not the interface facing the client; gateway.yaml names the wrong one"
+# The gateway shapes on the interface facing the client. Docker picks the
+# kernel name, so the gateway looks it up by address at startup; check that the
+# one it wrote into its config really is the client's side.
+edge="$(docker compose -f "$COMPOSE" exec -T gateway awk '/^  interface:/ {print $2}' /run/gateway.yaml)"
+[[ -n "$edge" ]] || tollgate::fail "the gateway's config names no interface"
+docker compose -f "$COMPOSE" exec -T gateway ip -br addr show "$edge" | grep -q "172.28.0.20" \
+  || tollgate::fail "$edge is not the interface facing the client"
 
 # Every packet has to cross the gateway, or the measurement below would be of
 # a path that was never shaped.
@@ -31,7 +49,7 @@ docker compose -f "$COMPOSE" exec -T client ip route get 172.29.0.10 | grep -q "
 # The kernel is really doing the work: rules and a class exist for this peer.
 docker compose -f "$COMPOSE" exec -T gateway nft list table inet tollgate >/dev/null 2>&1 \
   || tollgate::fail "the gateway installed no nftables table"
-docker compose -f "$COMPOSE" exec -T gateway tc class show dev eth0 | grep -q htb \
+docker compose -f "$COMPOSE" exec -T gateway tc class show dev "$edge" | grep -q htb \
   || tollgate::fail "the gateway installed no tc class"
 
 # Time a real download through the gateway, and check what actually arrived.

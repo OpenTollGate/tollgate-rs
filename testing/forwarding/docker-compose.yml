@@ -58,13 +58,20 @@ services:
     # NAT does not disturb the metering. On the way out the forward hook still
     # sees the client's address, because masquerading happens at postrouting;
     # on the way back conntrack has already restored it by then.
+    #
+    # Interfaces are found by address, not by name: docker names them in the
+    # order it attaches networks, which is not the same on every version.
     command:
       - >
+        edge=$$(ip -o -4 addr show | awk '$$4 ~ /^172\.28\.0\.20\// {print $$2}') &&
+        transit=$$(ip -o -4 addr show | awk '$$4 ~ /^172\.29\.0\.20\// {print $$2}') &&
+        [ -n "$$edge" ] && [ -n "$$transit" ] &&
+        sed "s/EDGE_INTERFACE/$$edge/" /etc/tollgate/gateway.yaml > /run/gateway.yaml &&
         nft add table ip tollgate_nat &&
         nft add chain ip tollgate_nat postrouting
         '{ type nat hook postrouting priority 100; }' &&
-        nft add rule ip tollgate_nat postrouting oifname eth1 masquerade &&
-        exec tollgated -c /etc/tollgate/gateway.yaml --control-socket /run/tollgate.sock
+        nft add rule ip tollgate_nat postrouting oifname "$$transit" masquerade &&
+        exec tollgated -c /run/gateway.yaml --control-socket /run/tollgate.sock
     volumes:
       - ./gateway.yaml:/etc/tollgate/gateway.yaml:ro
     environment:
@@ -105,13 +112,21 @@ services:
 
 networks:
   # The gateway shapes on the interface facing the client. Which kernel name
-  # that gets is docker's business, so the test asserts it rather than trusting
-  # the ordering here.
+  # that gets is docker's business, so the gateway finds it by address at
+  # startup, and the test checks the interface it actually shapes on.
   edge:
     ipam:
       config:
         - subnet: 172.28.0.0/24
+  # Routed, not docker's default NAT mode. Since docker 28 the host drops a
+  # packet for a NAT-mode container's address that arrives from any bridge
+  # but the container's own (a raw-table rule per container). The client's
+  # packets for the origin do exactly that: they cross the edge bridge on
+  # their way to the gateway, which routes them. Routed mode leaves that
+  # alone, and the origin needs no NAT to reach anything.
   transit:
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: routed
     ipam:
       config:
         - subnet: 172.29.0.0/24
