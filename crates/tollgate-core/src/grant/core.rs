@@ -109,8 +109,8 @@ pub fn evaluate_topup(
             return refuse(ReasonCode::FundingInvalid);
         };
 
-        // A cumulative that does not increase is a replay or a reorder.
-        // Discarding it is what lets a purchase be fire-and-forget.
+        // A cumulative that does not increase is a replay or a reorder. It
+        // buys nothing; the session answers it as a failed verification.
         if update.cumulative <= channel.signed {
             return refuse(ReasonCode::GrantInvalid);
         }

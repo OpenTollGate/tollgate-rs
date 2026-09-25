@@ -30,6 +30,16 @@ use tollgate_protocol::ChannelId;
 use crate::grant::limits;
 use crate::time::Millis;
 
+/// Consecutive purchases on one channel that may fail verification before we
+/// stop honoring it.
+///
+/// One failure could be transient — a reordered message, a payer that lost
+/// track of its own total — so it earns a Reject and nothing more. A channel
+/// that keeps failing is either broken or being probed, and each attempt costs
+/// us a signature verification, so past this many in a row it is closed and
+/// settled at the last state that did verify.
+pub const MAX_VERIFICATION_FAILURES: u32 = 3;
+
 /// One channel a peer pays us on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IncomingChannel {
@@ -39,6 +49,9 @@ pub struct IncomingChannel {
     pub capacity: u64,
     /// Cumulative total signed on it. Monotonic — this is the ratchet.
     pub signed: u64,
+    /// Purchases on it that failed verification since the last one that
+    /// passed. See [`MAX_VERIFICATION_FAILURES`].
+    pub failures: u32,
 }
 
 impl IncomingChannel {
@@ -48,6 +61,7 @@ impl IncomingChannel {
             id,
             capacity,
             signed: 0,
+            failures: 0,
         }
     }
 
@@ -112,6 +126,17 @@ impl GrantState {
     /// it. Updates naming it are refused from here on.
     pub fn close_channel(&mut self, id: ChannelId) {
         self.channels.retain(|c| c.id != id);
+    }
+
+    /// Count a purchase on this channel that failed verification — a bad
+    /// signature, or a total that did not increase.
+    ///
+    /// Returns the failures now in a row, or `None` if we do not recognise the
+    /// channel, in which case there is nothing to count against.
+    pub fn record_failure(&mut self, id: ChannelId) -> Option<u32> {
+        let channel = self.channels.iter_mut().find(|c| c.id == id)?;
+        channel.failures = channel.failures.saturating_add(1);
+        Some(channel.failures)
     }
 
     /// Channels this peer currently pays us on.
@@ -182,6 +207,8 @@ impl GrantState {
         for (id, cumulative) in ratchets {
             if let Some(channel) = self.channels.iter_mut().find(|c| c.id == *id) {
                 channel.signed = *cumulative;
+                // Only failures *in a row* count against a channel.
+                channel.failures = 0;
             }
         }
 

@@ -108,6 +108,13 @@ impl Sessions {
                 self.peers.remove(&peer);
             }
             Event::MessageReceived { peer, msg } => self.on_message(peer, msg, now, &mut out),
+            Event::TopUpSignatureInvalid { peer, channel_id } => {
+                // Still something heard from them, even if it bought nothing.
+                if let Some(session) = self.peers.get_mut(&peer) {
+                    session.last_seen = now;
+                }
+                self.on_unverified_topup(peer, &[channel_id], now, &mut out);
+            }
             Event::OutgoingChannelFunded {
                 peer,
                 channel_id,
@@ -550,6 +557,17 @@ impl Sessions {
                 }
             }
             Verdict::Reject {
+                reason: ReasonCode::GrantInvalid,
+                ..
+            } => {
+                // Not a purchase we decline but one that failed verification —
+                // the total did not increase. That is answered with Reject, and
+                // counted against the channel it named.
+                let failed = not_increasing(&session.grant, &m.updates);
+                self.on_unverified_topup(peer, &failed, now, out);
+                return;
+            }
+            Verdict::Reject {
                 reason,
                 max_rate_available,
             } => {
@@ -570,6 +588,47 @@ impl Sessions {
                         reason,
                     }),
                 });
+            }
+        }
+        self.refresh(peer, now, out);
+    }
+
+    /// Answer a TopUp that failed verification: a signature the host could not
+    /// verify, or a total that did not increase.
+    ///
+    /// The payer is told with a Reject, since either can be transient — a
+    /// reordered message, or a payer that lost track of its own total — and
+    /// the channel stays open. Failures are counted per channel, though, and a
+    /// channel that fails [`MAX_VERIFICATION_FAILURES`] times in a row is
+    /// closed: we stop recognising it and settle the last state that did
+    /// verify, so nothing it had already paid for is lost.
+    ///
+    /// [`MAX_VERIFICATION_FAILURES`]: crate::grant::MAX_VERIFICATION_FAILURES
+    fn on_unverified_topup(
+        &mut self,
+        peer: PubKey,
+        channels: &[tollgate_protocol::ChannelId],
+        now: Millis,
+        out: &mut Vec<Action>,
+    ) {
+        let Some(session) = self.peers.get_mut(&peer) else {
+            return;
+        };
+
+        out.push(Action::Send {
+            peer,
+            msg: Message::Reject(Reject {
+                rejected_type: tollgate_protocol::MsgType::TopUp as u8,
+                reason: ReasonCode::GrantInvalid,
+                text: None,
+            }),
+        });
+
+        for &channel_id in channels {
+            let failures = session.grant.record_failure(channel_id);
+            if failures.is_some_and(|n| n >= grant::MAX_VERIFICATION_FAILURES) {
+                session.grant.close_channel(channel_id);
+                out.push(Action::SettleChannel { peer, channel_id });
             }
         }
         self.refresh(peer, now, out);
@@ -723,4 +782,29 @@ impl Sessions {
         });
         out.push(Action::DropPeer { peer });
     }
+}
+
+/// The channels a refused purchase failed to ratchet: those whose total did not
+/// increase, including a channel named a second time, whose second reading
+/// would be counted from the wrong base.
+///
+/// Only channels we recognise are named — one we do not has no ratchet for the
+/// total to fail against.
+fn not_increasing(
+    grant: &grant::GrantState,
+    updates: &[tollgate_protocol::ChannelUpdate],
+) -> Vec<tollgate_protocol::ChannelId> {
+    let mut seen = Vec::with_capacity(updates.len());
+    let mut failed = Vec::new();
+    for update in updates {
+        let Some(channel) = grant.channel(update.channel_id) else {
+            continue;
+        };
+        let repeated = seen.contains(&update.channel_id);
+        seen.push(update.channel_id);
+        if (repeated || update.cumulative <= channel.signed) && !failed.contains(&channel.id) {
+            failed.push(channel.id);
+        }
+    }
+    failed
 }

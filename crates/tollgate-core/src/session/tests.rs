@@ -9,7 +9,8 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec;
 
 use tollgate_protocol::{
-    ChannelId, ChannelUpdate, Disconnect, Message, PubKey, ReasonCode, Signature, TopUp,
+    ChannelId, ChannelUpdate, Disconnect, Message, PubKey, ReasonCode, Reject, Signature, TopUp,
+    TopUpReject,
 };
 
 use super::*;
@@ -18,6 +19,7 @@ use crate::action::Action;
 use crate::buyer::BuyerPolicy;
 use crate::config::{GrantPolicy, NodePolicy, PeerPolicy};
 use crate::event::Event;
+use crate::grant::MAX_VERIFICATION_FAILURES;
 use crate::meter::Counters;
 use crate::time::Millis;
 
@@ -1158,4 +1160,261 @@ fn a_peer_with_an_overridden_multiplier_is_offered_it_and_buys_for_it() {
         2_500_000,
         "the purchase should cover the surcharge B actually applies"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Purchases that fail verification
+// ---------------------------------------------------------------------------
+
+/// The channel A pays B on, as B recognises it.
+fn channel_a_pays_b_on(link: &Link) -> ChannelId {
+    link.b
+        .sessions
+        .peer(&link.a.id)
+        .expect("session")
+        .grant
+        .channels()[0]
+        .id
+}
+
+/// A TopUp from A ratcheting one channel, as B would receive it.
+fn topup_from_a(link: &Link, channel_id: ChannelId, cumulative: u64) -> Event {
+    Event::MessageReceived {
+        peer: link.a.id,
+        msg: Message::TopUp(TopUp {
+            updates: vec![ChannelUpdate {
+                channel_id,
+                cumulative,
+                signature: Signature([0; 64]),
+            }],
+            window_ms: 2_000,
+        }),
+    }
+}
+
+/// Whether B answered with the Reject the design calls for on a TopUp that
+/// failed verification.
+fn rejected_as_unverified(actions: &[Action]) -> bool {
+    actions.iter().any(|x| {
+        matches!(
+            x,
+            Action::Send {
+                msg: Message::Reject(Reject {
+                    rejected_type,
+                    reason: ReasonCode::GrantInvalid,
+                    ..
+                }),
+                ..
+            } if *rejected_type == tollgate_protocol::MsgType::TopUp as u8
+        )
+    })
+}
+
+#[test]
+fn a_topup_whose_signature_does_not_verify_is_answered_with_reject() {
+    // The host checks the signature and hands core only the verdict. The payer
+    // is told rather than left to infer it from throughput that never came.
+    let mut link = Link::new();
+    link.connect();
+    let a = link.a.id;
+    let channel_id = channel_a_pays_b_on(&link);
+
+    let actions = link.b.sessions.handle(
+        Event::TopUpSignatureInvalid {
+            peer: a,
+            channel_id,
+        },
+        link.now,
+    );
+
+    assert!(rejected_as_unverified(&actions));
+    assert!(
+        !actions
+            .iter()
+            .any(|x| matches!(x, Action::SettleChannel { .. })),
+        "one failure could be transient, so the channel stays open"
+    );
+    let grant = &link.b.sessions.peer(&a).expect("session").grant;
+    assert_eq!(grant.channel(channel_id).expect("still open").failures, 1);
+}
+
+#[test]
+fn a_topup_whose_total_does_not_increase_is_answered_with_reject() {
+    // A replayed or reordered purchase. The design answers it with the same
+    // Reject as a bad signature, not with TopUpReject — there is no rate the
+    // payer could re-buy at that would fix it.
+    let mut link = Link::new();
+    link.connect();
+    let channel_id = channel_a_pays_b_on(&link);
+
+    link.deliver(false, topup_from_a(&link, channel_id, 10_000));
+    let stale = topup_from_a(&link, channel_id, 10_000);
+    let actions = link.b.sessions.handle(stale, link.now);
+
+    assert!(rejected_as_unverified(&actions));
+    assert!(
+        !actions.iter().any(|x| matches!(
+            x,
+            Action::Send {
+                msg: Message::TopUpReject(_),
+                ..
+            }
+        )),
+        "not a grant declined, a grant that failed verification"
+    );
+    let grant = &link.b.sessions.peer(&link.a.id).expect("session").grant;
+    assert_eq!(grant.authorized(), 10_000, "the stale total bought nothing");
+}
+
+#[test]
+fn a_channel_that_keeps_failing_verification_is_closed() {
+    // Each attempt costs a signature verification. Past the threshold the
+    // channel is no longer honored, and the last state that did verify is
+    // settled so nothing already paid for is lost.
+    let mut link = Link::new();
+    link.connect();
+    let a = link.a.id;
+    let channel_id = channel_a_pays_b_on(&link);
+    link.deliver(false, topup_from_a(&link, channel_id, 10_000));
+
+    let bad = Event::TopUpSignatureInvalid {
+        peer: a,
+        channel_id,
+    };
+    for _ in 1..MAX_VERIFICATION_FAILURES {
+        let actions = link.b.sessions.handle(bad.clone(), link.now);
+        assert!(
+            !actions
+                .iter()
+                .any(|x| matches!(x, Action::SettleChannel { .. }))
+        );
+    }
+    // A stale total counts against the channel the same as a bad signature.
+    let actions = link
+        .b
+        .sessions
+        .handle(topup_from_a(&link, channel_id, 10_000), link.now);
+
+    assert!(rejected_as_unverified(&actions));
+    assert!(actions.iter().any(|x| matches!(
+        x,
+        Action::SettleChannel { channel_id: c, .. } if *c == channel_id
+    )));
+    let grant = &link.b.sessions.peer(&a).expect("session").grant;
+    assert!(grant.channel(channel_id).is_none(), "no longer honored");
+    assert_eq!(
+        grant.authorized(),
+        10_000,
+        "what the channel already paid for stays bought"
+    );
+
+    // Anything further on it is refused as an unknown channel.
+    let actions = link
+        .b
+        .sessions
+        .handle(topup_from_a(&link, channel_id, 20_000), link.now);
+    assert!(actions.iter().any(|x| matches!(
+        x,
+        Action::Send {
+            msg: Message::TopUpReject(TopUpReject {
+                reason: ReasonCode::FundingInvalid,
+                ..
+            }),
+            ..
+        }
+    )));
+}
+
+#[test]
+fn only_failures_in_a_row_count_against_a_channel() {
+    // A purchase that verifies clears the count: a payer that stumbles now and
+    // then is not the one the threshold is for.
+    let mut link = Link::new();
+    link.connect();
+    let a = link.a.id;
+    let channel_id = channel_a_pays_b_on(&link);
+
+    let bad = Event::TopUpSignatureInvalid {
+        peer: a,
+        channel_id,
+    };
+    for _ in 1..MAX_VERIFICATION_FAILURES {
+        link.b.sessions.handle(bad.clone(), link.now);
+    }
+    link.deliver(false, topup_from_a(&link, channel_id, 10_000));
+    let actions = link.b.sessions.handle(bad, link.now);
+
+    assert!(
+        !actions
+            .iter()
+            .any(|x| matches!(x, Action::SettleChannel { .. }))
+    );
+    let grant = &link.b.sessions.peer(&a).expect("session").grant;
+    assert_eq!(grant.channel(channel_id).expect("still open").failures, 1);
+}
+
+#[test]
+fn a_channel_named_twice_fails_verification_once() {
+    // Both readings increase, but the second would be counted from a stale
+    // base. The purchase fails verification, and the channel is counted once.
+    let mut link = Link::new();
+    link.connect();
+    let channel_id = channel_a_pays_b_on(&link);
+
+    let update = |cumulative| ChannelUpdate {
+        channel_id,
+        cumulative,
+        signature: Signature([0; 64]),
+    };
+    let twice = Event::MessageReceived {
+        peer: link.a.id,
+        msg: Message::TopUp(TopUp {
+            updates: vec![update(10_000), update(20_000)],
+            window_ms: 2_000,
+        }),
+    };
+    let actions = link.b.sessions.handle(twice, link.now);
+
+    assert!(rejected_as_unverified(&actions));
+    let grant = &link.b.sessions.peer(&link.a.id).expect("session").grant;
+    assert_eq!(grant.channel(channel_id).expect("still open").failures, 1);
+    assert_eq!(grant.authorized(), 0, "refused as a whole");
+}
+
+#[test]
+fn a_declined_grant_is_not_counted_against_the_channel() {
+    // A window we will not sell is a purchase we decline, not one that failed
+    // verification: it keeps TopUpReject and costs the channel nothing.
+    let mut link = Link::new();
+    link.connect();
+    let channel_id = channel_a_pays_b_on(&link);
+
+    let actions = link.b.sessions.handle(
+        Event::MessageReceived {
+            peer: link.a.id,
+            msg: Message::TopUp(TopUp {
+                updates: vec![ChannelUpdate {
+                    channel_id,
+                    cumulative: 10_000,
+                    signature: Signature([0; 64]),
+                }],
+                window_ms: 60_000,
+            }),
+        },
+        link.now,
+    );
+
+    assert!(!rejected_as_unverified(&actions));
+    assert!(actions.iter().any(|x| matches!(
+        x,
+        Action::Send {
+            msg: Message::TopUpReject(TopUpReject {
+                reason: ReasonCode::WindowOutOfRange,
+                ..
+            }),
+            ..
+        }
+    )));
+    let grant = &link.b.sessions.peer(&link.a.id).expect("session").grant;
+    assert_eq!(grant.channel(channel_id).expect("still open").failures, 0);
 }

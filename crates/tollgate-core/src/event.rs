@@ -39,6 +39,24 @@ pub enum Event {
         msg: Message,
     },
 
+    /// A TopUp arrived carrying a signature that did not verify.
+    ///
+    /// The host checked it — core never does — and the message itself goes no
+    /// further, since nothing in an unauthentic purchase can be acted on. What
+    /// comes through is only enough to answer it: the payer is told, and a
+    /// channel that keeps failing stops being honored.
+    ///
+    /// A backend that enforces the ratchet itself, as Spilman does, also fails
+    /// an update whose total does not increase, so that arrives here too. Core
+    /// answers both the same way.
+    TopUpSignatureInvalid {
+        /// Who sent it.
+        peer: PubKey,
+        /// The channel whose update failed. A purchase is refused as a whole,
+        /// so the host may stop at the first bad signature.
+        channel_id: ChannelId,
+    },
+
     /// Our wallet finished funding the channel we pay this peer on, in response
     /// to [`Action::FundChannel`](crate::Action::FundChannel).
     OutgoingChannelFunded {
