@@ -19,6 +19,8 @@ path = "src/bin/tolltop.rs"
 [dependencies]
 tollgate-core.workspace = true
 tollgate-protocol.workspace = true
+# The Spilman funding blob is CBOR, like the messages it travels in.
+minicbor = { workspace = true, features = ["std"] }
 
 tokio.workspace = true
 secp256k1.workspace = true

@@ -55,6 +55,12 @@ Nothing has been released yet. Everything below is on `master` and will ship as
   what a peer may draw is core's decision. Channels roll over before they run
   out.
 
+- Spilman channel funding travels as compact CBOR carrying only what the
+  receiver cannot derive: the channel's terms, the opening signature, and per
+  funding proof the mint's signature and DLEQ proof. A 1 GiB channel's funding
+  is 344 bytes rather than 1,581. A node built before this change cannot open a
+  channel with one built after it, in either direction.
+
 - A voucher market beside each node's mint: a node sells its vouchers for sats
   from mints it names (`market.accept`, with a `bytes_per_unit` per issuer), at
   a price the operator can move without restarting the node.

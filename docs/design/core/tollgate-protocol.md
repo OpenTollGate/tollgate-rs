@@ -703,13 +703,18 @@ Typical message sizes (CBOR encoded):
 | Announce | ~40 bytes |
 | Offer (one mint) | ~80 bytes |
 | Offer (3 accepted mints) | ~180 bytes |
-| Accept | ~180 bytes (dominated by Spilman funding) |
+| Accept | ~350 bytes + ~104 per funding proof past the first (Spilman funding) |
 | ChannelReady | ~40 bytes |
 | TopUp | ~120 bytes (dominated by the signature) |
 | TopUpReject | ~50 bytes |
-| RolloverInit | ~200 bytes (Spilman funding) |
+| RolloverInit | ~380 bytes + ~104 per funding proof past the first (Spilman funding) |
 | ChannelClose | ~110 bytes |
 | Disconnect | ~10 bytes |
+
+The Spilman funding carries only what the receiver cannot derive: the channel's
+terms, the opening signature, and per funding proof the mint's signature and
+DLEQ proof. A channel takes one proof per set bit of its capacity, so a 1 GiB
+channel is one proof and one byte short of it is thirty, about 3.4 KB.
 
 Plus 2 bytes of length prefix per message. Setup messages are one-time. TopUp is the only one that repeats, at whatever rate the payer chooses within `min_window_ms`, and at ~120 bytes against a grant measured in megabytes the framing overhead is negligible. What is not negligible is the signature verification each one costs the provider, which is why `min_window_ms` exists.
 
