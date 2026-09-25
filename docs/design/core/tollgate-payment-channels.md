@@ -376,8 +376,10 @@ pub trait ChannelBackend: Send + Sync {
     /// Sign a ratchet turn on a channel we fund.
     fn sign_update(&self, channel_id: ChannelId, cumulative: u64) -> Result<Signature>;
 
-    /// Check a peer's ratchet turn on a channel it funds. Called before the
-    /// message reaches core, which trusts what it is handed.
+    /// Check a peer's ratchet turn on a channel it funds, without keeping it.
+    /// Called on every update in a TopUp before the message reaches core,
+    /// which trusts what it is handed. Must not change what the backend has
+    /// recorded: the update may belong to a purchase that is refused.
     fn verify_update(
         &self,
         peer: PubKey,
@@ -385,6 +387,17 @@ pub trait ChannelBackend: Send + Sync {
         cumulative: u64,
         signature: Signature,
     ) -> bool;
+
+    /// Keep a verified ratchet turn as the channel's latest signed state, the
+    /// one `settle` submits. Called only once core has accepted the whole
+    /// purchase (`Action::RecordUpdates`).
+    fn record_update(
+        &self,
+        peer: PubKey,
+        channel_id: ChannelId,
+        cumulative: u64,
+        signature: Signature,
+    ) -> Result<()>;
 
     /// Settle a channel: submit the latest signed state to the mint the
     /// channel was funded in, and reclaim the change.
@@ -411,10 +424,10 @@ What a channel update commits to is the channel scheme's business, which is why 
 | State | Backend operations used |
 |-------|----------------------|
 | Funding | `fund`, `verify` |
-| Active | `sign_update`, `verify_update` |
+| Active | `sign_update`, `verify_update`, `record_update` |
 | Rollover | `fund`, `verify` (new channel), `settle` (old channel) |
 | Settling | `settle` |
-| Offline | `sign_update`, `verify_update` (no mint needed) |
+| Offline | `sign_update`, `verify_update`, `record_update` (no mint needed) |
 
 ---
 
@@ -434,6 +447,8 @@ If settlement fails (mint swap rejected):
 - Queue for retry if mint is unreachable
 
 ### Balance Verification Failure
+
+A TopUp is honored or refused as a whole, and one TopUp can carry updates for several channels — a purchase spanning a rollover carries two. So verifying and keeping are separate steps. The host verifies every update's signature with `verify_update`, which records nothing, and hands core the TopUp only if all of them pass. Core decides whether to grant it; only when it accepts does it emit `Action::RecordUpdates`, and only then does the host call `record_update` on each, making it the state `settle` submits. A TopUp refused for any reason — one bad signature, a window out of range, a rate over capacity — leaves the backend's record where it was, so the backend never holds a signed state the grant did not pay for, and a payer retrying the same purchase is judged against the same state as the first time. `RecordUpdates` comes before any `SettleChannel` the same purchase sets off, so a channel the purchase filled settles at the state it paid for.
 
 If a received TopUp fails signature verification, or its cumulative total does not exceed the current one (including a channel named twice in one purchase):
 - Send Reject (reason: grant signature invalid, or cumulative not increasing)

@@ -128,3 +128,13 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 - `tollgate-pricing.md`, replaced by `tollgate-hazards.md`.
 - `tollgate-bootstrap.md` and its diagrams, with bootstrap tokens.
+
+### Fixed
+
+- A `TopUp` refused in part no longer moves a channel's recorded state. The
+  Spilman backend kept each update as it verified it, so when a purchase
+  spanning a rollover had one bad signature, or core declined it, the
+  receiver still held the good update and would have settled at a state no
+  grant paid for. `ChannelBackend::verify_update` now keeps nothing; a new
+  `record_update` keeps the state, called only once core accepts the whole
+  purchase and emits `Action::RecordUpdates`.

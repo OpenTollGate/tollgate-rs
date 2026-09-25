@@ -385,28 +385,16 @@ impl SpilmanChannels {
             })
         })
     }
-}
 
-impl ChannelBackend for SpilmanChannels {
-    fn fund(&self, peer: PubKey, mint_url: &str, capacity: u64) -> Result<FundedChannel> {
-        // Which keyset denominates in our unit. A mint may run several — an old
-        // one still being redeemed alongside the active one — and only the
-        // active one can be funded against.
-        let keyset_id = crate::market::active_keyset(mint_url, &self.config.unit)?;
-        let keyset_info = self
-            .client
-            .lock()
-            .expect("not poisoned")
-            .fetch_keyset_info(mint_url, &keyset_id)
-            .map_err(|e| anyhow!("could not read keyset {keyset_id} from {mint_url}: {e}"))?;
-
-        // Buying the peer's vouchers is outside the protocol: a peer arrives
-        // holding them or it gets no service, and how it came to hold them is
-        // as much its own business as how it came to hold money.
-        let token = self
-            .buy_vouchers(mint_url, capacity, &keyset_info)
-            .with_context(|| format!("buy {capacity} {} from {mint_url}", self.config.unit))?;
-
+    /// Open a channel to pay `peer` out of vouchers already held, and package
+    /// what the peer needs to verify it.
+    fn open_funded(
+        &self,
+        peer: PubKey,
+        mint_url: &str,
+        token: &str,
+        keyset_info: &str,
+    ) -> Result<FundedChannel> {
         let ours = cashu::nuts::SecretKey::from_hex(&self.config.secret_key_hex)
             .map_err(|e| anyhow!("bad secret: {e}"))?
             .public_key()
@@ -415,11 +403,11 @@ impl ChannelBackend for SpilmanChannels {
         let client = self.client.lock().expect("not poisoned");
         let opened = client
             .open_channel_from_token(
-                &token,
+                token,
                 &hex::encode(peer.0),
                 &ours,
                 now_seconds() + CHANNEL_TTL_SECONDS,
-                &keyset_info,
+                keyset_info,
                 MAX_PROOF_AMOUNT,
             )
             .map_err(|e| anyhow!("open a channel against {mint_url}: {e}"))?;
@@ -449,6 +437,30 @@ impl ChannelBackend for SpilmanChannels {
             capacity: opened.capacity,
             funding: serde_json::to_vec(&blob)?,
         })
+    }
+}
+
+impl ChannelBackend for SpilmanChannels {
+    fn fund(&self, peer: PubKey, mint_url: &str, capacity: u64) -> Result<FundedChannel> {
+        // Which keyset denominates in our unit. A mint may run several — an old
+        // one still being redeemed alongside the active one — and only the
+        // active one can be funded against.
+        let keyset_id = crate::market::active_keyset(mint_url, &self.config.unit)?;
+        let keyset_info = self
+            .client
+            .lock()
+            .expect("not poisoned")
+            .fetch_keyset_info(mint_url, &keyset_id)
+            .map_err(|e| anyhow!("could not read keyset {keyset_id} from {mint_url}: {e}"))?;
+
+        // Buying the peer's vouchers is outside the protocol: a peer arrives
+        // holding them or it gets no service, and how it came to hold them is
+        // as much its own business as how it came to hold money.
+        let token = self
+            .buy_vouchers(mint_url, capacity, &keyset_info)
+            .with_context(|| format!("buy {capacity} {} from {mint_url}", self.config.unit))?;
+
+        self.open_funded(peer, mint_url, &token, &keyset_info)
     }
 
     fn verify(&self, _peer: PubKey, funding: &[u8]) -> Result<VerifiedChannel> {
@@ -505,19 +517,44 @@ impl ChannelBackend for SpilmanChannels {
         cumulative: u64,
         signature: Signature,
     ) -> bool {
-        // Checks the signature against the channel's key material and that the
-        // balance only ever increases. With no pricing configured it never
-        // second-guesses how much is owed — that is core's job.
+        // Checks that the channel is open, that the balance fits its capacity
+        // and that the signature is the funder's over it, and records nothing:
+        // `process_payment` would keep the balance as a side effect, before we
+        // know whether the rest of the purchase — or core — agrees. Whether
+        // the balance increases is core's check, against the grant; so is how
+        // much is owed, since no pricing is configured.
+        self.server
+            .validate_payment(
+                &channel_id_to_hex(channel_id),
+                cumulative,
+                &hex::encode(signature.0),
+                &String::new(),
+            )
+            .is_ok()
+    }
+
+    fn record_update(
+        &self,
+        _peer: PubKey,
+        channel_id: ChannelId,
+        cumulative: u64,
+        signature: Signature,
+    ) -> Result<()> {
+        // Validates again and keeps the balance as the channel's latest state,
+        // which is what settlement submits. The receiver only ever moves it
+        // forward.
+        let id = channel_id_to_hex(channel_id);
         self.server
             .process_payment(
-                &channel_id_to_hex(channel_id),
+                &id,
                 cumulative,
                 &hex::encode(signature.0),
                 None,
                 None,
                 &String::new(),
             )
-            .is_ok()
+            .map_err(|e| anyhow!("record an update on {id}: {e:?}"))?;
+        Ok(())
     }
 
     fn settle(&self, channel_id: ChannelId) -> Result<()> {
@@ -598,5 +635,195 @@ mod tests {
     fn a_signature_of_the_wrong_length_is_rejected() {
         assert!(signature_from_hex(&hex::encode([0u8; 64])).is_ok());
         assert!(signature_from_hex(&hex::encode([0u8; 32])).is_err());
+    }
+
+    /// A receiver with a real mint served over HTTP, and a payer holding its
+    /// vouchers.
+    struct Pair {
+        mint: Arc<Mint>,
+        mint_url: String,
+        receiver: SpilmanChannels,
+        receiver_key: PubKey,
+        payer: SpilmanChannels,
+        payer_key: PubKey,
+        dir: std::path::PathBuf,
+    }
+
+    impl Pair {
+        async fn start() -> Self {
+            let port = std::net::TcpListener::bind("127.0.0.1:0")
+                .expect("find a free port")
+                .local_addr()
+                .expect("its address")
+                .port();
+            let mint_url = format!("http://127.0.0.1:{port}");
+            let mint = Arc::new(
+                crate::mint::build(&crate::mint::MintConfig {
+                    url: mint_url.clone(),
+                    unit: "byte".into(),
+                    seed: vec![3; 32],
+                    max_amount: 1 << 30,
+                })
+                .await
+                .expect("build the mint"),
+            );
+            tokio::spawn(crate::mint::serve(
+                Arc::clone(&mint),
+                axum::Router::new(),
+                ([127, 0, 0, 1], port).into(),
+                std::future::pending(),
+            ));
+
+            let dir = std::env::temp_dir().join(format!(
+                "tollgate-spilman-test-{}-{port}",
+                std::process::id()
+            ));
+            let receiver_id = crate::identity::Identity::generate();
+            let payer_id = crate::identity::Identity::generate();
+            let backend = |id: &crate::identity::Identity, name: &str| {
+                let dir = dir.clone();
+                let mint = Arc::clone(&mint);
+                let mint_url = mint_url.clone();
+                let secret_key_hex = id.secret_hex();
+                let name = name.to_owned();
+                async move {
+                    let wallet = crate::wallet::Wallet::open(dir.join(name), [9; 64], "byte")
+                        .await
+                        .expect("open a wallet");
+                    SpilmanChannels::new(SpilmanConfig {
+                        mint,
+                        mint_url: mint_url.clone(),
+                        unit: "byte".into(),
+                        accepted_mints: vec![mint_url],
+                        secret_key_hex,
+                        wallet,
+                        money: None,
+                    })
+                    .expect("build a backend")
+                }
+            };
+            let receiver = backend(&receiver_id, "receiver.sqlite").await;
+            let payer = backend(&payer_id, "payer.sqlite").await;
+
+            Self {
+                mint,
+                mint_url,
+                receiver,
+                receiver_key: receiver_id.pubkey(),
+                payer,
+                payer_key: payer_id.pubkey(),
+                dir,
+            }
+        }
+
+        /// Issue `amount` vouchers straight from the mint — what the market
+        /// would sell — and open a channel on them that the receiver has
+        /// verified. Runs on a blocking thread: every call here is.
+        fn open_channel(&self, amount: u64) -> ChannelId {
+            let keyset_id = (0..50)
+                .find_map(|_| {
+                    crate::market::active_keyset(&self.mint_url, "byte")
+                        .map_err(|_| std::thread::sleep(std::time::Duration::from_millis(50)))
+                        .ok()
+                })
+                .expect("the mint comes up");
+            let keyset_info = self
+                .payer
+                .client
+                .lock()
+                .expect("not poisoned")
+                .fetch_keyset_info(&self.mint_url, &keyset_id)
+                .expect("keyset info");
+
+            let blinded: serde_json::Value = serde_json::from_str(
+                &cdk_spilman::create_plain_blinded_messages(amount, &keyset_info).expect("blind"),
+            )
+            .expect("blinded json");
+            let outputs: Vec<cdk::nuts::BlindedMessage> =
+                serde_json::from_value(blinded["blinded_messages"].clone()).expect("outputs");
+            let signatures = tokio::runtime::Handle::current()
+                .block_on(self.mint.blind_sign(outputs))
+                .expect("the mint signs");
+            let proofs = cdk_spilman::construct_proofs(
+                &serde_json::to_string(&signatures).expect("signatures"),
+                &blinded["secrets_with_blinding"].to_string(),
+                &keyset_info,
+            )
+            .expect("unblind");
+            let token =
+                cdk_spilman::build_cashu_b_token(&self.mint_url, "byte", &proofs).expect("token");
+
+            let funded = self
+                .payer
+                .open_funded(self.receiver_key, &self.mint_url, &token, &keyset_info)
+                .expect("open a channel");
+            let verified = self
+                .receiver
+                .verify(self.payer_key, &funded.funding)
+                .expect("the receiver takes the funding");
+            verified.channel_id
+        }
+
+        /// The balance the receiver would settle `channel_id` at.
+        fn recorded(&self, channel_id: ChannelId) -> u64 {
+            self.receiver
+                .server
+                .host()
+                .get_balance(&channel_id_to_hex(channel_id))
+                .map_or(0, |p| p.balance)
+        }
+    }
+
+    impl Drop for Pair {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_purchase_with_one_bad_signature_records_nothing_on_the_good_channel() {
+        // A purchase spanning a rollover: two channels, one update each. The
+        // host checks both before core sees the TopUp, and refuses it whole
+        // when the second does not verify. Checking the first must not have
+        // kept it, or the receiver would settle channel 1 at a state no grant
+        // paid for.
+        let pair = Pair::start().await;
+        tokio::task::spawn_blocking(move || {
+            // Different capacities: a channel id hashes its terms, whose
+            // timestamps are whole seconds, so two identical channels opened
+            // within one second would collide.
+            let first = pair.open_channel(1_000);
+            let second = pair.open_channel(1_001);
+            let before = pair.recorded(first);
+
+            let good = pair.payer.sign_update(first, 600).expect("sign");
+            let mut bad = pair.payer.sign_update(second, 400).expect("sign");
+            bad.0[10] ^= 0x01;
+
+            assert!(
+                pair.receiver
+                    .verify_update(pair.payer_key, first, 600, good),
+                "the first update is genuine"
+            );
+            assert!(
+                !pair
+                    .receiver
+                    .verify_update(pair.payer_key, second, 400, bad),
+                "the second is not"
+            );
+            assert_eq!(
+                pair.recorded(first),
+                before,
+                "verifying the first update kept nothing"
+            );
+
+            // Once core accepts a purchase, recording is what moves it.
+            pair.receiver
+                .record_update(pair.payer_key, first, 600, good)
+                .expect("record");
+            assert_eq!(pair.recorded(first), 600);
+        })
+        .await
+        .expect("the test ran");
     }
 }

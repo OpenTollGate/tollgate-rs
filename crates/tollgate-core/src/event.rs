@@ -46,9 +46,10 @@ pub enum Event {
     /// comes through is only enough to answer it: the payer is told, and a
     /// channel that keeps failing stops being honored.
     ///
-    /// A backend that enforces the ratchet itself, as Spilman does, also fails
-    /// an update whose total does not increase, so that arrives here too. Core
-    /// answers both the same way.
+    /// Verification is only the signature (and, for Spilman, that the channel
+    /// is open and the total fits its capacity). An update whose total does not
+    /// increase verifies, reaches core in the TopUp, and is refused there as
+    /// `GrantInvalid`, which core answers and counts the same way.
     TopUpSignatureInvalid {
         /// Who sent it.
         peer: PubKey,

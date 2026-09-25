@@ -7,7 +7,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tollgate_protocol::{ChannelId, Message, PubKey};
+use tollgate_protocol::{ChannelId, ChannelUpdate, Message, PubKey};
 
 use crate::access::AccessLevel;
 
@@ -39,6 +39,23 @@ pub enum Action {
         ratchets: Vec<(ChannelId, u64)>,
         /// Window to spend it in, already clamped to the provider's range.
         window_ms: u32,
+    },
+
+    /// Keep a purchase's channel updates as each channel's latest signed state.
+    ///
+    /// The host checked every signature before core saw the TopUp, but checking
+    /// is not keeping: a purchase is honored or refused as a whole, and the
+    /// channel backend's record is what settlement submits. So the updates are
+    /// recorded only once core has accepted the whole purchase, and the backend
+    /// never holds a state the grant did not pay for.
+    ///
+    /// Comes before any [`Self::SettleChannel`] the same purchase sets off, so a
+    /// channel this purchase filled settles at the state recorded here.
+    RecordUpdates {
+        /// The peer that paid.
+        peer: PubKey,
+        /// The updates, exactly as the TopUp carried them.
+        updates: Vec<ChannelUpdate>,
     },
 
     /// Change what the resource adapter delivers for a peer.

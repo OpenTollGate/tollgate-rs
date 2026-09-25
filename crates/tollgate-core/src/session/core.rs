@@ -547,6 +547,15 @@ impl Sessions {
             } => {
                 session.grant.apply(&ratchets, grant, m.window_ms, now);
 
+                // Only now does the backend keep them: before this, the
+                // purchase could still have been refused, and a backend that
+                // had recorded part of it would settle a state we never
+                // granted.
+                out.push(Action::RecordUpdates {
+                    peer,
+                    updates: m.updates,
+                });
+
                 // A channel drained to its capacity carries nothing further.
                 // Settling it is what keeps our spent-proof set bounded, which
                 // is the reason channels exist at all.
