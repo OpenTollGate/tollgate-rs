@@ -15,6 +15,9 @@ minicbor.workspace = true
 # The codec tests hand-build a few CBOR maps our own encoder would never emit
 # (unknown keys, reordered fields) to prove the decoder tolerates them.
 minicbor.workspace = true
+# Checks every encoded message against `tollgate.cddl`. std-only, so it can
+# never be a normal dependency of this no_std crate.
+cddl.workspace = true
 
 [lints]
 workspace = true

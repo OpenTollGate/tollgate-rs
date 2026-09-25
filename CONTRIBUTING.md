@@ -198,6 +198,15 @@ running it yourself saves a review round trip.
   describes it.
 - **A CHANGELOG entry** under `[Unreleased]` in
   [CHANGELOG.md](CHANGELOG.md).
+- **Wire-format changes update the schema in the same PR.** The CDDL in
+  [tollgate.cddl](crates/tollgate-protocol/tollgate.cddl) is the normative
+  definition of every message, and
+  [funding.cddl](crates/tollgate-net/src/channel/spilman/funding.cddl) of the
+  Spilman funding blob. A change to what the codec writes or accepts changes
+  the schema alongside it. The schema tests
+  (`crates/tollgate-protocol/tests/schema.rs`, and the ones in `funding.rs`)
+  validate every encoded message against it, and fail when the two drift or
+  when a message type has no schema entry.
 
 ### Additional requirements for bug-fix PRs
 

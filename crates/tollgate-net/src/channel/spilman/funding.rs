@@ -26,7 +26,8 @@
 //! # Encoding
 //!
 //! A CBOR map with integer keys, the same shape as the messages it rides in.
-//! Unknown keys are skipped.
+//! Unknown keys are skipped. `funding.cddl`, next to this file, is the
+//! normative schema, and the tests below check the encoder against it.
 //!
 //! | Key | Field                  | Type                          |
 //! |-----|------------------------|-------------------------------|
@@ -436,6 +437,49 @@ mod tests {
             let f = funding(n);
             assert_eq!(Funding::decode(&f.encode()).expect("decode"), f);
         }
+    }
+
+    const SCHEMA: &str = include_str!("funding.cddl");
+
+    fn validate(cbor: &[u8]) -> std::result::Result<(), String> {
+        cddl::validate_cbor_from_slice(SCHEMA, cbor, None).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn the_encoded_blob_matches_funding_cddl() {
+        let v2: Id = format!("01{}", "ab".repeat(32))
+            .parse()
+            .expect("v2 keyset id");
+        for n in [0, 1, 30] {
+            let mut f = funding(n);
+            validate(&f.encode()).unwrap_or_else(|e| panic!("{n} outputs, v1 keyset: {e}"));
+            f.terms.keyset_id = v2;
+            validate(&f.encode()).unwrap_or_else(|e| panic!("{n} outputs, v2 keyset: {e}"));
+        }
+    }
+
+    #[test]
+    fn funding_cddl_refuses_what_decode_refuses() {
+        // Only a signature: every other required key is missing.
+        let mut short = Vec::new();
+        Encoder::new(&mut short)
+            .map(1)
+            .and_then(|e| e.u8(0))
+            .and_then(|e| e.bytes(&[0; 64]))
+            .expect("encode");
+        assert!(Funding::decode(&short).is_err());
+        let err = validate(&short).expect_err("a lone signature is not a funding blob");
+        assert!(err.contains("missing key: 1"), "{err}");
+
+        // A 63-byte signature, the rest intact. The signature is key 0, the
+        // first thing after the map header.
+        let mut bytes = funding(1).encode();
+        assert_eq!(&bytes[1..4], &[0x00, 0x58, 0x40], "key 0, bytes(64)");
+        bytes[3] = 63;
+        bytes.remove(4);
+        assert!(Funding::decode(&bytes).is_err());
+        let err = validate(&bytes).expect_err("a 63-byte signature");
+        assert!(err.contains(".size 64, got 63"), "{err}");
     }
 
     #[test]

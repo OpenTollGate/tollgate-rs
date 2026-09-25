@@ -14,6 +14,17 @@ The TollGate protocol is a set of messages exchanged between authenticated peers
 
 All messages use **CBOR** ([RFC 8949](https://www.rfc-editor.org/rfc/rfc8949)) encoding.
 
+**The normative definition of every message is the CDDL
+([RFC 8610](https://www.rfc-editor.org/rfc/rfc8610)) schema
+[`crates/tollgate-protocol/tollgate.cddl`](../../../crates/tollgate-protocol/tollgate.cddl):**
+each key, its type, fixed sizes, which fields are optional and what their
+absence means, and the unknown-key rule. This document explains the messages;
+where the two differ, the schema wins. The codec's tests validate everything
+it encodes against the schema, so when the code and the schema disagree, the
+code is wrong, or both change in the same PR. The Spilman backend's funding
+blob, opaque at this layer, has its own schema in
+[`funding.cddl`](../../../crates/tollgate-net/src/channel/spilman/funding.cddl).
+
 **Why CBOR over binary (FIPS-style)?**
 - TollGate is transport-agnostic — messages may traverse different substrates. Self-describing format avoids custom parsers per transport.
 - Variable-length fields (mint URLs, units) are natural in CBOR, awkward in fixed binary.

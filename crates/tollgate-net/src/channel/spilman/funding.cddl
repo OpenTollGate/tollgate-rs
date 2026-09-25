@@ -1,0 +1,57 @@
+; Spilman channel funding blob -- CDDL schema (RFC 8610)
+;
+; NORMATIVE for the Spilman channel backend. The TollGate protocol carries
+; channel funding as an opaque byte string (`funding` in
+; crates/tollgate-protocol/tollgate.cddl, in Accept key 1 and RolloverInit
+; key 2); this is what those bytes hold when the backend is Spilman.
+; `funding.rs` implements it and its tests check the encoder against it. When
+; the code and this schema disagree, the code is wrong -- or both change, in
+; the same PR.
+;
+; It carries only what the receiver cannot derive: the eleven terms the
+; channel id commits to, the opening signature, and the mint's signature on
+; each funding output. See the module docs in `funding.rs` for why.
+;
+; Encoding rules, as for the protocol messages:
+;
+; - A DEFINITE-length map; indefinite-length maps and arrays are rejected.
+; - Keys are unsigned integers 0..255, in any order. Unknown keys are
+;   skipped (`* uint => any`; strictly `* (0..255) => any`, which the
+;   reference validator cannot express). Known keys are cuts (`key: type`).
+; - Every known key is required.
+
+spilman-funding = {
+  0: bstr .size 64,       ; BIP-340 signature by the sender over balance 0
+  1: tstr,                ; mint URL
+  2: tstr,                ; unit
+  3: u64,                 ; capacity
+  4: u64,                 ; funding_token_amount
+  5: keyset-id,
+  6: u64,                 ; input_fee_ppk
+  7: u64,                 ; maximum_amount
+  8: u64,                 ; setup_timestamp, unix seconds
+  9: pubkey,              ; sender_pubkey
+  10: pubkey,             ; receiver_pubkey
+  11: u64,                ; expiry_timestamp, unix seconds
+  12: [* funding-output], ; in the order cdk-spilman derives them,
+                          ;   smallest amount first
+  * uint => any,
+}
+
+u64 = uint .size 8
+
+; Compressed secp256k1 public key.
+pubkey = bstr .size 33
+
+; Cashu keyset id as bytes: the version byte followed by the id. Version
+; 0x00 (NUT-02 v1) carries 7 id bytes, version 0x01 (v2) carries 32. The
+; leading byte is not constrained here; the decoder rejects any other.
+keyset-id = bstr .size 8 / bstr .size 33
+
+; The mint's signature on one funding output and its DLEQ proof. The
+; amount, secret and blinding factor the receiver derives itself.
+funding-output = [
+  c: bstr .size 33,       ; blind signature C, a compressed point
+  e: bstr .size 32,       ; DLEQ challenge
+  s: bstr .size 32,       ; DLEQ response
+]

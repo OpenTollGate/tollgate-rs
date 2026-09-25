@@ -69,6 +69,8 @@ tokio = { version = "1", features = ["full"] }
 # Driving an axum Router without binding a socket, which is how the speedtest's
 # handlers are tested.
 tower = { version = "0.5", features = ["util"] }
+# Checks the Spilman funding blob against `funding.cddl`.
+cddl.workspace = true
 
 [lints]
 workspace = true

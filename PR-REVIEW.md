@@ -137,7 +137,11 @@ Step 4.
     unblocked by this PR.
 13. **Other concerns**. Anything not captured above — wire-format
     implications (does a node on the previous commit still interoperate
-    with one on this?), deployment / packaging impact on the OpenWrt
+    with one on this? A wire change must come with its diff to
+    `crates/tollgate-protocol/tollgate.cddl`, or to the Spilman
+    `funding.cddl`; read that diff as the change's real statement of what
+    moved on the wire, and treat a codec change with no schema diff as
+    suspect), deployment / packaging impact on the OpenWrt
     and macOS packages, contributor coordination needs, fragility notes
     for future maintainers.
 

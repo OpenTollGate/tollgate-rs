@@ -48,3 +48,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
+
+# --- dev-only ---
+# cddl: validates encoded messages against the normative schemas
+# (crates/tollgate-protocol/tollgate.cddl and the Spilman funding.cddl). Only
+# ever a dev-dependency: it needs std, and protocol and core must stay no_std.
+# Default features off drops the CSV validator and fancy-regex; 0.10.7 does
+# not compile with any fewer than the ones listed.
+cddl = { version = "0.10.7", default-features = false, features = ["std", "cbor", "json", "additional-controls", "ast-span", "ast-comments", "ast-parent"] }

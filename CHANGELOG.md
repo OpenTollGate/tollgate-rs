@@ -119,6 +119,14 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 - `CONTRIBUTING.md`, `PR-REVIEW.md`, this changelog and `RELEASE-NOTES.md`.
 
+- A normative CDDL (RFC 8610) schema for the wire protocol,
+  `crates/tollgate-protocol/tollgate.cddl`, and one for the Spilman funding
+  blob, `crates/tollgate-net/src/channel/spilman/funding.cddl`. Tests validate
+  every message the codec encodes against it, and fail when a message type has
+  no schema entry, so a wire change cannot land unannounced. The idea is from
+  #8 by Amperstrand, which proposed a schema for the protocol before its
+  redesign.
+
 ### Changed
 
 - The protocol is redesigned around **vouchers**. A voucher is a claim on one
