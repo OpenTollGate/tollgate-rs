@@ -27,7 +27,8 @@ Nothing has been released yet. Everything below is on `master` and will ship as
   a purchase across several channels. Raising a rate forfeits the old grant's
   remainder; the buyer's hysteresis only jumps early when demand rises by half
   again. Purchases are sized for what a peer charges on our uploads
-  (`received_multiplier`).
+  (`received_multiplier`), and each peer's Offer carries the multiplier it is
+  charged under, its per-peer override included.
 
 - `tollgated`, the node. It drives core over two TCP planes, shapes each peer
   to exactly what it bought with a token bucket, and holds a peer that has
