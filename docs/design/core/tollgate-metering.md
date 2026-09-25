@@ -24,7 +24,7 @@ consumed += delivered + received × received_multiplier
 
 The counters themselves stay raw. The weighting is applied when drawing down the grant, so what the meter reports and what the shaper charges stay separable.
 
-What is metered is what the node delivers **for or through** the peer. Traffic addressed to or sent by the node itself — TollGate protocol messages, the mint — is not metered, and is **never blocked or shaped**, whatever the peer's access level: blocking it would cut off the payment that restores delivery. Where the delivery path already separates the two, as a kernel does between forwarded and locally-delivered packets, the exemption costs nothing. Where it does not, an implementation may count that traffic, but must still never block it.
+What is metered is what the node delivers **for or through** the peer. Traffic addressed to or sent by the node itself — TollGate protocol messages, `mintd`, `merchantd`'s market endpoints — is not metered, and is **never blocked or shaped**, whatever the peer's access level: blocking it would cut off the payment that restores delivery. Where the delivery path already separates the two, as a kernel does between forwarded and locally-delivered packets, the exemption costs nothing. Where it does not, an implementation may count that traffic, but must still never block it.
 
 ## Cumulative Counter Model
 
@@ -120,7 +120,7 @@ pub type PeerMetrics = HashMap<String, MetricValue>;
 |----------|-----------|-----------|
 | Metering target | Both directions of the link, per peer | The peer's grant is drawn down by both; the counters were already there |
 | Counter model | Cumulative since session start, not deltas | Compares directly against the cumulative total the peer has signed for |
-| Counter delivery | Push/stream (watch channels) | Continuous updates from adapter; core draws down the grant as they arrive |
+| Counter delivery | Read, not pushed: the host reads cumulative counters once per tick | Enough to draw a grant down, and needs nothing from the delivery path beyond a cumulative count |
 | Counter names | `delivered` and `received`, unchanged | The payment model changed, the measurement did not. Both already mean the peer's download and upload |
 | Reporting | None — counters stay local | Payment happens before delivery, so no shared number decides how much money moves and there is nothing to reconcile |
 | Multiplier | Applied when drawing down the grant, not when counting | Keeps what the meter reports separable from what the shaper charges |

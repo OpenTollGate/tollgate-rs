@@ -32,12 +32,13 @@ can be read independently.
 | [tollgate-access-control.md](core/tollgate-access-control.md) | Access control: delivery gates, access levels, FIPS bloom filter visibility |
 | [tollgate-metering.md](core/tollgate-metering.md) | Metering: local counters, what they are and are not used for, peer metrics |
 | [tollgate-hazards.md](core/tollgate-hazards.md) | Constraints that exist because removing them reintroduces a known abuse |
+| [tollgate-daemons.md](core/tollgate-daemons.md) | Process split: tollgated delivers, mintd issues and burns, merchantd prices and holds all value |
 
 ### Configuration
 
 | Document | Description |
 | -------- | ----------- |
-| [tollgate-configuration.md](core/tollgate-configuration.md) | YAML configuration reference: mint, vouchers, access, channels, peers |
+| [tollgate-configuration.md](core/tollgate-configuration.md) | YAML configuration reference: `tollgate.yaml`, `mint.yaml`, `merchant.yaml` — one file per daemon |
 
 ### Market
 
@@ -48,7 +49,7 @@ a node can sell its own vouchers and redeem them without any of this.
 | -------- | ----------- |
 | [market/README.md](market/README.md) | Index and relationship to the core protocol |
 | [market-protocol.md](market/market-protocol.md) | Separate endpoints for buying and swapping, and why they stay out of the payment protocol |
-| [voucher-acquisition.md](market/voucher-acquisition.md) | Lightning mint quotes, direct purchase, local swaps, cross-mint swaps |
+| [voucher-acquisition.md](market/voucher-acquisition.md) | Direct purchase, local swaps, cross-mint swaps |
 | [voucher-price-signal.md](market/voucher-price-signal.md) | Selling price against face value as a reliability signal; liquidity |
 | [issuer-risk.md](market/issuer-risk.md) | Overissuance, selling without redeeming, redemption congestion, shutdown |
 

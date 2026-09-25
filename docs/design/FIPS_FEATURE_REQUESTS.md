@@ -1,6 +1,6 @@
 # FIPS Feature Requests for TollGate Integration
 
-This document consolidates all FIPS modifications required for tollgate-rs integration. `tollgate-net` and FIPS run as independent binaries and communicate over FIPS's control socket. Each feature below is framed as a generic capability FIPS exposes on that socket. Each feature is referenced from the relevant TollGate design doc.
+This document consolidates all FIPS modifications required for tollgate-rs integration. `tollgated` (built on `tollgate-net`) and FIPS run as independent binaries and communicate over FIPS's control socket. Each feature below is framed as a generic capability FIPS exposes on that socket. Each feature is referenced from the relevant TollGate design doc.
 
 ---
 
@@ -202,7 +202,7 @@ Shaping outside FIPS only reaches part of the traffic. Each node is a distinct `
 - Its own grant limits (`max_rate`, window range)
 - Its own access policy
 
-What a unit of each medium costs in money is set where its vouchers are sold, not in FIPS or in the protocol.
+What a unit of each medium costs in money is set where its vouchers are sold — `merchantd` — not in FIPS or in the protocol. **Pricing per medium is deferred**: byte vouchers do not say which medium they will be spent on, so one `mintd` and one price cover every medium for now. Distinguishing them — a mint or a keyset per medium — is future work.
 
 **Referenced in**: [peering-fips.md](network-peering/peering-fips.md)
 

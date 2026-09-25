@@ -28,19 +28,23 @@ constrained device is obliged to implement it.
 
 ## Routes
 
-### Mint over Lightning
+### Buy over Lightning
 
-The peer asks the node's mint for a quote, pays the Lightning invoice, and
-receives vouchers (NUT-04). Standard Cashu, no TollGate involvement.
+Not at the node. Its mint (`mintd`) has no Lightning backend, and
+`merchantd` takes Cashu tokens from the mints on its `accepts` list, not
+invoices ([tollgate-daemons.md](../core/tollgate-daemons.md)). A peer
+holding only Lightning pays a NUT-04 invoice at one of those mints and
+trades the tokens for vouchers — a local swap, below.
 
-Needs the peer to have connectivity already — another peering, a cellular
-link, or the minimum flow allowance
+That needs the peer to have connectivity already — another peering, a
+cellular link, or the minimum flow allowance
 ([tollgate-vouchers.md](../core/tollgate-vouchers.md)).
 
 ### Direct purchase from the issuer
 
-The node sells its own vouchers for sats, at whatever price it likes. This
-is the whole mechanism for most peerings and needs no market to exist.
+The node's `merchantd` sells its own vouchers for tokens in `sat`, `usd` or
+`eur`, at whatever price it likes. This is the whole mechanism for most
+peerings and needs no market to exist.
 
 Because the issuer is the counterparty, settlement is free for it: it is
 selling a claim it will honor by delivering, not moving money.
@@ -48,14 +52,17 @@ selling a claim it will honor by delivering, not moving money.
 ### Local sat swap
 
 The most useful route in practice. The peer hands over sat-denominated
-tokens and the node returns vouchers — **for any mint it accepts**,
+tokens (or `usd`/`eur` ones, from a mint on `merchantd`'s `accepts` list)
+and the node returns vouchers — **for any mint it accepts**,
 not only its own ([tollgate-vouchers.md](../core/tollgate-vouchers.md)). The
 node has upstream connectivity and can verify the sats with their mint.
 
 A node advertises willingness at its **market endpoint**, not in the payment
-protocol — see [market-protocol.md](market-protocol.md). Swapping for the
-node's own vouchers is a plain Cashu mint operation (NUT-04); only
-cross-mint trades need the market endpoints at all.
+protocol — see [market-protocol.md](market-protocol.md). The endpoint is
+served by `merchantd`, which swaps the sats into its own wallet and has
+`mintd` issue this node's vouchers through a NUT-04 quote on its private
+listener. Another mint's vouchers can only come out of what `merchantd`
+already holds.
 
 This recovers the walk-up case the old bootstrap token existed for: a peer
 arriving with only sats gets served without reaching anywhere else. The
@@ -95,4 +102,4 @@ between them, and a relay can spend what it receives straight upstream.
 | Cross-mint atomic swap | No working Cashu implementation. Blocks the price signal, not operation. |
 | First connection with no connectivity | A peer holding only sats and having no other link depends on some node choosing to offer a local swap. Nothing guarantees one will. |
 | Bulk holding | Amortizing expensive swaps means holding a large position in one issuer's vouchers, which is exactly the exposure the design otherwise tries to keep to one grant. |
-| Choosing an accepted set | A node has to decide which mints to take at all — accept or refuse, with no haircut to soften the choice. Neighbors and upstreams it already buys from are the safe ones; a distant hub buys reach at the cost of needing connectivity to verify. |
+| Choosing an accepted set | A node has to decide which mints to take at all — accept or refuse, with no haircut to soften the choice, and for each one accepted whether its proceeds are kept or burned ([tollgate-daemons.md](../core/tollgate-daemons.md#other-mints-keep-or-burn)). The set is the operator's explicit list — any mint, not only neighbors'. Each costs reachability; a kept one also costs credit. |

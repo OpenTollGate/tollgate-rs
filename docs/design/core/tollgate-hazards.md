@@ -134,8 +134,10 @@ scheme that does not depend on the lock surviving.
 
 Anything a node gives away per peer is multiplied by however many identities
 an attacker creates, and one machine can run all of them over the same physical
-link. Today that means the **minimum flow allowance**; it applies to anything
-added later that grants per peer.
+link. Today that means the **minimum flow allowance**, and `mintd`'s
+auto-accept, whose limit is for that reason an issue rate across everyone who
+asks ([tollgate-daemons.md](tollgate-daemons.md#auto-accept)); it applies to
+anything added later that grants per peer.
 
 Every such mechanism needs an aggregate cap across all unpaid peers, not only
 a per-peer one, plus ideally a cost to holding an identity — proof-of-work, a

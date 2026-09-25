@@ -16,23 +16,27 @@ exchange rates against money.
 
 ---
 
-## Most Of This Is Already Cashu
+## Who Serves It
 
-Buying a node's own vouchers needs no new protocol. It is a standard Cashu
-mint operation against the `mint_url` the node advertises:
+A node's mint, `mintd`, takes **no money**: it has no Lightning backend, and
+its melt burns vouchers rather than paying out
+([tollgate-daemons.md](../core/tollgate-daemons.md#mintd)). Everything that
+involves money goes through `merchantd`, which serves these endpoints, holds
+what it takes, and has `mintd` issue what it sells through standard NUT-04
+on a private listener where quotes are paid on creation. `mintd` exposes
+nothing but standard Cashu endpoints.
 
-| Operation | Standard |
+So the Cashu operations a buyer might expect map onto the two daemons:
+
+| Operation | Where |
 |---|---|
-| Ask what it costs, get an invoice | NUT-04 mint quote |
-| Pay and receive vouchers | NUT-04 mint |
-| Return vouchers for money | NUT-05 melt |
-| Discover what the mint supports | NUT-06 info |
+| Discover what the mint supports | `mintd`, NUT-06 info |
+| Pay and receive this node's vouchers | `merchantd`, `swap` below — it issues at `mintd` against the buyer's blinded outputs |
+| Return vouchers for money | `merchantd`, if it buys this node's paper back; `mintd` only burns |
+| Get free vouchers, where the node gives service away | `mintd`, NUT-04 — quotes on its public listener are paid on creation when auto-accept is on |
 
-A node that only sells its own vouchers therefore implements **nothing** from
-this document. Its Cashu mint is the whole market interface.
-
-The endpoints below exist only for what Cashu has no answer to: pricing and
-exchanging vouchers **across** mints.
+A node that sells nothing runs no `merchantd` and implements nothing from
+this document.
 
 ---
 
@@ -43,14 +47,13 @@ Served under a path prefix distinct from the payment protocol:
 ```
 payment    POST /tollgate/v1/exchange        GET /tollgate/v1/ws
 market     GET  /tollgate/market/v1/info
-           POST /tollgate/market/v1/quote
            POST /tollgate/market/v1/swap
 ```
 
-The market prefix **may be served by a different process, a different host,
-or a third party**. A node that wants to offer swaps without running a market
-itself points at somebody else's. Nothing in the payment path depends on it
-being reachable, or existing.
+The market prefix is served by `merchantd`, and **may be served by a
+different host or a third party**. A node that wants to offer swaps without
+running a market itself points at somebody else's. Nothing in the payment
+path depends on it being reachable, or existing.
 
 Encoding is JSON rather than the payment protocol's CBOR. These calls are
 infrequent, human-debuggable, and share a shape with the Cashu mint API that
@@ -66,48 +69,62 @@ touching any payment session.
 {
   "version": 1,
   "sells": ["https://gateway.example.com/mint"],
-  "buys":  ["https://neighbor.example.com/mint",
-            "https://hub.example.com/mint"],
-  "sat_swap": true,
-  "cross_mint_swap": false,
-  "quote_ttl_seconds": 30
+  "accepts": [{"mint": "https://mint.minibits.cash/Bitcoin", "unit": "sat",
+               "bytes_per_unit": 1000000},
+              {"mint": "https://usd-mint.example.com",       "unit": "usd",
+               "bytes_per_unit": 800000000}],
+  "cross_mint_swap": false
 }
 ```
 
-`sells` and `buys` are mint URLs, not units — the unit is fixed by the
-resource. `sat_swap` means it will trade vouchers against sat-denominated
-tokens. `cross_mint_swap` means it will trade one mint's vouchers for
-another's.
+`sells` lists mint URLs, not units — the unit is fixed by the resource.
+`accepts` is `merchantd`'s configured list of what it takes as payment, each
+mint with its unit (`sat`, `usd` or `eur`) and the **price in force**: how many
+bytes one unit of that mint's tokens buys right now (a `usd` or `eur` unit is a
+cent). A token from anything else is refused. `cross_mint_swap` means it will
+trade one mint's vouchers for another's.
 
-### `POST /tollgate/market/v1/quote`
+The price is per issuer: each `accepts` entry may carry its own price, so a
+sat from a mint the operator trusts can buy more than a sat from one it does
+not ([voucher-price-signal.md](voucher-price-signal.md)). Where a price is set
+in a currency other than the token's unit, `bytes_per_unit` already includes
+the current exchange rate, and moves when it does.
 
-Ask what it will give. A quote is an offer to trade, valid for
-`quote_ttl_seconds`, and creates no obligation on the asker.
-
-```json
-{ "give": {"mint": "sat-mint-url", "amount": 300},
-  "want": {"mint": "https://gateway.example.com/mint"} }
-```
-
-```json
-{ "quote_id": "…", "want_amount": 1048576, "expires_at": 1730000000 }
-```
-
-The response says how much of `want` the asker gets. Both directions are
-explicit, so the same endpoint covers buying, selling, and cross-mint trades.
+There is no list of what the market buys. `merchantd` buys its upstreams'
+vouchers as a customer of *their* markets, whenever `tollgated` needs them
+to fund a channel ([tollgate-daemons.md](../core/tollgate-daemons.md#funding-upstream)),
+which is nothing it advertises here.
 
 ### `POST /tollgate/market/v1/swap`
 
-Execute a quote. The asker sends the tokens it promised; the market returns
-the tokens it quoted.
+Buy at the price in force. The asker sends a payment token and blinded
+outputs for what it is buying; the market returns signatures on them.
 
 ```json
-{ "quote_id": "…", "tokens": ["cashuA…"] }
+{ "tokens": ["cashuA…"], "outputs": [ /* NUT-00 BlindedMessages */ ] }
 ```
 
 ```json
-{ "tokens": ["cashuA…"] }
+{ "signatures": [ /* NUT-00 BlindSignatures */ ] }
 ```
+
+Outputs rather than finished tokens, so that when the market is selling this
+node's own vouchers it can pass them straight to `mintd` against a paid NUT-04
+quote on its private listener, and never sees the secrets of what it sold
+([tollgate-daemons.md](../core/tollgate-daemons.md#the-sale-end-to-end)). For
+a cross-mint trade the outputs are for the mint being bought.
+
+The outputs must add up to exactly what the payment buys at the price in
+force, which the asker reads from `info`. If they do not — because the price
+or the exchange rate moved in between — the swap is refused before any money
+is taken, with the current price attached, and the asker rebuilds its outputs
+and tries again. A rate move costs a retry, never a wrong price.
+
+**There is no quote step, for now.** A quote would lock a price for a while:
+useful when a fiat-derived price must hold across several calls, for
+cross-mint trades whose amount depends on two issuers, and for selling future
+capacity. None of that is needed to sell today's capacity, so it is left as an
+extension that can be added beside `swap` without changing it.
 
 **Atomicity is unsolved.** As written, one side moves first and trusts the
 other to complete. Making this atomic across two mints needs a hash-locked
@@ -129,8 +146,9 @@ know what money is.
 or absent does not stop anyone delivering or paying. A peer that already
 holds vouchers is unaffected.
 
-**Constrained devices can skip it.** An ESP32 selling its own capacity runs
-the payment protocol and a Cashu mint. It implements none of this.
+**Constrained devices can skip it.** An ESP32 runs the payment protocol and a
+Cashu mint, and implements none of this. Its vouchers are sold by a merchant
+somewhere else, or it gives service away.
 
 **Market makers are not obliged to be routers.** Separating the endpoints
 means a party that wants to make markets in voucher paper can do so without
@@ -149,5 +167,6 @@ path.
 | Problem | Notes |
 |---|---|
 | Swap atomicity | One side moves first. A hash-locked construction needs both mints online and has no working implementation. |
-| Quote honesty | Nothing binds a market to honor a quote it issued. Exposure is one swap; reputation is the only correction, and it has the same observability problem as issuer default. |
+| Price honesty | Nothing binds a market to honor the price `info` showed. A market that swaps at a worse price than it advertised is caught only by the buyer, whose outputs no longer match. Exposure is one swap; reputation is the only correction, with the same observability problem as issuer default. |
+| Locked prices | No quote step: a price holds only as long as the rate behind it. Quotes, cross-mint pricing and forward sales are future extensions. |
 | Market discovery | How a peer finds a market at all, if the node it is talking to does not run one. Unspecified — a well-known path on the peer, a directory, or out-of-band. |

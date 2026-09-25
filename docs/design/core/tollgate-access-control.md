@@ -92,7 +92,7 @@ When delivery is blocked (`None` with a zero allowance), the node:
 3. **Allows control messages** — packets from the peer addressed to *this node* are delivered (this is how TollGate protocol messages reach the node)
 4. **Allows TollGate protocol messages** — the peer must be able to negotiate payment
 
-Traffic addressed to or sent by this node itself is **never blocked**, whatever the peer's access level. It may be measured, but blocking it would cut off the payment that restores delivery.
+Traffic addressed to or sent by this node itself — the TollGate protocol, and `mintd` and `merchantd` where they run beside `tollgated` ([tollgate-daemons.md](tollgate-daemons.md)) — is **never blocked**, whatever the peer's access level. It may be measured, but blocking it would cut off the payment that restores delivery.
 
 The implementation decides how to enforce this. In FIPS, this could be a delivery filter that checks the peer's access level before delivering. In a traditional IP network, this could be firewall rules.
 
@@ -193,7 +193,7 @@ A grant expiring while a channel is still funded is not a lapse. The peer stays 
 
 The access level governs **outbound delivery** — whether we forward, transit, or deliver to the peer. It is determined by the peer's payment to us.
 
-The reverse direction — whether we *accept* what the peer delivers to us — is not modeled by the access enum today. Locally-addressed packets from a peer are always accepted, and our payment to the peer (which gates whether we are buying from them) lives in the wallet/channel state, not in the access enum. This works in practice but leaves the asymmetric case (e.g., we paid them, but they stopped paying us) implicit.
+The reverse direction — whether we *accept* what the peer delivers to us — is not modeled by the access enum today. Locally-addressed packets from a peer are always accepted, and our payment to the peer (which gates whether we are buying from them) lives in the channel state, not in the access enum — `tollgated` holds no wallet ([tollgate-daemons.md](tollgate-daemons.md)). This works in practice but leaves the asymmetric case (e.g., we paid them, but they stopped paying us) implicit.
 
 A future revision may replace the enum with a directional model that captures both directions in a single type:
 

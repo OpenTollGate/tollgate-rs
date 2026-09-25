@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 450" font-family="monospace" font-size="12">
+  <style>
+    text          { fill: #e0e0e0; }
+    text.title    { font-size: 16px; font-weight: bold; }
+    text.subtitle { font-size: 12px; fill: #909090; }
+    text.nlabel   { font-size: 14px; font-weight: bold; }
+    text.nrole    { font-size: 10px; fill: #909090; }
+    text.annot    { font-size: 10px; fill: #909090; font-style: italic; }
+    text.alabel   { font-size: 11px; }
+    text.caption  { font-size: 11px; fill: #707080; font-style: italic; }
+
+    .bg           { fill: #0d1117; }
+    .callout      { fill: #151520; }
+    .node         { fill: #2e3a5e; stroke: #5080c0; }
+
+    @media (prefers-color-scheme: light) {
+      text          { fill: #1f2328; }
+      text.subtitle, text.nrole, text.plabel, text.annot, text.altlabel,
+      text.elabel, text.mdesc, text.tlabel { fill: #656d76; }
+      text.caption  { fill: #7c8186; }
+      line.sep, line.life { stroke: #d1d9e0; }
+      rect.alt      { stroke: #d1d9e0; }
+      .bg           { fill: #ffffff; }
+      .callout      { fill: #f6f8fa; }
+      .node, rect.node { fill: #ddf4ff; stroke: #0969da; }
+      rect.compute, rect.result { fill: #f6f8fa; }
+    }
+  </style>
+
+  <defs>
+    <marker id="dmB" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0,0 7,2.5 0,5" fill="#5080c0"/>
+    </marker>
+    <marker id="dmY" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0,0 7,2.5 0,5" fill="#d0a040"/>
+    </marker>
+    <marker id="dmYs" markerWidth="7" markerHeight="5" refX="0" refY="2.5" orient="auto">
+      <polygon points="7,0 0,2.5 7,5" fill="#d0a040"/>
+    </marker>
+    <marker id="dmG" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0,0 7,2.5 0,5" fill="#40a060"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="760" height="450" rx="8" class="bg"/>
+
+  <!-- Title -->
+  <text x="380" y="28" text-anchor="middle" class="title">TollGate Daemons</text>
+  <text x="380" y="46" text-anchor="middle" class="subtitle">tollgated holds nothing of value; merchantd holds all of it; mintd only issues and burns</text>
+
+  <!-- Outside parties -->
+  <text x="190" y="80" text-anchor="middle" class="nlabel">peers</text>
+  <text x="570" y="80" text-anchor="middle" class="nlabel">buyers</text>
+
+  <line x1="190" y1="88" x2="190" y2="130" stroke="#5080c0" stroke-width="1.5" marker-end="url(#dmB)"/>
+  <text x="200" y="113" class="annot">TollGate protocol (CBOR)</text>
+
+  <line x1="570" y1="88" x2="570" y2="130" stroke="#d0a040" stroke-width="1.5" marker-end="url(#dmY)"/>
+  <text x="580" y="113" class="annot">market endpoints (JSON)</text>
+
+  <!-- tollgated -->
+  <rect x="70" y="132" width="240" height="62" rx="8" class="node" stroke-width="2"/>
+  <text x="190" y="158" text-anchor="middle" class="nlabel">tollgated</text>
+  <text x="190" y="176" text-anchor="middle" class="nrole">protocol · channels · no value</text>
+
+  <!-- merchantd -->
+  <rect x="450" y="132" width="240" height="62" rx="8" class="node" stroke="#d0a040" stroke-width="2"/>
+  <text x="570" y="158" text-anchor="middle" class="nlabel">merchantd</text>
+  <text x="570" y="176" text-anchor="middle" class="nrole">prices · sells · buys · all value</text>
+
+  <!-- tollgated <-> merchantd -->
+  <line x1="318" y1="163" x2="442" y2="163" stroke="#d0a040" stroke-width="1.5" marker-start="url(#dmYs)" marker-end="url(#dmY)"/>
+  <text x="380" y="155" text-anchor="middle" class="alabel" fill="#d0a040">fund / deposit</text>
+  <text x="380" y="180" text-anchor="middle" class="annot">local socket</text>
+
+  <!-- tollgated -> mintd public -->
+  <line x1="190" y1="194" x2="190" y2="268" stroke="#5080c0" stroke-width="1.5" marker-end="url(#dmB)"/>
+  <text x="200" y="224" class="alabel" fill="#5080c0">settle (swap)</text>
+  <text x="200" y="240" class="alabel" fill="#5080c0">burn (melt)</text>
+
+  <!-- merchantd -> mintd private -->
+  <line x1="570" y1="194" x2="570" y2="268" stroke="#d0a040" stroke-width="1.5" marker-end="url(#dmY)"/>
+  <text x="580" y="224" class="alabel" fill="#d0a040">NUT-04: quotes</text>
+  <text x="580" y="240" class="alabel" fill="#d0a040">paid on creation</text>
+
+  <!-- mintd -->
+  <rect x="70" y="270" width="620" height="80" rx="8" class="node" stroke="#40a060" stroke-width="2"/>
+  <text x="380" y="298" text-anchor="middle" class="nlabel">mintd</text>
+  <text x="380" y="316" text-anchor="middle" class="nrole">one NUT API · keysets · spent-proof set · no Lightning</text>
+
+  <rect x="115" y="325" width="150" height="18" rx="3" class="callout" stroke="#5080c0" stroke-width="1"/>
+  <text x="190" y="338" text-anchor="middle" class="nrole">public listener</text>
+  <rect x="495" y="325" width="150" height="18" rx="3" class="callout" stroke="#d0a040" stroke-width="1" stroke-dasharray="4,2"/>
+  <text x="570" y="338" text-anchor="middle" class="nrole">private listener</text>
+
+  <!-- anyone -> mintd public -->
+  <line x1="190" y1="400" x2="190" y2="352" stroke="#40a060" stroke-width="1.5" marker-end="url(#dmG)"/>
+  <text x="190" y="415" text-anchor="middle" class="nlabel">anyone</text>
+  <text x="200" y="380" class="annot">standard Cashu (NUT-01…07, NUT-11)</text>
+
+  <!-- Caption -->
+  <text x="380" y="438" text-anchor="middle" class="caption">Same API on both listeners — the privilege is the address, not the call</text>
+</svg>

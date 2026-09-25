@@ -8,7 +8,7 @@ This document describes how `tollgate-net` is realized on a traditional IP netwo
 
 On a traditional IP network, peers connect over plain IP. There is no self-organizing mesh, no spanning tree. Peers are configured or discovered via simple mechanisms, and forwarding is handled by the OS IP stack.
 
-`tollgate-net` runs on each node, listens on default port **4747** for incoming TollGate sessions, and gates forwarded traffic with firewall rules.
+`tollgated`, built on `tollgate-net`, runs on each node, listens on default port **4747** for incoming TollGate sessions, and gates forwarded traffic with firewall rules.
 
 ---
 
@@ -100,10 +100,10 @@ The operator can also pre-configure known peers:
 
 ```yaml
 peers:
-  - pubkey: "02abc..."
+  "02abc...":
     endpoint: "192.168.1.1:4747"
 
-  - pubkey: "03def..."
+  "03def...":
     endpoint: "192.168.1.100:4747"
 ```
 
@@ -161,7 +161,7 @@ Access control is enforced via **firewall rules** (nftables, iptables, pf):
 
 | Access level | Firewall action |
 |-------------|----------------|
-| `None` | No TollGate session. Forwarded traffic from/to this peer's IP is shaped to the minimum flow allowance, or dropped if the allowance is zero. Traffic to the node itself (TollGate protocol, the mint) is always allowed. |
+| `None` | No TollGate session. Forwarded traffic from/to this peer's IP is shaped to the minimum flow allowance, or dropped if the allowance is zero. Traffic to the node itself (TollGate protocol, the mint, the market) is always allowed. |
 | `Active` | Allow forwarded traffic from/to this peer's IP. |
 | `Free` | Allow forwarded traffic from/to this peer's IP. |
 
@@ -171,7 +171,7 @@ Access control is enforced via **firewall rules** (nftables, iptables, pf):
 
 `set_shaping_rate()` translates to a **traffic-control class per peer** (`tc` HTB) on the interface facing it. The firewall decides *whether* a packet is forwarded; the qdisc decides *how fast*.
 
-Only **forwarded** traffic is classified. The firewall's forward hook marks the packets it forwards toward each peer's own address with that peer's class; a `tc` filter selects the class by the mark. (Counting is separate rules in the same hook; see below.) Traffic to and from the node itself — TollGate messages, the mint — never passes the forward hook, is never marked, and falls into an unshaped default class. Shaping it would throttle the payment that restores the peer's rate.
+Only **forwarded** traffic is classified. The firewall's forward hook marks the packets it forwards toward each peer's own address with that peer's class; a `tc` filter selects the class by the mark. (Counting is separate rules in the same hook; see below.) Traffic to and from the node itself — TollGate messages, the mint, the market — never passes the forward hook, is never marked, and falls into an unshaped default class. Shaping it would throttle the payment that restores the peer's rate.
 
 ```
 # Conceptual shaping for customer 02abc... (10.0.0.42) at 3.12 MiB/s:
