@@ -35,13 +35,14 @@ use cdk_spilman::configurable_host::{
 };
 use cdk_spilman::configurable_networking::fetch_and_cache_keysets;
 use cdk_spilman::{
-    ConfigurableClientHost, MemoryClientStorage, ReqwestClientNetworking, SpilmanBridge,
-    SpilmanClientBridge, SpilmanClientNetworking, SpilmanKeysetRefresher, SpilmanMintClient,
+    ChannelState, CloseError, ConfigurableClientHost, MemoryClientStorage, ReqwestClientNetworking,
+    SpilmanBridge, SpilmanClientBridge, SpilmanClientNetworking, SpilmanHost,
+    SpilmanKeysetRefresher, SpilmanMintClient, extract_nut00_error_code,
 };
 use tollgate_protocol::{ChannelId, PubKey, Signature};
 use tracing::debug;
 
-use super::{ChannelBackend, FundedChannel, MintNotAccepted, VerifiedChannel};
+use super::{CannotSettle, ChannelBackend, FundedChannel, MintNotAccepted, VerifiedChannel};
 
 /// Shortest expiry we will accept on a channel a peer funds to pay us.
 ///
@@ -606,11 +607,20 @@ impl ChannelBackend for SpilmanChannels {
 
     fn settle(&self, channel_id: ChannelId) -> Result<()> {
         let id = channel_id_to_hex(channel_id);
+        // The node retries settlements, so one that already went through has
+        // to read as done rather than as a failure to retry.
+        if self.server.host().get_channel_state(&id) == ChannelState::Closed {
+            return Ok(());
+        }
+        // No funding recorded for the channel is refused the same way every
+        // time, so it is not worth retrying.
+        let mint = self
+            .funding_mint(&id)
+            .map_err(|e| CannotSettle(format!("{id}: {e:#}")))?;
         // The swap goes to the mint that issued the funding. The bridge passes
         // that mint's URL through to each call, so the networking only has to
         // be the right kind.
-        let mint = self.funding_mint(&id)?;
-        match settlement_for(&self.config.mint_url, &mint) {
+        let closed = match settlement_for(&self.config.mint_url, &mint) {
             Settlement::Ours => {
                 let networking = MintNetworking::new(Arc::clone(&self.config.mint));
                 self.server
@@ -625,9 +635,39 @@ impl ChannelBackend for SpilmanChannels {
                 self.server
                     .execute_unilateral_close(&id, &networking, &networking)
             }
+        };
+        match closed {
+            Ok(_) | Err(CloseError::AlreadyClosed { .. }) => Ok(()),
+            Err(e) if close_error_is_permanent(&e) => {
+                Err(CannotSettle(format!("{id} in {mint}: {e}")).into())
+            }
+            Err(e) => Err(anyhow!("settle {id} in {mint}: {e:?}")),
         }
-        .map_err(|e| anyhow!("settle {id} in {mint}: {e:?}"))?;
-        Ok(())
+    }
+}
+
+/// Whether retrying a failed close could ever help.
+///
+/// A close the bridge refused before reaching the mint — a channel it has no
+/// funding for (404), one already gone (410), or one with no payment to claim
+/// (400) — is refused the same way every time. So is a mint's rejection of the
+/// proofs themselves (NUT-00 codes 10xxx and 11xxx): the channel state is
+/// corrupted or already spent. Everything else — the mint unreachable, a
+/// keyset still stale after the bridge's own refresh, storage — may pass.
+fn close_error_is_permanent(e: &CloseError) -> bool {
+    let mint_code = |v: &serde_json::Value| match v {
+        serde_json::Value::String(raw) => extract_nut00_error_code(raw),
+        other => extract_nut00_error_code(&other.to_string()),
+    };
+    let proof_error = |code: Option<u32>| code.is_some_and(|c| (10_000..12_000).contains(&c));
+    match e {
+        CloseError::ValidationFailed { status, .. } => matches!(status, 400 | 404 | 410),
+        CloseError::UnknownChannel { .. } => true,
+        CloseError::MintRejected { mint_error, .. } => proof_error(mint_code(mint_error)),
+        CloseError::MintRejectedAfterRetry { retry_error, .. } => {
+            proof_error(mint_code(retry_error))
+        }
+        _ => false,
     }
 }
 
@@ -1147,6 +1187,39 @@ mod tests {
             })
             .await
             .expect("settling");
+        }
+    }
+
+    #[test]
+    fn only_a_close_no_retry_can_fix_is_permanent() {
+        let permanent = [
+            CloseError::unknown_channel(),
+            CloseError::from_preparation_error(cdk_spilman::ClosePreparationError::not_found(
+                "unknown",
+            )),
+            CloseError::from_preparation_error(cdk_spilman::ClosePreparationError::bad_request(
+                "No payment",
+            )),
+            // Token already spent: the proofs are gone, whoever spent them.
+            CloseError::mint_rejected(serde_json::json!({"code": 11001, "detail": "spent"})),
+            CloseError::mint_rejected(serde_json::Value::String(
+                r#"{"code":10002,"detail":"bad proof"}"#.into(),
+            )),
+        ];
+        for e in &permanent {
+            assert!(close_error_is_permanent(e), "{e} should be permanent");
+        }
+
+        let transient = [
+            CloseError::mint_rejected(serde_json::Value::String("connection refused".into())),
+            CloseError::mint_rejected_after_retry(
+                serde_json::json!({"code": 12001}),
+                serde_json::json!({"code": 12001}),
+            ),
+            CloseError::storage_failed("disk full"),
+        ];
+        for e in &transient {
+            assert!(!close_error_is_permanent(e), "{e} should be retried");
         }
     }
 }

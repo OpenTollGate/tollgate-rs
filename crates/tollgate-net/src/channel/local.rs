@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use sha2::{Digest, Sha256};
 use tollgate_protocol::{ChannelId, PubKey, Signature};
 
-use super::{ChannelBackend, FundedChannel, VerifiedChannel};
+use super::{CannotSettle, ChannelBackend, FundedChannel, VerifiedChannel};
 use crate::identity::{Identity, verify_update};
 
 /// A channel backend that keeps the protocol's shape without its cryptography.
@@ -154,14 +154,15 @@ impl ChannelBackend for LocalChannels {
 
     fn settle(&self, channel_id: ChannelId) -> Result<()> {
         // Settling our own vouchers costs nothing but the service we already
-        // sold: it cancels our own claim. There is no mint round-trip to make.
+        // sold: it cancels our own claim. There is no mint round-trip to make,
+        // and a channel stays known once settled, so settling it again is Ok.
         if !self
             .known
             .lock()
             .expect("not poisoned")
             .contains(&channel_id)
         {
-            bail!("asked to settle a channel we have never seen");
+            return Err(CannotSettle("a channel we have never seen".into()).into());
         }
         Ok(())
     }
@@ -240,8 +241,21 @@ mod tests {
     }
 
     #[test]
-    fn settling_a_channel_we_never_saw_is_an_error() {
+    fn settling_a_channel_we_never_saw_is_an_error_not_worth_retrying() {
         let backend = backend();
-        assert!(backend.settle(ChannelId([9; 32])).is_err());
+        let error = backend.settle(ChannelId([9; 32])).expect_err("unknown");
+        assert!(error.downcast_ref::<CannotSettle>().is_some());
+    }
+
+    #[test]
+    fn settling_twice_is_harmless() {
+        // The node retries settlements, so a second call for a channel that
+        // did settle must not turn into an error it retries forever.
+        let backend = backend();
+        let funded = backend
+            .fund(peer(2), "https://b.example/mint", 1_000)
+            .expect("fund");
+        backend.settle(funded.channel_id).expect("first");
+        backend.settle(funded.channel_id).expect("second");
     }
 }

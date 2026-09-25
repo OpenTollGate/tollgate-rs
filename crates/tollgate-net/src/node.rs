@@ -23,6 +23,7 @@ use crate::adapter::ResourceAdapter;
 use crate::channel::{ChannelBackend, MintNotAccepted};
 use crate::control;
 use crate::identity::Identity;
+use crate::settle::{Backoff, Settler};
 use crate::wire::{self, Identify, Wire};
 
 /// How often the node samples its meters and ticks core.
@@ -31,6 +32,14 @@ use crate::wire::{self, Identify, Wire};
 /// its grant a peer can get before the shaper notices. It has to be well under
 /// the smallest grant window a payer can ask for.
 const TICK: Duration = Duration::from_millis(100);
+
+/// How long a shutdown keeps retrying settlements that fail.
+///
+/// Long enough to ride out a mint that blinks, short enough that stopping the
+/// node still feels like stopping it. What is left unsettled after this is
+/// abandoned: the channel is lost to its refund timelock, as it would be to a
+/// power cut.
+const SHUTDOWN_SETTLE_GRACE: Duration = Duration::from_secs(5);
 
 /// A peer the operator has said something about.
 #[derive(Debug, Clone)]
@@ -88,6 +97,8 @@ pub struct Node {
     sessions: Sessions,
     adapter: Arc<dyn ResourceAdapter>,
     channels: Arc<dyn ChannelBackend>,
+    /// Settlements, and the retries of the ones that fail.
+    settler: Settler,
     /// Outbound queue per connected peer.
     links: HashMap<PubKey, mpsc::Sender<Message>>,
     /// What the node is doing, republished each tick for the control socket.
@@ -115,11 +126,20 @@ impl Node {
             identity: config.identity.clone(),
             sessions,
             adapter,
+            settler: Settler::new(Arc::clone(&channels), Backoff::DEFAULT),
             channels,
             links: HashMap::new(),
             published: Default::default(),
             started: Instant::now(),
         }
+    }
+
+    /// Retry failed settlements on this schedule instead of the default.
+    ///
+    /// For tests, which cannot wait a second for the first retry.
+    pub fn with_settle_backoff(mut self, backoff: Backoff) -> Self {
+        self.settler.set_backoff(backoff);
+        self
     }
 
     /// The snapshot the control socket serves. Cheap to clone and lock-free to
@@ -226,13 +246,23 @@ impl Node {
     /// between the peer tearing our state down on a timer and doing it now.
     async fn wind_down(&mut self, done: &mpsc::Sender<Event>) {
         info!("shutting down: telling peers and settling");
+        // Before the shutdown's own settlements start, so they see the
+        // deadline too — and so a retry waiting out a long backoff wakes for
+        // one last try rather than holding the node open.
+        self.settler.begin_shutdown(SHUTDOWN_SETTLE_GRACE);
         for action in self.sessions.shutdown() {
             self.execute(action, done).await;
         }
 
         // Give the outbound queues a moment to drain before the sockets go.
         // Nothing is lost if this expires — the peer falls back to its timeout.
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        // The settlements get their grace period, and a little over for an
+        // attempt already under way when it ends.
+        tokio::join!(
+            tokio::time::sleep(Duration::from_millis(250)),
+            self.settler
+                .drain(SHUTDOWN_SETTLE_GRACE + Duration::from_secs(1)),
+        );
     }
 
     async fn on_wire(&mut self, event: Wire, done: &mpsc::Sender<Event>) {
@@ -435,12 +465,11 @@ impl Node {
                 // Worth logging: a channel settling far sooner than expected is
                 // what a rollover going wrong looks like from outside.
                 debug!(%peer, ?channel_id, "settling a channel");
-                let channels = Arc::clone(&self.channels);
-                tokio::task::spawn_blocking(move || {
-                    if let Err(e) = channels.settle(channel_id) {
-                        warn!(%peer, error = format!("{e:#}"), "could not settle a channel");
-                    }
-                });
+                // Core has already let the channel go, so this is the only
+                // place a failed settlement can be tried again, and the settler
+                // keeps trying. No deadline yet: a channel's refund expiry is
+                // the one to pass here once the backend reports it.
+                self.settler.settle(peer, channel_id, None);
             }
 
             Action::DropPeer { peer } => {

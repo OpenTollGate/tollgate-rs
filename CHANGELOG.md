@@ -124,6 +124,13 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 - Payment rides upstream `cdk-spilman` rather than a fork, now that it
   round-trips a custom currency unit, and every cdk crate is on v0.18.1.
 
+- A channel settlement that fails is retried rather than logged and forgotten,
+  so a mint that is briefly unreachable no longer costs the channel to its
+  refund timelock. The node retries after 1 s, doubling to 5 min, until it
+  succeeds or the node stops; a shutdown gives what is outstanding 5 s. A
+  backend reports a failure no retry can fix as `CannotSettle`, and settling
+  a channel that already settled succeeds.
+
 ### Removed
 
 - `tollgate-pricing.md`, replaced by `tollgate-hazards.md`.

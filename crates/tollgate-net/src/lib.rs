@@ -19,6 +19,7 @@
 //! - [`speedtest`] — a byte source on the mesh, so a client can measure the
 //!   path it paid for rather than the path to somebody's CDN.
 //! - [`node`] — the driver that connects all of it to core.
+//! - [`settle`] — settling channels, and retrying the settlements that fail.
 //! - [`config`] — the YAML the operator writes.
 //! - [`control`] — a local socket publishing what the node is doing, which is
 //!   what `tolltop` reads.
@@ -33,6 +34,7 @@ pub mod identity;
 pub mod market;
 pub mod mint;
 pub mod node;
+pub mod settle;
 pub mod speedtest;
 pub mod wallet;
 pub mod wire;
