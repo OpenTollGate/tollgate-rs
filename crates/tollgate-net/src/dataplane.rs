@@ -82,13 +82,22 @@ async fn run(stream: TcpStream, peer: PubKey, adapter: Arc<Loopback>) -> Result<
         let filler = vec![0u8; CHUNK];
         let mut ticker = tokio::time::interval(WRITE_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut credited = tokio::time::Instant::now();
 
         loop {
             ticker.tick().await;
 
-            // Everything the shaper will release this interval. `take_allowance`
-            // handles the accounting; here we only move the bytes.
-            let mut owed = writer_adapter.take_allowance(peer, WRITE_INTERVAL.as_millis() as u64);
+            // Everything the shaper will release for the time that actually
+            // passed. A writer that wakes late is owed the late part too — the
+            // bucket's burst cap is what bounds that, not the nominal interval.
+            // Whole milliseconds are credited and the remainder carried, so
+            // truncation never leaks rate.
+            let elapsed_ms = credited.elapsed().as_millis() as u64;
+            credited += Duration::from_millis(elapsed_ms);
+
+            // `take_allowance` handles the accounting; here we only move the
+            // bytes.
+            let mut owed = writer_adapter.take_allowance(peer, elapsed_ms);
             while owed > 0 {
                 let n = owed.min(CHUNK as u64) as usize;
                 if tx.write_all(&filler[..n]).await.is_err() {
