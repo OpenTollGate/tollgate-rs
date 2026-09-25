@@ -13,6 +13,11 @@
 //! A channel is opened well before it is needed (default: at 80% of the one in
 //! use) precisely so that `next` is ready by the time a purchase overflows
 //! `active`, and the overflow can be signed across both rather than stalling.
+//!
+//! A channel also has an expiry, after which we can reclaim it through the
+//! refund path. A slowly drawn channel reaches that long before it fills, so
+//! it is replaced when it enters the safety margin before expiry as well, and
+//! abandoned for its replacement rather than drained.
 
 use tollgate_protocol::ChannelId;
 
@@ -156,16 +161,25 @@ pub struct ChannelBuyer {
     /// Cumulative units signed **on this channel**. Monotonic, and meaningless
     /// against any other channel.
     pub cumulative: u64,
+    /// When we can reclaim it, or `None` if it never expires.
+    pub expires_at: Option<Millis>,
 }
 
 impl ChannelBuyer {
     /// A freshly funded channel, nothing signed on it yet.
-    pub fn new(id: ChannelId, capacity: u64) -> Self {
+    pub fn new(id: ChannelId, capacity: u64, expires_at: Option<Millis>) -> Self {
         Self {
             id,
             capacity,
             cumulative: 0,
+            expires_at,
         }
+    }
+
+    /// Whether `now` is within `margin_ms` of the channel's expiry.
+    pub fn expiring(&self, now: Millis, margin_ms: u64) -> bool {
+        self.expires_at
+            .is_some_and(|expiry| now + margin_ms >= expiry)
     }
 
     /// Units that can still be signed onto this channel.
@@ -211,6 +225,18 @@ pub struct Purchase {
     pub forfeited: u64,
     /// Why the buyer acted, for the operator's benefit.
     pub trigger: Trigger,
+}
+
+/// Why a channel is being replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RolloverReason {
+    /// It is filling up. The replacement grows: a peer that fills one channel
+    /// is likely to fill the next.
+    Capacity,
+    /// It entered the safety margin before its expiry without filling. The
+    /// replacement stays the same size, since growing a channel that is not
+    /// being used up would only lock more away.
+    Expiry,
 }
 
 /// What prompted a purchase.
@@ -332,8 +358,8 @@ impl Buyer {
     }
 
     /// Record a channel we have funded but the peer has not yet confirmed.
-    pub fn funded(&mut self, id: ChannelId, capacity: u64) {
-        self.pending = Some(ChannelBuyer::new(id, capacity));
+    pub fn funded(&mut self, id: ChannelId, capacity: u64, expires_at: Option<Millis>) {
+        self.pending = Some(ChannelBuyer::new(id, capacity, expires_at));
     }
 
     /// The peer confirmed the channel we funded.
@@ -348,7 +374,11 @@ impl Buyer {
         // determined; trust it over what we derived locally.
         channel.id = id;
 
-        if self.active.is_none() {
+        // A channel already drained to its capacity has nothing to wait
+        // behind: the provider settled it the moment it filled, so a purchase
+        // that still named it — even topped to exactly its capacity — would be
+        // refused in full, and refused again on every re-buy.
+        if self.active.is_none_or(|active| active.exhausted()) {
             self.active = Some(channel);
         } else {
             self.next = Some(channel);
@@ -395,6 +425,67 @@ impl Buyer {
         // Widened rather than saturated: saturating either side would make a
         // large channel look permanently past its threshold.
         (active.cumulative as u128) * 100 >= (active.capacity as u128) * (threshold_pct as u128)
+    }
+
+    /// Whether to open a replacement for the channel in use, and why.
+    ///
+    /// [`Self::needs_rollover`], plus the second clock a channel runs on: past
+    /// its expiry we can reclaim it, so the receiver has to settle it before
+    /// then, and it has to be replaced before the receiver does. A channel drawn
+    /// slowly enough reaches that long before it fills — 100 KB/s takes about
+    /// three hours through 1 GiB, three times a one-hour TTL.
+    ///
+    /// `margin_ms` is the safety margin, from
+    /// [`NodePolicy::safety_margin_ms`](crate::config::NodePolicy::safety_margin_ms).
+    pub fn rollover_due(
+        &self,
+        threshold_pct: u8,
+        now: Millis,
+        margin_ms: u64,
+    ) -> Option<RolloverReason> {
+        if self.needs_rollover(threshold_pct) {
+            return Some(RolloverReason::Capacity);
+        }
+        if self.next.is_some() || self.pending.is_some() {
+            return None;
+        }
+        self.active
+            .filter(|active| active.expiring(now, margin_ms))
+            .map(|_| RolloverReason::Expiry)
+    }
+
+    /// Stop using a channel that is about to expire.
+    ///
+    /// Inside the safety margin a confirmed replacement takes over at once,
+    /// whatever is left on the old channel: the receiver is about to settle it,
+    /// and anything signed on it after that is refused. Without a replacement
+    /// the old channel stays in use until `settle_lead_ms` before expiry, when
+    /// the receiver settles it — and from then there is nothing to buy on until
+    /// the replacement is confirmed.
+    ///
+    /// Returns the channel given up, which is the receiver's to settle, not
+    /// ours.
+    pub fn retire_expiring(
+        &mut self,
+        now: Millis,
+        margin_ms: u64,
+        settle_lead_ms: u64,
+    ) -> Option<ChannelId> {
+        let active = self.active?;
+        if !active.expiring(now, margin_ms) {
+            return None;
+        }
+        if self.next.is_some() {
+            self.active = self.next.take();
+        } else if active.expiring(now, settle_lead_ms) {
+            self.active = None;
+        } else {
+            return None;
+        }
+        // The undo step describes channels that are no longer both there, so
+        // a late rejection must not bring the retired one back.
+        self.prior = None;
+        Some(active.id)
     }
 
     /// Units of the grant in force still unspent from our side's point of view

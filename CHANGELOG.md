@@ -151,6 +151,33 @@ Nothing has been released yet. Everything below is on `master` and will ship as
   with no compatibility shim: a node on this version cannot fund a channel to a
   node on an earlier one, whose mint issues nothing for the asking.
 
+- Channels track their expiry. The funder rolls a channel over when it enters
+  the safety margin before expiry (`max(60 s, 2 × max_window_ms)`) as well as
+  at the capacity threshold, and the receiver settles it half that margin
+  before expiry, so a slowly drawn channel can no longer outlive its TTL and
+  be reclaimed with earnings on it. The TTL is `channels.ttl_seconds` (default
+  one hour) instead of a hard-coded two, and a receiver refuses a channel
+  expiring sooner than half its own TTL rather than a fixed hour — so a node
+  on an earlier commit, which wants an hour left, refuses channels funded at
+  the new one-hour default.
+  `channels.safety_margin_seconds` (default 60) is the margin's floor, and
+  `ttl_seconds` has to be at least twice the margin. A settlement that fails
+  is retried until the channel's expiry and no further, since past it the
+  funder can reclaim the channel anyway.
+
+- Channels start at `channels.initial_capacity` (now 1 GiB) and grow by
+  `capacity_growth_factor` (default 2.0) on each rollover forced by use,
+  clamped to `min_capacity` (128 MiB) and `max_capacity` (16 GiB); a rollover
+  forced by expiry keeps the size. The node's mint and market now cap one swap
+  at `max_capacity` rather than `initial_capacity`.
+
+- The market sells a capacity that is not a whole number of units. It checks
+  a payment against the capacity's price rounded up to a whole unit, the rule
+  the buyer pays by, instead of requiring outputs worth exactly
+  `paid × bytes_per_unit` — which refused 1 GiB at a megabyte a sat (1074 sat)
+  in full. A buyer now reports the market's refusal rather than a JSON parse
+  error.
+
 ### Removed
 
 - `tollgate-pricing.md`, replaced by `tollgate-hazards.md`.

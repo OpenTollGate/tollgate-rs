@@ -215,6 +215,7 @@ async fn fund_and_verify(
         accepted_mints: vec!["http://127.0.0.1:1".into()],
         secret_key_hex: buyer_id.secret_hex(),
         wallet: held,
+        ttl_seconds: 3_600,
     })
     .expect("the buyer's channels");
 
@@ -225,6 +226,7 @@ async fn fund_and_verify(
         accepted_mints: vec![seller.url.clone()],
         secret_key_hex: seller_id.secret_hex(),
         wallet: buyer_wallet(&seller_dir, 5).await,
+        ttl_seconds: 3_600,
     })
     .expect("the seller's channels");
 

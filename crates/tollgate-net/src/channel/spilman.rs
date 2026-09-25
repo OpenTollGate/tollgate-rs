@@ -53,21 +53,19 @@ mod funding;
 
 use funding::Funding;
 
-/// Shortest expiry we will accept on a channel a peer funds to pay us.
+/// Shortest expiry we will accept on a channel a peer funds to pay us, given
+/// the TTL we fund our own with.
 ///
-/// The refund timelock is what a payer would rely on if the receiver vanished,
-/// so a receiver insisting on a floor is insisting the payer keep its own
-/// protection.
-const MIN_EXPIRY_SECONDS: u64 = 3_600;
-
-/// How long a channel *we* fund stays refundable to us.
-///
-/// Comfortably longer than the floor we ourselves require, because time passes
-/// between choosing the expiry and the peer checking it: the vouchers have to
-/// be acquired, the channel funded, the Accept sent and the funding verified.
-/// Funding at exactly the minimum means every one of those seconds counts
-/// against us, and the peer refuses a channel that was valid when it was built.
-const CHANNEL_TTL_SECONDS: u64 = 2 * MIN_EXPIRY_SECONDS;
+/// Half of it. The floor is there so a channel arrives with room to be used
+/// and then settled before the peer can reclaim it — we settle ahead of expiry,
+/// and a channel that arrived already close to it would have to be settled
+/// almost at once. It sits well under the TTL because time passes between a
+/// funder choosing the expiry and us checking it: the vouchers have to be
+/// bought, the channel funded, the Accept sent and the funding verified. A
+/// floor equal to the TTL would refuse a peer configured exactly like us.
+fn min_expiry_seconds(ttl_seconds: u64) -> u64 {
+    ttl_seconds / 2
+}
 
 /// Largest single proof amount used when funding.
 ///
@@ -106,6 +104,10 @@ pub struct SpilmanConfig {
     /// mints at a peer pass through here on their way into a channel, so a
     /// purchase interrupted between the two is not lost.
     pub wallet: crate::wallet::Wallet,
+    /// How long a channel we fund stays ours alone to spend, in seconds. Past
+    /// it, the refund path opens and we can reclaim what the peer has not
+    /// settled.
+    pub ttl_seconds: u64,
 }
 
 /// Where a node's money is, and in what.
@@ -182,7 +184,7 @@ impl SpilmanChannels {
         let host = ConfigurableHost::new(
             ConfigurableHostConfig {
                 mints,
-                min_expiry_seconds: MIN_EXPIRY_SECONDS,
+                min_expiry_seconds: min_expiry_seconds(config.ttl_seconds),
                 pricing_scale: 1,
                 storage: StorageConfig::Memory,
                 // A pricing entry with **nothing priced**. The amount due is a
@@ -272,7 +274,8 @@ impl SpilmanChannels {
 
 /// Seconds since the epoch, for the channel's refund timelock.
 ///
-/// The only wall-clock read in the crate. Everything the protocol measures is
+/// One of the two wall-clock reads in the crate, the other being where an
+/// expiry is put on the node's clock. Everything the protocol measures is
 /// relative and comes from the host's monotonic clock.
 fn now_seconds() -> u64 {
     SystemTime::now()
@@ -392,13 +395,17 @@ impl SpilmanChannels {
             .public_key()
             .to_hex();
 
+        let expiry = unique_expiry(
+            &self.last_expiry,
+            now_seconds().saturating_add(self.config.ttl_seconds),
+        );
         let client = self.client.lock().expect("not poisoned");
         let opened = client
             .open_channel_from_token(
                 token,
                 &hex::encode(peer.0),
                 &ours,
-                unique_expiry(&self.last_expiry, now_seconds() + CHANNEL_TTL_SECONDS),
+                expiry,
                 keyset_info,
                 MAX_PROOF_AMOUNT,
             )
@@ -411,6 +418,7 @@ impl SpilmanChannels {
         Ok(FundedChannel {
             channel_id: channel_id_from_hex(&opened.channel_id)?,
             capacity: opened.capacity,
+            expiry: Some(expiry),
             funding: Funding::from_opening(&opening)?.encode(),
         })
     }
@@ -441,6 +449,10 @@ impl ChannelBackend for SpilmanChannels {
 
     fn verify(&self, _peer: PubKey, funding: &[u8]) -> Result<VerifiedChannel> {
         let funding = Funding::decode(funding)?;
+        // The refund timelock the funder chose, as the funding's terms carry
+        // it. The receiver below refuses one too soon; what it accepts, we have
+        // to settle before.
+        let expiry = funding.terms.expiry_timestamp;
 
         // A keyset is only acceptable once we hold its keys, and we cannot know
         // in advance which of our accepted mints a peer will fund against — or
@@ -471,6 +483,7 @@ impl ChannelBackend for SpilmanChannels {
             channel_id: channel_id_from_hex(&opening.channel_id)?,
             capacity: funded.capacity,
             mint_url: funding.terms.mint,
+            expiry: Some(expiry),
         })
     }
 
@@ -728,6 +741,18 @@ mod tests {
     }
 
     #[test]
+    fn a_peer_configured_like_us_clears_our_expiry_floor() {
+        // With room to spare for buying vouchers and a round trip, and still
+        // far enough from expiry to use the channel before settling it.
+        for ttl in [600, 3_600, 7_200] {
+            assert!(
+                min_expiry_seconds(ttl) < ttl,
+                "a TTL of {ttl} s would be refused"
+            );
+        }
+    }
+
+    #[test]
     fn a_signature_of_the_wrong_length_is_rejected() {
         assert!(signature_from_hex(&hex::encode([0u8; 64])).is_ok());
         assert!(signature_from_hex(&hex::encode([0u8; 32])).is_err());
@@ -815,6 +840,7 @@ mod tests {
                 accepted_mints,
                 secret_key_hex: hex::encode(secret),
                 wallet,
+                ttl_seconds: 3_600,
             })
             .expect("build the backend");
             (backend, dir)

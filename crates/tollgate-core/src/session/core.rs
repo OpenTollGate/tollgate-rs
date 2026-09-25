@@ -17,7 +17,7 @@ use tollgate_protocol::{
 
 use crate::access::AccessLevel;
 use crate::action::Action;
-use crate::buyer::{self, BuyerPolicy, Demand, WindowBounds};
+use crate::buyer::{self, BuyerPolicy, Demand, RolloverReason, WindowBounds};
 use crate::config::{NodePolicy, PeerPolicy};
 use crate::event::Event;
 use crate::grant::{self, Admission, Verdict};
@@ -86,6 +86,7 @@ impl Sessions {
                 out.push(Action::SettleChannel {
                     peer: *peer,
                     channel_id: channel.id,
+                    expires_at: channel.expires_at,
                 });
             }
 
@@ -119,19 +120,31 @@ impl Sessions {
                 peer,
                 channel_id,
                 capacity,
+                expires_at,
                 funding,
-            } => self.on_outgoing_funded(peer, channel_id, capacity, funding, now, &mut out),
+            } => {
+                if let Some(session) = self.peers.get_mut(&peer) {
+                    // Nothing is signed on it until the peer confirms it
+                    // verified the funding — a grant signed here could
+                    // otherwise be against a channel that never opens.
+                    session.buyer.funded(channel_id, capacity, expires_at);
+                }
+                self.on_outgoing_funded(peer, funding, now, &mut out)
+            }
             Event::IncomingFundingVerified {
                 peer,
                 channel_id,
                 capacity,
+                expires_at,
                 mint_url,
             } => {
                 // A channel is funded in a mint we list, or not at all: the
                 // mint is the credit risk we took on deliberately. Checked here
                 // rather than trusted to the backend, so it holds for every one.
                 if self.node.accepted_mints.contains(&mint_url) {
-                    self.on_incoming_verified(peer, channel_id, capacity, now, &mut out);
+                    self.on_incoming_verified(
+                        peer, channel_id, capacity, expires_at, now, &mut out,
+                    );
                 } else {
                     self.reject(peer, ReasonCode::MintNotAccepted, &mut out);
                 }
@@ -186,6 +199,7 @@ impl Sessions {
                     if let Some(session) = self.peers.get_mut(&peer) {
                         session.grant.expire_if_due(now);
                     }
+                    self.settle_expiring(peer, now, &mut out);
                     self.refresh(peer, now, &mut out);
                     self.poll_buyer(peer, now, &mut out);
                     self.poll_rollover(peer, now, &mut out);
@@ -313,6 +327,7 @@ impl Sessions {
                 self.poll_buyer(peer, now, out);
             }
             Message::ChannelClose(m) => {
+                let expires_at = self.expiry_of(peer, m.channel_id);
                 out.push(Action::Send {
                     peer,
                     msg: Message::CloseAck(tollgate_protocol::CloseAck {
@@ -323,12 +338,14 @@ impl Sessions {
                 out.push(Action::SettleChannel {
                     peer,
                     channel_id: m.channel_id,
+                    expires_at,
                 });
             }
             Message::CloseAck(m) => {
                 out.push(Action::SettleChannel {
                     peer,
                     channel_id: m.channel_id,
+                    expires_at: self.expiry_of(peer, m.channel_id),
                 });
             }
             Message::Reject(_) => {
@@ -403,10 +420,12 @@ impl Sessions {
         let mint = m.accepted_mints.first().cloned();
         match mint {
             Some(mint_url) if !m.no_charge && self.buyer_policy.max_rate > 0 => {
+                // Start small: a new peering may not last. The capacity grows
+                // as rollovers show that it does.
                 out.push(Action::FundChannel {
                     peer,
                     mint_url,
-                    capacity: self.node.initial_channel_capacity,
+                    capacity: self.node.first_channel_capacity(),
                 });
             }
             _ => {
@@ -427,8 +446,6 @@ impl Sessions {
     fn on_outgoing_funded(
         &mut self,
         peer: PubKey,
-        channel_id: tollgate_protocol::ChannelId,
-        capacity: u64,
         funding: Vec<u8>,
         now: Millis,
         out: &mut Vec<Action>,
@@ -437,11 +454,7 @@ impl Sessions {
             return;
         };
 
-        // Nothing is signed on it until the peer confirms it verified the
-        // funding — a grant signed here could otherwise be against a channel
-        // that never opens.
         let replacing = session.buyer.active().map(|c| c.id);
-        session.buyer.funded(channel_id, capacity);
 
         out.push(Action::Send {
             peer,
@@ -475,6 +488,7 @@ impl Sessions {
         peer: PubKey,
         channel_id: tollgate_protocol::ChannelId,
         capacity: u64,
+        expires_at: Option<Millis>,
         now: Millis,
         out: &mut Vec<Action>,
     ) {
@@ -491,7 +505,7 @@ impl Sessions {
             .iter()
             .find(|c| c.id != channel_id)
             .map(|c| c.id);
-        session.grant.open_channel(channel_id, capacity);
+        session.grant.open_channel(channel_id, capacity, expires_at);
         session.phase = Phase::Established;
 
         // The party that verified the funding is the party that will be paid on
@@ -561,8 +575,15 @@ impl Sessions {
                 // is the reason channels exist at all.
                 let done: Vec<_> = session.grant.exhausted_channels().collect();
                 for channel_id in done {
-                    session.grant.close_channel(channel_id);
-                    out.push(Action::SettleChannel { peer, channel_id });
+                    let expires_at = session
+                        .grant
+                        .close_channel(channel_id)
+                        .and_then(|c| c.expires_at);
+                    out.push(Action::SettleChannel {
+                        peer,
+                        channel_id,
+                        expires_at,
+                    });
                 }
             }
             Verdict::Reject {
@@ -636,8 +657,15 @@ impl Sessions {
         for &channel_id in channels {
             let failures = session.grant.record_failure(channel_id);
             if failures.is_some_and(|n| n >= grant::MAX_VERIFICATION_FAILURES) {
-                session.grant.close_channel(channel_id);
-                out.push(Action::SettleChannel { peer, channel_id });
+                let expires_at = session
+                    .grant
+                    .close_channel(channel_id)
+                    .and_then(|c| c.expires_at);
+                out.push(Action::SettleChannel {
+                    peer,
+                    channel_id,
+                    expires_at,
+                });
             }
         }
         self.refresh(peer, now, out);
@@ -672,6 +700,16 @@ impl Sessions {
             return;
         }
 
+        // A channel inside the safety margin is about to be settled by the
+        // peer, so nothing more is signed on it once there is somewhere else to
+        // go — and nothing at all once the peer is due to settle it.
+        let max_window_ms = offer.bounds.max_ms;
+        session.buyer.retire_expiring(
+            now,
+            self.node.safety_margin_ms(max_window_ms),
+            self.node.settle_lead_ms(max_window_ms),
+        );
+
         // A unit we download draws one from our grant; a unit we upload draws
         // the peer's multiplier. Buying for the download alone would leave us
         // shaped for the difference, which is exactly what the surcharge is for.
@@ -686,6 +724,8 @@ impl Sessions {
             return;
         };
 
+        // The channel a purchase retires is always the one it started on.
+        let drained = session.buyer.active();
         let retired = session.buyer.record(purchase, now);
 
         // One message, however many channels it draws from: the grant is their
@@ -706,38 +746,100 @@ impl Sessions {
         // keeps the issuer's spent-proof set bounded, which is the whole reason
         // channels exist.
         if let Some(channel_id) = retired {
-            out.push(Action::SettleChannel { peer, channel_id });
+            out.push(Action::SettleChannel {
+                peer,
+                channel_id,
+                expires_at: drained
+                    .filter(|c| c.id == channel_id)
+                    .and_then(|c| c.expires_at),
+            });
         }
     }
 
-    /// Open a replacement channel when the one we fund approaches exhaustion.
+    /// Open a replacement channel when the one we fund approaches exhaustion,
+    /// or enters the safety margin before its expiry.
     ///
     /// Only for the direction we fund: rollover is initiated by the funder
     /// alone, since only the party putting up new funds decides when.
-    fn poll_rollover(&mut self, peer: PubKey, _now: Millis, out: &mut Vec<Action>) {
+    fn poll_rollover(&mut self, peer: PubKey, now: Millis, out: &mut Vec<Action>) {
         let Some(session) = self.peers.get(&peer) else {
             return;
         };
-        if !session
-            .buyer
-            .needs_rollover(self.node.rollover_threshold_pct)
-        {
-            return;
-        }
         let Some(offer) = session.offer.as_ref() else {
+            return;
+        };
+        // The margin is reckoned from the peer's window range, not ours: it is
+        // the receiver who has to settle in time, so both ends of the channel
+        // use the receiver's numbers and arrive at the same one.
+        let margin_ms = self.node.safety_margin_ms(offer.bounds.max_ms);
+        let Some(reason) =
+            session
+                .buyer
+                .rollover_due(self.node.rollover_threshold_pct, now, margin_ms)
+        else {
+            return;
+        };
+        let Some(active) = session.buyer.active() else {
             return;
         };
         let Some(mint_url) = offer.accepted_mints.first().cloned() else {
             return;
         };
 
-        // `needs_rollover` stays false from here until the peer confirms, so
+        // Only a channel that filled up earns a bigger successor. One that
+        // merely ran out of time was big enough, and growing it would lock more
+        // away for the same traffic.
+        let capacity = match reason {
+            RolloverReason::Capacity => self.node.grown_capacity(active.capacity),
+            RolloverReason::Expiry => self.node.clamp_capacity(active.capacity),
+        };
+
+        // `rollover_due` stays quiet from here until the peer confirms, so
         // this cannot fire again and fund a channel on every tick.
         out.push(Action::FundChannel {
             peer,
             mint_url,
-            capacity: self.node.initial_channel_capacity,
+            capacity,
         });
+    }
+
+    /// Settle every channel this peer pays us on that is about to expire.
+    ///
+    /// Past its expiry the peer can reclaim the whole channel through the
+    /// refund path, including what it has already paid us on it, so this is
+    /// the receiver protecting earnings it already has. Only the receiver
+    /// settles; the funder rolls over earlier and has moved on by now.
+    fn settle_expiring(&mut self, peer: PubKey, now: Millis, out: &mut Vec<Action>) {
+        let lead_ms = self.node.settle_lead_ms(self.node.grants.max_window_ms);
+        let Some(session) = self.peers.get_mut(&peer) else {
+            return;
+        };
+        let due: Vec<_> = session.grant.expiring_channels(now, lead_ms).collect();
+        for channel_id in due {
+            let expires_at = session
+                .grant
+                .close_channel(channel_id)
+                .and_then(|c| c.expires_at);
+            out.push(Action::SettleChannel {
+                peer,
+                channel_id,
+                expires_at,
+            });
+        }
+    }
+
+    /// When a channel with this peer expires, whichever of us funded it, as
+    /// far as we still know it.
+    fn expiry_of(&self, peer: PubKey, channel_id: tollgate_protocol::ChannelId) -> Option<Millis> {
+        let session = self.peers.get(&peer)?;
+        if let Some(channel) = session.grant.channel(channel_id) {
+            return channel.expires_at;
+        }
+        [session.buyer.active(), session.buyer.next_channel()]
+            .into_iter()
+            .flatten()
+            .find(|c| c.id == channel_id)
+            .and_then(|c| c.expires_at)
     }
 
     // -----------------------------------------------------------------------

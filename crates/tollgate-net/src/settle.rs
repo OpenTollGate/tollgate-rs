@@ -10,7 +10,8 @@
 //! Each settlement runs as its own task: attempt, and on a transient failure
 //! wait out an exponential [`Backoff`] and attempt again, until it succeeds,
 //! the backend says no retry can help ([`CannotSettle`]), or a deadline
-//! passes. The node's shutdown is one such deadline: it wakes every waiting
+//! passes. A channel's refund expiry is one such deadline, carried on the
+//! action. The node's shutdown is another: it wakes every waiting
 //! retry, gives it a short grace period, and abandons what is left rather than
 //! holding the process open.
 //!
@@ -109,9 +110,9 @@ impl Settler {
 
     /// Settle `channel_id`, retrying until it succeeds.
     ///
-    /// `deadline` is the point past which retrying is pointless. Nothing
-    /// supplies one yet; a channel's refund expiry is the natural one, since
-    /// past it the funder can take the money back.
+    /// `deadline` is the point past which retrying is pointless: the node
+    /// passes the channel's refund expiry, since past it the funder can take
+    /// the money back. `None` for a channel that never expires.
     ///
     /// A channel already being settled is left to the attempt in progress.
     pub(crate) fn settle(

@@ -5,6 +5,7 @@
 //! documented economics no longer describe what the code does.
 
 use alloc::vec;
+use alloc::vec::Vec;
 
 use tollgate_protocol::{ChannelId, ChannelUpdate, ReasonCode, Signature};
 
@@ -35,7 +36,7 @@ fn admission(policy: &GrantPolicy) -> Admission<'_> {
 /// A provider that recognises one channel from this peer.
 fn opened(capacity: u64) -> GrantState {
     let mut state = GrantState::new();
-    state.open_channel(channel(1), capacity);
+    state.open_channel(channel(1), capacity, None);
     state
 }
 
@@ -192,8 +193,8 @@ fn the_grant_is_the_combined_increase_across_every_channel() {
     // The design's rollover example: the channel in use is topped to its
     // capacity and the remainder starts the replacement, in one purchase.
     let mut state = GrantState::new();
-    state.open_channel(channel(1), 1_000_000);
-    state.open_channel(channel(2), 1_000_000);
+    state.open_channel(channel(1), 1_000_000, None);
+    state.open_channel(channel(2), 1_000_000, None);
 
     buy(&mut state, &[update(1, 800_000)], 2_000, Millis(0));
     assert_eq!(state.authorized(), 800_000);
@@ -221,8 +222,8 @@ fn a_purchase_is_refused_in_full_if_any_update_is_bad() {
     // Applying some of them would leave the grant a different size from the one
     // the payer asked for and thought it was paying for.
     let mut state = GrantState::new();
-    state.open_channel(channel(1), 1_000_000);
-    state.open_channel(channel(2), 1_000_000);
+    state.open_channel(channel(1), 1_000_000, None);
+    state.open_channel(channel(2), 1_000_000, None);
     buy(&mut state, &[update(1, 500_000)], 2_000, Millis(0));
 
     let policy = policy();
@@ -536,4 +537,44 @@ fn an_unset_rate_ceiling_means_the_link_is_the_limit() {
         committed_elsewhere: u64::MAX,
     };
     assert_eq!(admission.rate_available(), u64::MAX);
+}
+
+// ---------------------------------------------------------------------------
+// Expiry
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_channel_is_due_for_settlement_ahead_of_its_expiry() {
+    // Past expiry the funder can reclaim the channel, and everything already
+    // paid on it with it. The receiver settles with time to spare for a retry.
+    let mut state = GrantState::new();
+    state.open_channel(channel(1), 1_000_000, Some(Millis(3_600_000)));
+    state.open_channel(channel(2), 1_000_000, Some(Millis(7_200_000)));
+    state.open_channel(channel(3), 1_000_000, None);
+
+    let lead = 30_000;
+    assert_eq!(
+        state.expiring_channels(Millis(3_570_000 - 1), lead).count(),
+        0
+    );
+    let due: Vec<_> = state.expiring_channels(Millis(3_570_000), lead).collect();
+    assert_eq!(due, [channel(1)], "only the one about to expire");
+
+    assert_eq!(
+        state.expiring_channels(Millis(u64::MAX), lead).count(),
+        2,
+        "a channel with no expiry is never due"
+    );
+}
+
+#[test]
+fn reverifying_a_channel_refreshes_its_expiry_without_touching_the_ratchet() {
+    let mut state = GrantState::new();
+    state.open_channel(channel(1), 1_000_000, Some(Millis(1_000)));
+    buy(&mut state, &[update(1, 500_000)], 2_000, Millis(0));
+
+    state.open_channel(channel(1), 1_000_000, Some(Millis(9_000)));
+    let c = state.channel(channel(1)).expect("still recognised");
+    assert_eq!(c.expires_at, Some(Millis(9_000)));
+    assert_eq!(c.signed, 500_000);
 }

@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 use tollgate_protocol::{ChannelId, ChannelUpdate, Message, PubKey};
 
 use crate::access::AccessLevel;
+use crate::time::Millis;
 
 /// An effect for the host to execute.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +107,10 @@ pub enum Action {
         peer: PubKey,
         /// The channel to settle.
         channel_id: ChannelId,
+        /// When the funder can reclaim it through the refund path, on the
+        /// same clock as `now`, or `None` if it never expires or we do not
+        /// know. Past it, a settlement is no longer worth retrying.
+        expires_at: Option<Millis>,
     },
 
     /// Tear down the relationship with a peer.

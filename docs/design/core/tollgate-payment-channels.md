@@ -101,7 +101,7 @@ Both channels are funded and verified. Each side buys grants on its own channel:
 
 ### RollingOver
 
-A channel approaches exhaustion (default: 80% capacity used). The sender (channel funder) initiates rollover:
+A channel approaches exhaustion (default: 80% capacity used), or enters the [safety margin](#safety-margin) before its expiry. The sender (channel funder) initiates rollover:
 1. Sender sends RolloverInit with new channel funding
 2. Receiver verifies and sends RolloverReady
 3. Old channel continues draining to 100%
@@ -206,7 +206,7 @@ Each peer independently monitors their own outbound channel and initiates rollov
 
 ### When to Rollover
 
-Rollover triggers when a channel reaches the **rollover threshold** — a configurable percentage of channel capacity (default: 80%).
+Rollover triggers when a channel reaches the **rollover threshold** — a configurable percentage of channel capacity (default: 80%) — or when it enters the [safety margin](#safety-margin) before its expiry, whichever comes first. A channel that fills up is replaced by a bigger one; one that only ran out of time is replaced at the same size (see [Capacity Growth](#capacity-growth)).
 
 ```
 Channel capacity: 1000 vouchers
@@ -313,11 +313,14 @@ The sender initiates a **rollover** when a channel enters the safety margin befo
 safety_margin = max(60 seconds, 2 × max_window_ms)
 ```
 
+`max_window_ms` is the **receiver's**, from its Offer, so both ends of a channel arrive at the same margin without negotiating it — provided they share the 60-second floor (`channels.safety_margin_seconds`), which is not advertised.
+
 Within the safety margin:
 1. Sender initiates rollover (RolloverInit) to create a new channel
-2. Old channel is settled by the receiver before expiry
-3. If receiver is unresponsive: sender waits for expiry and reclaims via refund path
-4. If mint unreachable: receiver retries aggressively until expiry
+2. Once the replacement is confirmed, the sender moves onto it at once, giving up what is left on the old channel rather than draining it. Without a replacement it keeps buying on the old channel until the receiver's settle point, and from there nothing until the replacement arrives
+3. The receiver settles the old channel at its **settle point**, `safety_margin / 2` before expiry, leaving at least one window before the refund path opens
+4. If receiver is unresponsive: sender waits for expiry and reclaims via refund path
+5. If mint unreachable: receiver retries until expiry (see [Settlement Failure](#settlement-failure))
 
 ### Expiry Timeline
 
@@ -325,6 +328,7 @@ Within the safety margin:
 Channel created:  T₀
 Channel expiry:   T₀ + TTL (e.g., 1 hour)
 Danger zone:      expiry - safety_margin (e.g., expiry - 60 seconds)
+Settle point:     expiry - safety_margin / 2 (e.g., expiry - 30 seconds)
 ```
 
 1. **Normal**: Well before expiry, channels rollover naturally as they exhaust
@@ -347,16 +351,20 @@ Factors:
 
 ### Capacity Growth
 
-As a peer relationship proves stable (multiple successful rollovers), the node can increase channel capacity for new channels. This reduces rollover frequency and overhead.
+As a peer relationship proves stable, the funder increases capacity for new channels. This reduces rollover frequency and overhead.
+
+Each rollover forced by **use** (the channel reached the rollover threshold) multiplies the replacement's capacity by `capacity_growth_factor`, clamped to `[min_capacity, max_capacity]`. A rollover forced by **expiry** keeps the size: a channel that ran out of time was big enough, and growing it would only lock more away. With the defaults:
 
 ```
-First channel:    100 vouchers (minimum viable)
-After 1 rollover: 200
-After 3 rollovers: 500
-After 10 rollovers: 1000 (configurable cap)
+First channel:      1 GiB (initial_capacity)
+After 1 fill:       2 GiB
+After 2 fills:      4 GiB
+After 3 fills:      8 GiB
+After 4 fills:     16 GiB (max_capacity)
+From then on:      16 GiB
 ```
 
-The exact growth curve is operator-configurable.
+The new size is computed from the capacity of the channel being replaced, so growth is tracked per session and starts again from `initial_capacity` when a peer reconnects. The exact curve is operator-configurable (see [Channel Parameters](tollgate-configuration.md#channel-parameters)).
 
 ---
 
@@ -407,6 +415,9 @@ pub trait ChannelBackend: Send + Sync {
 pub struct FundedChannel {
     pub channel_id: ChannelId,
     pub capacity: u64,
+    /// Unix seconds after which the funder can reclaim it, or `None` for a
+    /// backend with no refund path. The host puts it on core's clock.
+    pub expiry: Option<u64>,
     /// Opaque funding blob carried in Accept and RolloverInit.
     pub funding: Vec<u8>,
 }
@@ -414,6 +425,8 @@ pub struct FundedChannel {
 pub struct VerifiedChannel {
     pub channel_id: ChannelId,
     pub capacity: u64,
+    /// As for `FundedChannel`: the receiver has to settle before it.
+    pub expiry: Option<u64>,
 }
 ```
 
@@ -451,7 +464,7 @@ If settlement fails:
 
 On shutdown the node settles every channel still in a grant, and every retry still waiting wakes for a last attempt. They all share a short grace period (5 s), retrying on the same backoff but never past it; whatever is still unsettled then is abandoned rather than holding the node open.
 
-Each retry can carry a deadline past which it gives up. Nothing sets one yet: the natural one is the channel's refund expiry, once the backend reports it, since past it the funder can take the money back.
+Each retry gives up at the channel's refund expiry, since past it the funder can take the money back. `Action::SettleChannel` carries the expiry core holds for the channel, and the node puts it on its own clock as the retry's deadline; a channel with no expiry is retried without one.
 
 Retries live in memory only. A settlement still failing when the node stops is forgotten, and a restart does not resume it.
 

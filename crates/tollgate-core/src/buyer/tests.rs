@@ -44,7 +44,7 @@ fn demand(rate: u64) -> Demand {
 /// A buyer with one confirmed channel, which is where every test starts.
 fn opened(capacity: u64) -> Buyer {
     let mut buyer = Buyer::new();
-    buyer.funded(channel(1), capacity);
+    buyer.funded(channel(1), capacity, None);
     buyer.confirmed(channel(1));
     buyer
 }
@@ -60,7 +60,7 @@ fn nothing_is_bought_before_a_channel_is_confirmed() {
     let mut buyer = Buyer::new();
     assert!(poll(&buyer, &policy(), demand(100_000), Millis(0)).is_none());
 
-    buyer.funded(channel(1), CAPACITY);
+    buyer.funded(channel(1), CAPACITY, None);
     assert!(
         poll(&buyer, &policy(), demand(100_000), Millis(0)).is_none(),
         "funded is not the same as confirmed"
@@ -333,7 +333,7 @@ fn a_replacement_is_opened_at_the_threshold_and_only_once() {
     assert!(buyer.needs_rollover(80), "80% reached");
 
     // Once funding is under way it must stay quiet until the peer confirms.
-    buyer.funded(channel(2), 1_000_000);
+    buyer.funded(channel(2), 1_000_000, None);
     assert!(!buyer.needs_rollover(80), "one is already on the way");
 
     buyer.confirmed(channel(2));
@@ -349,7 +349,7 @@ fn a_confirmed_replacement_waits_behind_the_channel_in_use() {
     // capacity first, which is what keeps the old channel's remaining capacity
     // from being thrown away.
     let mut buyer = opened(1_000_000);
-    buyer.funded(channel(2), 1_000_000);
+    buyer.funded(channel(2), 1_000_000, None);
     buyer.confirmed(channel(2));
 
     assert_eq!(buyer.active().expect("active").id, channel(1));
@@ -365,7 +365,7 @@ fn a_purchase_that_overflows_is_signed_across_both_channels() {
     buyer.record(p, Millis(0));
     assert_eq!(buyer.cumulative(), 800_000, "200 k of headroom left");
 
-    buyer.funded(channel(2), 1_000_000);
+    buyer.funded(channel(2), 1_000_000, None);
     buyer.confirmed(channel(2));
 
     // The next 800 k grant is more than the 200 k the channel in use can carry.
@@ -393,7 +393,7 @@ fn an_exhausted_channel_is_retired_and_offered_for_settlement() {
     let p = poll(&buyer, &policy(), demand(320_000), Millis(0)).expect("should buy");
     assert_eq!(buyer.record(p, Millis(0)), None, "nothing retired yet");
 
-    buyer.funded(channel(2), 1_000_000);
+    buyer.funded(channel(2), 1_000_000, None);
     buyer.confirmed(channel(2));
 
     let p = poll(&buyer, &policy(), demand(320_000), Millis(1_600)).expect("should buy");
@@ -438,6 +438,28 @@ fn without_a_replacement_the_buyer_takes_what_fits_and_then_stops() {
 }
 
 #[test]
+fn a_replacement_confirmed_after_the_channel_filled_takes_over_directly() {
+    // The provider settled the full channel the moment it filled. Queuing the
+    // replacement behind it would put a leg on a settled channel into every
+    // purchase, and each would be refused in full.
+    let mut buyer = opened(1_000_000);
+    let p = poll(&buyer, &policy(), demand(320_000), Millis(0)).expect("should buy");
+    buyer.record(p, Millis(0));
+    let p = poll(&buyer, &policy(), demand(320_000), Millis(1_600)).expect("should buy");
+    buyer.record(p, Millis(1_600));
+    assert!(buyer.active().expect("active").exhausted());
+
+    buyer.funded(channel(2), 1_000_000, None);
+    buyer.confirmed(channel(2));
+    assert_eq!(buyer.active().expect("active").id, channel(2));
+    assert_eq!(buyer.next_channel(), None);
+
+    let p = poll(&buyer, &policy(), demand(320_000), Millis(3_200)).expect("should buy");
+    assert_eq!(p.first.channel_id, channel(2));
+    assert_eq!(p.second, None, "nothing signed on the settled channel");
+}
+
+#[test]
 fn cumulative_restarts_from_zero_on_the_replacement() {
     // A cumulative total only means anything against the channel it was signed
     // on, so carrying the old one forward would be meaningless — and would read
@@ -446,7 +468,7 @@ fn cumulative_restarts_from_zero_on_the_replacement() {
     let p = poll(&buyer, &policy(), demand(320_000), Millis(0)).expect("should buy");
     buyer.record(p, Millis(0));
 
-    buyer.funded(channel(2), 1_000_000);
+    buyer.funded(channel(2), 1_000_000, None);
     buyer.confirmed(channel(2));
     assert_eq!(
         buyer.next_channel().expect("next").cumulative,
@@ -555,4 +577,127 @@ fn the_forfeit_is_the_lead_over_the_window() {
         ..d
     };
     assert!(tight.lead_is_thin());
+}
+
+// ---------------------------------------------------------------------------
+// Expiry
+// ---------------------------------------------------------------------------
+
+/// One hour, the design's default TTL.
+const TTL_MS: u64 = 3_600_000;
+/// `max(60 s, 2 × 30 s)`: the safety margin against the default window range.
+const MARGIN_MS: u64 = 60_000;
+/// Half of it, when the receiver settles.
+const SETTLE_LEAD_MS: u64 = 30_000;
+
+/// A buyer with one confirmed channel that expires an hour in.
+fn opened_until(capacity: u64, expires_at: Millis) -> Buyer {
+    let mut buyer = Buyer::new();
+    buyer.funded(channel(1), capacity, Some(expires_at));
+    buyer.confirmed(channel(1));
+    buyer
+}
+
+#[test]
+fn a_slowly_drawn_channel_is_replaced_when_it_enters_the_safety_margin() {
+    // 100 KB/s takes about three hours to get through 1 GiB, and the funder can
+    // reclaim the channel after one. Waiting for the threshold would let it
+    // take back what it already paid.
+    let mut buyer = opened_until(CAPACITY, Millis(TTL_MS));
+    let p = poll(&buyer, &policy(), demand(100_000), Millis(0)).expect("should buy");
+    buyer.record(p, Millis(0));
+    assert!(!buyer.needs_rollover(80), "nowhere near full");
+
+    let entering = Millis(TTL_MS - MARGIN_MS);
+    assert_eq!(buyer.rollover_due(80, entering - 1, MARGIN_MS), None);
+    assert_eq!(
+        buyer.rollover_due(80, entering, MARGIN_MS),
+        Some(RolloverReason::Expiry),
+        "inside the margin, however little has been used"
+    );
+
+    // And only once, exactly as for capacity.
+    buyer.funded(channel(2), CAPACITY, Some(Millis(TTL_MS * 2)));
+    assert_eq!(buyer.rollover_due(80, entering, MARGIN_MS), None);
+}
+
+#[test]
+fn a_channel_that_never_expires_is_only_rolled_over_for_capacity() {
+    let buyer = opened(CAPACITY);
+    assert_eq!(buyer.rollover_due(80, Millis(u64::MAX), MARGIN_MS), None);
+}
+
+#[test]
+fn a_filling_channel_is_a_capacity_rollover_even_near_expiry() {
+    // The reason decides whether the replacement grows, and a channel that
+    // filled up has earned it whatever the clock says.
+    let mut buyer = opened_until(1_000_000, Millis(TTL_MS));
+    let p = poll(&buyer, &policy(), demand(320_000), Millis(0)).expect("should buy");
+    buyer.record(p, Millis(0));
+
+    assert_eq!(
+        buyer.rollover_due(80, Millis(TTL_MS - MARGIN_MS), MARGIN_MS),
+        Some(RolloverReason::Capacity)
+    );
+}
+
+#[test]
+fn inside_the_margin_a_confirmed_replacement_takes_over_at_once() {
+    // The receiver is about to settle the old channel, so what is left on it is
+    // given up rather than drained: anything signed on it after settlement
+    // would be refused.
+    let mut buyer = opened_until(CAPACITY, Millis(TTL_MS));
+    let p = poll(&buyer, &policy(), demand(100_000), Millis(0)).expect("should buy");
+    buyer.record(p, Millis(0));
+
+    buyer.funded(channel(2), CAPACITY, Some(Millis(2 * TTL_MS)));
+    buyer.confirmed(channel(2));
+
+    let early = Millis(TTL_MS - MARGIN_MS - 1);
+    assert_eq!(
+        buyer.retire_expiring(early, MARGIN_MS, SETTLE_LEAD_MS),
+        None,
+        "outside the margin the old channel drains first, as usual"
+    );
+
+    let inside = Millis(TTL_MS - MARGIN_MS);
+    assert_eq!(
+        buyer.retire_expiring(inside, MARGIN_MS, SETTLE_LEAD_MS),
+        Some(channel(1))
+    );
+    assert_eq!(buyer.active().expect("active").id, channel(2));
+    assert_eq!(buyer.next_channel(), None);
+
+    let p = poll(&buyer, &policy(), demand(100_000), inside).expect("should buy");
+    assert_eq!(p.first.channel_id, channel(2), "buying moved with it");
+    assert_eq!(p.second, None);
+}
+
+#[test]
+fn without_a_replacement_the_expiring_channel_is_used_until_it_is_settled() {
+    // Late is better than nothing up to the point where the receiver settles —
+    // and from there, nothing: a total signed on a settled channel is refused.
+    let mut buyer = opened_until(CAPACITY, Millis(TTL_MS));
+    let inside = Millis(TTL_MS - MARGIN_MS);
+    assert_eq!(
+        buyer.retire_expiring(inside, MARGIN_MS, SETTLE_LEAD_MS),
+        None
+    );
+    assert!(
+        poll(&buyer, &policy(), demand(100_000), inside).is_some(),
+        "still worth buying on while the replacement is on its way"
+    );
+
+    let settling = Millis(TTL_MS - SETTLE_LEAD_MS);
+    assert_eq!(
+        buyer.retire_expiring(settling, MARGIN_MS, SETTLE_LEAD_MS),
+        Some(channel(1))
+    );
+    assert_eq!(buyer.active(), None);
+    assert!(poll(&buyer, &policy(), demand(100_000), settling).is_none());
+
+    // The replacement lands and buying resumes on it.
+    buyer.funded(channel(2), CAPACITY, Some(Millis(2 * TTL_MS)));
+    buyer.confirmed(channel(2));
+    assert_eq!(buyer.active().expect("active").id, channel(2));
 }

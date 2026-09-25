@@ -131,12 +131,20 @@ impl Prices {
     /// unit rather than nothing. Rounding down would let a buyer take capacity
     /// a byte at a time and pay for none of it.
     pub fn units_for(&self, mint: &str, unit: &str, bytes: u64) -> Option<u64> {
-        let per_unit = self.bytes_per_unit(mint, unit)?;
-        if bytes == 0 {
-            return None;
-        }
-        Some((bytes as u128).div_ceil(per_unit as u128).max(1) as u64)
+        price_of(bytes, self.bytes_per_unit(mint, unit)?)
     }
+}
+
+/// What `bytes` cost at `bytes_per_unit`, rounded up to a whole unit.
+///
+/// The one rule both ends of a swap use: the buyer to decide what to pay, the
+/// market to check it was paid. `None` for nothing, or for a price of zero,
+/// which is no price at all.
+pub fn price_of(bytes: u64, bytes_per_unit: u64) -> Option<u64> {
+    if bytes == 0 || bytes_per_unit == 0 {
+        return None;
+    }
+    Some((bytes as u128).div_ceil(bytes_per_unit as u128) as u64)
 }
 
 /// Mint URLs differ by a trailing slash more often than by anything else.
@@ -160,7 +168,8 @@ pub struct Info {
 pub struct SwapRequest {
     /// A Cashu token from a mint this node accepts.
     pub token: String,
-    /// Blinded outputs, summing to what the token buys at the price in force.
+    /// Blinded outputs, summing to the capacity bought. The token has to be
+    /// exactly its price in force, rounded up to a whole unit.
     pub outputs: Vec<BlindedMessage>,
 }
 
@@ -248,32 +257,19 @@ async fn swap(
         .map_err(|e| bad_request(e.to_string()))?
         .into();
 
-    let Some(bytes_per_unit) = market.prices.bytes_per_unit(&paid_mint, &paid_unit) else {
-        return Err(bad_request(format!(
-            "this node does not take {paid_unit} from {paid_mint}"
-        )));
-    };
-
-    let bought = paid
-        .checked_mul(bytes_per_unit)
-        .filter(|b| *b <= market.max_amount)
-        .ok_or_else(|| {
-            bad_request(format!(
-                "{paid} {paid_unit} is more capacity than this node will sell at once"
-            ))
-        })?;
-
     let wanted: u64 = request
         .outputs
         .iter()
         .map(|o| u64::from(o.amount))
         .fold(0, u64::saturating_add);
-    if wanted != bought {
-        return Err(bad_request(format!(
-            "{paid} {paid_unit} buys {bought} {} here, and the outputs come to {wanted}",
-            market.unit
-        )));
-    }
+    let bought = priced_purchase(
+        &market.prices,
+        market.max_amount,
+        &market.unit,
+        (&paid_mint, &paid_unit, paid),
+        wanted,
+    )
+    .map_err(bad_request)?;
 
     // Take the money first, and take it properly: depositing swaps the proofs
     // at the issuing mint, which both proves they were good and stops the payer
@@ -311,6 +307,42 @@ async fn swap(
             Err(bad_request(e.to_string()))
         }
     }
+}
+
+/// What a payment buys: `wanted`, if `paid` is exactly its price.
+///
+/// The price is [`Prices::units_for`] — rounded up to a whole unit — which is
+/// also how a buyer works out what to pay. Checking the outputs against
+/// `paid × bytes_per_unit` instead would refuse every capacity that is not a
+/// multiple of the price: 1 GiB at a megabyte a sat costs 1074 sat, and 1074
+/// sat is not 1 GiB. The fraction of a unit left over is the buyer's rounding,
+/// never a whole unit, and never capacity issued that was not paid for.
+fn priced_purchase(
+    prices: &Prices,
+    max_amount: u64,
+    unit: &str,
+    (paid_mint, paid_unit, paid): (&str, &str, u64),
+    wanted: u64,
+) -> Result<u64, String> {
+    if prices.bytes_per_unit(paid_mint, paid_unit).is_none() {
+        return Err(format!(
+            "this node does not take {paid_unit} from {paid_mint}"
+        ));
+    }
+    if wanted > max_amount {
+        return Err(format!(
+            "{wanted} {unit} is more capacity than this node will sell at once"
+        ));
+    }
+    let Some(owed) = prices.units_for(paid_mint, paid_unit, wanted) else {
+        return Err("the outputs come to nothing".into());
+    };
+    if owed != paid {
+        return Err(format!(
+            "{wanted} {unit} costs {owed} {paid_unit} here, and {paid} was paid"
+        ));
+    }
+    Ok(wanted)
 }
 
 // ---------------------------------------------------------------------------
@@ -439,7 +471,14 @@ fn http(method: &str, url: &str, body: &str) -> Result<String, String> {
             .body(body.to_owned()),
     };
     let response: reqwest::blocking::Response = request.send().map_err(|e| e.to_string())?;
-    response.text().map_err(|e| e.to_string())
+    // A refusal is a plain-text reason, and parsing it as the JSON a success
+    // carries only reports where the parser gave up.
+    let status = response.status();
+    let text = response.text().map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("{status}: {text}"));
+    }
+    Ok(text)
 }
 
 #[cfg(test)]
@@ -522,6 +561,73 @@ mod tests {
         assert_eq!(prices.units_for(mint, "sat", 1), Some(1));
         assert_eq!(prices.units_for(mint, "sat", 0), None);
         assert_eq!(prices.units_for("https://elsewhere", "sat", 1_000), None);
+    }
+
+    #[test]
+    fn a_capacity_that_is_not_a_multiple_of_the_price_can_be_bought() {
+        // The default first channel, 1 GiB, at a megabyte a sat: the buyer
+        // pays 1074 sat and asks for exactly 1 GiB. Checking the outputs
+        // against 1074 × 1 MB refused this in full, on every node.
+        let prices = priced();
+        let mint = "https://mint.minibits.cash/Bitcoin";
+        let gib = 1 << 30;
+        let owed = price_of(gib, 1_000_000).expect("priced");
+        assert_eq!(owed, 1_074);
+        assert_eq!(
+            priced_purchase(&prices, 1 << 34, "byte", (mint, "sat", owed), gib),
+            Ok(gib)
+        );
+
+        // Short by a unit is refused, and so is a unit too many: the buyer's
+        // rounding is never more than a fraction of one.
+        for paid in [owed - 1, owed + 1] {
+            assert!(priced_purchase(&prices, 1 << 34, "byte", (mint, "sat", paid), gib).is_err());
+        }
+    }
+
+    #[test]
+    fn what_a_buyer_pays_is_what_the_market_asks_for_every_default_size() {
+        // Doubling from 1 GiB to the 16 GiB ceiling, at both listed prices.
+        let prices = priced();
+        for (mint, per_unit) in [
+            ("https://mint.minibits.cash/Bitcoin", 1_000_000),
+            ("https://nofees.testnut.cashu.space", 700_000),
+        ] {
+            for shift in 27..=34 {
+                let capacity = 1u64 << shift;
+                let owed = price_of(capacity, per_unit).expect("priced");
+                assert_eq!(
+                    priced_purchase(&prices, 1 << 34, "byte", (mint, "sat", owed), capacity),
+                    Ok(capacity),
+                    "{capacity} at {per_unit}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_purchase_outside_what_is_sold_is_refused() {
+        let prices = priced();
+        let mint = "https://mint.minibits.cash/Bitcoin";
+        let refused = |max: u64, paper: (&str, &str, u64), wanted: u64| {
+            priced_purchase(&prices, max, "byte", paper, wanted).is_err()
+        };
+        assert!(
+            refused(1_000_000, (mint, "sat", 2), 2_000_000),
+            "over the ceiling"
+        );
+        assert!(
+            refused(u64::MAX, ("https://elsewhere", "sat", 1), 1_000_000),
+            "unlisted paper"
+        );
+        assert!(refused(u64::MAX, (mint, "sat", 1), 0), "nothing asked for");
+    }
+
+    #[test]
+    fn a_price_of_zero_is_no_price() {
+        assert_eq!(price_of(1_000, 0), None);
+        assert_eq!(price_of(0, 1_000), None);
+        assert_eq!(price_of(u64::MAX, 1), Some(u64::MAX));
     }
 
     #[test]
