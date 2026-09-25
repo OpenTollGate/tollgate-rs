@@ -149,7 +149,24 @@ impl Node {
     /// Listen, dial, and run until `shutdown` resolves or something goes badly
     /// wrong.
     pub async fn run(
+        self,
+        config: NodeConfig,
+        shutdown: impl std::future::Future<Output = ()> + Send,
+    ) -> Result<()> {
+        let control = TcpListener::bind(config.listen)
+            .await
+            .with_context(|| format!("bind control plane on {}", config.listen))?;
+        self.run_on(control, config, shutdown).await
+    }
+
+    /// [`Self::run`], on a control-plane listener the caller already bound.
+    ///
+    /// For a caller that has to know the port before the node starts but
+    /// cannot pick it in advance — tests bind port 0 and read back what the OS
+    /// chose, so concurrent runs never contend for the same port.
+    pub async fn run_on(
         mut self,
+        control: TcpListener,
         config: NodeConfig,
         shutdown: impl std::future::Future<Output = ()> + Send,
     ) -> Result<()> {
@@ -159,21 +176,19 @@ impl Node {
         // stalling the event loop.
         let (done_tx, mut done_rx) = mpsc::channel::<Event>(256);
 
-        let control = TcpListener::bind(config.listen)
-            .await
-            .with_context(|| format!("bind control plane on {}", config.listen))?;
+        let local = control.local_addr().unwrap_or(config.listen);
         info!(
             pubkey = %self.identity.pubkey(),
-            control = %config.listen,
+            control = %local,
             identify = ?config.identify,
             "node listening"
         );
 
         // Refusing every connection is the correct behaviour here and a baffling
         // one to debug, so say it once at startup rather than once per peer.
-        if config.identify == Identify::Fips && config.listen.is_ipv4() {
+        if config.identify == Identify::Fips && local.is_ipv4() {
             warn!(
-                control = %config.listen,
+                control = %local,
                 "listening on IPv4 while checking mesh identity: no peer on fips0 can reach this"
             );
         }
