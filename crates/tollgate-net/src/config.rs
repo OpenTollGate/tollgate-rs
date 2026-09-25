@@ -76,14 +76,51 @@ pub struct MintSection {
     /// `"byte"` for network forwarding: a proof is then a claim on one byte of
     /// this node's capacity rather than on money.
     pub unit: String,
+    /// Mint vouchers for anyone who asks, without being paid.
+    ///
+    /// On by default, because until there is a market this is how a peer comes
+    /// to hold this node's vouchers at all: it asks the mint for a quote, the
+    /// quote is paid the moment it exists, and the peer mints against it. That
+    /// makes service here free to any peer that can reach the mint.
+    ///
+    /// Off, the mint serves no mint quotes and issues nothing to anybody, so
+    /// peers can only pay with vouchers they came by some other way.
+    pub auto_accept: bool,
+    /// Bytes of vouchers an auto-accepting mint issues per second, across
+    /// everybody who asks. `0` is unlimited.
+    ///
+    /// The defaults, and why they are what they are, are
+    /// [`crate::mint::IssueLimit`]'s.
+    pub issue_rate_bytes_per_sec: u64,
+    /// Bytes that may be issued at once before the rate applies. Never less
+    /// than one channel's initial capacity.
+    pub issue_burst_bytes: u64,
+    /// Mint quotes an auto-accepting mint creates per minute. `0` is unlimited.
+    pub issue_quotes_per_minute: u64,
 }
 
 impl Default for MintSection {
     fn default() -> Self {
+        let limit = crate::mint::IssueLimit::default();
         Self {
             url: "http://127.0.0.1:3338".into(),
             listen: "0.0.0.0:3338".into(),
             unit: "byte".into(),
+            auto_accept: true,
+            issue_rate_bytes_per_sec: limit.bytes_per_sec,
+            issue_burst_bytes: limit.burst_bytes,
+            issue_quotes_per_minute: limit.quotes_per_minute,
+        }
+    }
+}
+
+impl MintSection {
+    /// The issue limit these settings describe.
+    pub fn issue_limit(&self) -> crate::mint::IssueLimit {
+        crate::mint::IssueLimit {
+            bytes_per_sec: self.issue_rate_bytes_per_sec,
+            burst_bytes: self.issue_burst_bytes,
+            quotes_per_minute: self.issue_quotes_per_minute,
         }
     }
 }
@@ -730,6 +767,36 @@ mod tests {
             assert_eq!(config.policy.unit, "byte", "{name}");
             assert!(config.policy.minimum_flow > 0, "{name}: no allowance");
         }
+    }
+
+    #[test]
+    fn the_mint_gives_vouchers_away_unless_told_not_to() {
+        // Until there is a market, minting at the peer is how a buyer comes to
+        // hold anything, so a node that says nothing has to allow it.
+        let file: File = serde_yaml::from_str("{}").expect("parse");
+        assert!(file.mint.auto_accept);
+
+        let file: File = serde_yaml::from_str("mint:\n  auto_accept: false\n").expect("parse");
+        assert!(!file.mint.auto_accept);
+    }
+
+    #[test]
+    fn the_issue_limit_defaults_to_the_mints_own_and_can_be_set() {
+        let file: File = serde_yaml::from_str("{}").expect("parse");
+        assert_eq!(file.mint.issue_limit(), crate::mint::IssueLimit::default());
+
+        let file: File = serde_yaml::from_str(
+            "mint:\n  issue_rate_bytes_per_sec: 0\n  issue_burst_bytes: 7\n  issue_quotes_per_minute: 3\n",
+        )
+        .expect("parse");
+        assert_eq!(
+            file.mint.issue_limit(),
+            crate::mint::IssueLimit {
+                bytes_per_sec: 0,
+                burst_bytes: 7,
+                quotes_per_minute: 3,
+            }
+        );
     }
 
     #[test]

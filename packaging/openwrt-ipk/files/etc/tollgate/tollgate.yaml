@@ -22,6 +22,16 @@ mint:
   url: "http://192.168.1.1:3338"
   listen: "0.0.0.0:3338"
   unit: "byte"
+  # Mint vouchers for any peer that asks, without being paid. Until the market
+  # returns this is how peers get vouchers at all — and it means service here
+  # is free to anyone who can reach the mint. `false` issues nothing.
+  auto_accept: true
+  # How fast it gives them away, across everyone who asks: 1 Gbit/s of
+  # vouchers, 4 GB at once, and one quote a second. Far above what peers
+  # funding channels use; there to stop a flood. `0` lifts a limit.
+  issue_rate_bytes_per_sec: 125000000
+  issue_burst_bytes: 4000000000
+  issue_quotes_per_minute: 60
 
 access:
   minimum_flow:

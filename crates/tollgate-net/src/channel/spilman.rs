@@ -19,16 +19,21 @@
 //! is always reachable — it is the peer we are already talking to. So funding a
 //! channel to pay a peer means first holding that peer's vouchers, and how a
 //! peer came to hold vouchers is not the protocol's business, any more than how
-//! it came to hold sats. Buying them is [`crate::market`]'s job, and this layer
-//! only asks it for what a channel needs.
+//! it came to hold sats.
+//!
+//! For now they are minted at the peer's own mint, which issues them to anyone
+//! who asks ([`crate::mint`]): an ordinary NUT-04 quote, paid the moment it is
+//! made, and no money anywhere. Buying them at a market is deferred until the
+//! market is redesigned, and [`crate::market`] stays dormant until then.
 //!
 //! [`tollgate-vouchers.md`]: https://github.com/OpenTollGate/tollgate-rs/blob/master/docs/design/core/tollgate-vouchers.md
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use cdk::mint::Mint;
 use cdk_spilman::configurable_host::{
     ConfigurableHost, ConfigurableHostConfig, KeysetCacheEntry, StorageConfig, UnitPricingConfig,
@@ -97,14 +102,16 @@ pub struct SpilmanConfig {
     pub accepted_mints: Vec<String>,
     /// Secret key this node signs channel state with, hex-encoded.
     pub secret_key_hex: String,
-    /// What this node holds, and what it pays peers out of.
+    /// What this node holds, and what it pays peers out of. The vouchers it
+    /// mints at a peer pass through here on their way into a channel, so a
+    /// purchase interrupted between the two is not lost.
     pub wallet: crate::wallet::Wallet,
-    /// Which of its holdings is the money — the paper a peer has to accept
-    /// before this node can pay it. `None` for a node that only sells.
-    pub money: Option<Money>,
 }
 
 /// Where a node's money is, and in what.
+///
+/// Not used to fund channels while vouchers are minted for the asking; kept
+/// for the wallet display and for the market when it returns.
 #[derive(Debug, Clone)]
 pub struct Money {
     /// A mint that sells its paper for money.
@@ -133,6 +140,9 @@ pub struct SpilmanChannels {
     /// How we reach an accepted mint that is not ours, to settle a channel a
     /// peer funded there.
     remote: ReqwestClientNetworking,
+    /// The latest refund expiry given to a channel we funded; see
+    /// [`unique_expiry`].
+    last_expiry: AtomicU64,
 }
 
 impl std::fmt::Debug for SpilmanChannels {
@@ -206,6 +216,7 @@ impl SpilmanChannels {
             client: Mutex::new(client),
             server: SpilmanBridge::new(host),
             remote,
+            last_expiry: AtomicU64::new(0),
         })
     }
 
@@ -299,6 +310,25 @@ fn settlement_for(own_mint_url: &str, funding_mint: &str) -> Settlement {
     }
 }
 
+/// `wanted`, or one second past the last expiry handed out if that is later.
+///
+/// A channel's id is a hash of its terms, and for two channels to the same
+/// peer at the same capacity the only terms that differ are the setup time
+/// and the expiry, both in whole seconds. So two channels funded within one
+/// second get the same id, and the second is refused as a channel that already
+/// exists. Minting at the peer makes funding fast enough for that to happen:
+/// a small channel that runs out straight away is replaced in the same second
+/// it was opened. Keeping every expiry distinct keeps every id distinct, and
+/// costs a channel at most a few seconds' later refund.
+fn unique_expiry(last: &AtomicU64, wanted: u64) -> u64 {
+    let previous = last
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |prev| {
+            Some(wanted.max(prev.saturating_add(1)))
+        })
+        .expect("the update always succeeds");
+    wanted.max(previous.saturating_add(1))
+}
+
 fn channel_id_from_hex(s: &str) -> Result<ChannelId> {
     let bytes = hex::decode(s).with_context(|| format!("channel id {s:?} is not hex"))?;
     let bytes: [u8; 32] = bytes
@@ -320,96 +350,30 @@ fn signature_from_hex(s: &str) -> Result<Signature> {
 }
 
 impl SpilmanChannels {
-    /// Buy `capacity` of a peer's vouchers, paying at its market.
+    /// Get `capacity` of a peer's vouchers by minting them at its mint.
     ///
-    /// Three steps and no negotiation: ask what the peer takes, turn money into
-    /// that issuer's paper, and hand it over for vouchers. The peer prices the
-    /// trade; this side only decides whether to accept the price by going
-    /// through with it.
-    fn buy_vouchers(&self, mint_url: &str, capacity: u64, keyset_info: &str) -> Result<String> {
-        let Some(money) = &self.config.money else {
-            bail!(
-                "this node holds no money, so it cannot buy the vouchers it would pay {mint_url} with"
-            );
-        };
-
-        // The peer's market is served beside its mint, at the URL it already
-        // advertises.
-        let market = crate::market::info_of(mint_url)?;
-        let price = market
-            .accepts
-            .iter()
-            .find(|a| {
-                a.mint.trim_end_matches('/') == money.mint.trim_end_matches('/')
-                    && a.unit == money.unit
-            })
-            .ok_or_else(|| {
-                anyhow!(
-                    "{mint_url} does not take {} from {}; it takes {:?}",
-                    money.unit,
-                    money.mint,
-                    market
-                        .accepts
-                        .iter()
-                        .map(|a| format!("{} {}", a.unit, a.mint))
-                        .collect::<Vec<_>>()
-                )
-            })?;
-
-        // Rounded up, so a purchase is never short of what it asked for.
-        let owed = (capacity as u128)
-            .div_ceil(price.bytes_per_unit as u128)
-            .max(1) as u64;
-        debug!(
-            capacity,
-            owed,
-            unit = %money.unit,
-            mint = %money.mint,
-            "buying vouchers"
-        );
-
-        let payment = self.take_from_wallet(money, owed)?;
-        crate::market::buy(mint_url, capacity, &self.config.unit, keyset_info, &payment)
-    }
-
-    /// Take `owed` out of the wallet, topping it up if it is short.
-    ///
-    /// Spending what is already held is the normal path and is local
-    /// arithmetic. The top-up is the exception, and it is deliberately in-line
-    /// rather than a background chore: a node that has run out of money has
-    /// stopped being able to buy transit, and the operator wants that to show
-    /// up as a slow purchase rather than a silent one.
-    ///
-    /// Where the money mint settles its own invoices this is invisible. Where a
-    /// human has to pay one, it fails with the invoice in the log, and the
-    /// operator tops up from `tolltop` instead.
-    fn take_from_wallet(&self, money: &Money, owed: u64) -> Result<String> {
+    /// The peer's mint issues to anyone who asks, so this is a NUT-04 quote and
+    /// a mint, with nothing paid. Whatever is already held of that peer's paper
+    /// is spent first — a purchase that minted and then failed to open its
+    /// channel leaves vouchers behind, and they are as good as new ones.
+    fn mint_vouchers(&self, mint_url: &str, capacity: u64) -> Result<String> {
         let wallet = self.config.wallet.clone();
+        let unit = self.config.unit.clone();
         let handle = self.runtime.clone();
 
         tokio::task::block_in_place(|| {
             handle.block_on(async move {
-                if let Ok(token) = wallet.spend(&money.mint, &money.unit, owed).await {
-                    return Ok(token);
+                let held = wallet.balance_of(mint_url, &unit).await;
+                let short = capacity.saturating_sub(held);
+                if short > 0 {
+                    debug!(capacity, held, short, mint = %mint_url, "minting vouchers");
+                    wallet.issue(mint_url, &unit, short).await?;
                 }
 
-                let held = wallet.balance_of(&money.mint, &money.unit).await;
-                debug!(held, owed, "topping up to cover a purchase");
-                let top_up = wallet
-                    .top_up(
-                        &money.mint,
-                        &money.unit,
-                        owed.saturating_sub(held).max(owed),
-                    )
-                    .await?;
-                crate::market::wait_until_paid(&money.mint, &top_up.quote)
-                    .with_context(|| format!("pay {}", top_up.request))?;
-                wallet.collect(&top_up).await?;
-
                 wallet
-                    .spend(&money.mint, &money.unit, owed)
+                    .spend(mint_url, &unit, capacity)
                     .await
-                    .with_context(|| format!("pay {owed} {} after topping up", money.unit))
+                    .with_context(|| format!("take {capacity} {unit} from {mint_url} out to fund"))
             })
         })
     }
@@ -434,7 +398,7 @@ impl SpilmanChannels {
                 token,
                 &hex::encode(peer.0),
                 &ours,
-                now_seconds() + CHANNEL_TTL_SECONDS,
+                unique_expiry(&self.last_expiry, now_seconds() + CHANNEL_TTL_SECONDS),
                 keyset_info,
                 MAX_PROOF_AMOUNT,
             )
@@ -465,12 +429,12 @@ impl ChannelBackend for SpilmanChannels {
             .fetch_keyset_info(mint_url, &keyset_id)
             .map_err(|e| anyhow!("could not read keyset {keyset_id} from {mint_url}: {e}"))?;
 
-        // Buying the peer's vouchers is outside the protocol: a peer arrives
+        // Acquiring the peer's vouchers is outside the protocol: a peer arrives
         // holding them or it gets no service, and how it came to hold them is
         // as much its own business as how it came to hold money.
         let token = self
-            .buy_vouchers(mint_url, capacity, &keyset_info)
-            .with_context(|| format!("buy {capacity} {} from {mint_url}", self.config.unit))?;
+            .mint_vouchers(mint_url, capacity)
+            .with_context(|| format!("mint {capacity} {} at {mint_url}", self.config.unit))?;
 
         self.open(peer, mint_url, &token, &keyset_info)
     }
@@ -717,6 +681,18 @@ mod tests {
     }
 
     #[test]
+    fn channels_funded_within_one_second_get_distinct_expiries() {
+        let last = AtomicU64::new(0);
+        assert_eq!(unique_expiry(&last, 1_000), 1_000);
+        // Same second, twice more: each one a second later than the last.
+        assert_eq!(unique_expiry(&last, 1_000), 1_001);
+        assert_eq!(unique_expiry(&last, 1_000), 1_002);
+        // Once the clock has passed them, the clock is used as it is.
+        assert_eq!(unique_expiry(&last, 1_010), 1_010);
+        assert_eq!(unique_expiry(&last, 1_010), 1_011);
+    }
+
+    #[test]
     fn a_channel_id_of_the_wrong_length_is_rejected() {
         assert!(channel_id_from_hex(&hex::encode([0u8; 16])).is_err());
         assert!(channel_id_from_hex("nonsense").is_err());
@@ -795,6 +771,8 @@ mod tests {
                     unit: "byte".into(),
                     seed: vec![seed; 32],
                     max_amount: u64::MAX,
+                    auto_accept: true,
+                    issue_limit: crate::mint::IssueLimit::default(),
                 })
                 .await
                 .expect("build the mint"),
@@ -847,7 +825,6 @@ mod tests {
                 accepted_mints,
                 secret_key_hex: hex::encode(secret),
                 wallet,
-                money: None,
             })
             .expect("build the backend");
             (backend, dir)
@@ -866,7 +843,7 @@ mod tests {
         }
 
         /// A token of `amount` vouchers, signed by the mint directly — the
-        /// same thing the market does once it has been paid.
+        /// same thing a paid mint quote issues.
         pub(super) fn vouchers(
             mint: &Mint,
             mint_url: &str,
@@ -932,8 +909,8 @@ mod tests {
             }
         }
 
-        /// Issue `amount` vouchers straight from the mint — what the market
-        /// would sell — and open a channel on them that the receiver has
+        /// Issue `amount` vouchers straight from the mint — what minting at
+        /// it would issue — and open a channel on them that the receiver has
         /// verified. Runs on a blocking thread: every call here is.
         fn open_channel(&self, amount: u64) -> ChannelId {
             let keyset_info = live::keyset_info(&self.payer, &self.mint_url);

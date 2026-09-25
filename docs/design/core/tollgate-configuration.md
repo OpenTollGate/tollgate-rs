@@ -77,6 +77,10 @@ Every node runs its own mint and issues vouchers against its own capacity ([toll
 mint:
   url: "https://gateway.example.com/mint"   # advertised in Offer
   unit: "byte"                              # quantity unit for this resource
+  auto_accept: true                         # issue vouchers to anyone who asks
+  issue_rate_bytes_per_sec: 125000000       # ...but no faster than this
+  issue_burst_bytes: 4000000000
+  issue_quotes_per_minute: 60
 ```
 
 ### Defaults
@@ -85,6 +89,25 @@ mint:
 |-----------|---------|-------------|
 | `url` | *(required)* | Mint URL advertised to peers |
 | `unit` | `"byte"` | Quantity unit — `byte`, `wh`, `ml` |
+| `auto_accept` | `true` | Report every NUT-04 mint quote in `unit` paid, so a peer mints what it needs for free |
+| `issue_rate_bytes_per_sec` | `125000000` | Vouchers an auto-accepting mint issues per second, across all askers; `0` = unlimited |
+| `issue_burst_bytes` | `4000000000` | Issued at once before the rate applies; never less than one channel's initial capacity |
+| `issue_quotes_per_minute` | `60` | Mint quotes created per minute, a minute's worth at once; `0` = unlimited |
+
+While the market is deferred, `auto_accept` is how a peer comes to hold this
+node's vouchers: a buyer funds a channel by minting at the seller's mint, with
+nothing paid. **Service is then free to any peer that can reach the mint.**
+With `auto_accept: false` the mint serves no mint quotes and issues nothing, so
+peers can only pay with vouchers they came by some other way.
+
+Free is not unlimited. The `issue_*` keys ration how fast the mint gives
+vouchers away, so its quote endpoint cannot be used to make the node sign and
+store without end. The limit is node-wide, because the mint cannot tell one
+asker from another, and a quote over it is refused when it is asked for. The
+defaults sit well above honest use: 1 Gbit/s of vouchers is more than the node
+could deliver, 4 GB at once is four default-size channels opening together,
+and one quote a second is far more than a buyer needs, since it asks for one
+per channel it opens.
 
 The unit is fixed by the resource and must match across every node selling it. There is no per-direction unit: what a peer pays to have its outgoing traffic carried is the received multiplier, not a second keyset ([tollgate-vouchers.md](tollgate-vouchers.md)).
 
