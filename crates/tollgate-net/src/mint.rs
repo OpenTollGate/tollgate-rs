@@ -30,7 +30,19 @@
 //!
 //! Everything the mint itself does is real: the keysets, the blind signatures,
 //! the DLEQ proofs and the spent-proof set.
+//!
+//! # The spent-proof set is kept on disk
+//!
+//! The keyset is derived from the node's identity, so it comes back unchanged
+//! after a restart and every voucher a peer holds stays redeemable. The record
+//! of which vouchers have already been redeemed has to survive the same
+//! restart, or the paper outlives the memory of having been paid out and a
+//! peer can spend the same voucher twice. So the database is a file.
+//!
+//! The mint quotes an auto-accepting mint issues live in the same file, so
+//! their ids have to stay unique across restarts too; see `lookup_id`.
 
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -59,6 +71,11 @@ pub struct MintConfig {
     pub unit: String,
     /// Seed for the keyset, so a restart keeps issuing against the same keys.
     pub seed: Vec<u8>,
+    /// Where the mint database lives: the keysets and the spent-proof set.
+    ///
+    /// It has to outlive the process for the same reason the seed has to be
+    /// deterministic — see the module documentation.
+    pub file: PathBuf,
     /// Largest amount a single issuance may create.
     ///
     /// The ceiling on one mint quote, and on one market swap. A buyer that
@@ -132,13 +149,26 @@ pub fn currency_unit(unit: &str) -> CurrencyUnit {
     }
 }
 
+/// Where a node keeps its mint database unless told otherwise.
+///
+/// Beside the wallet, so the packages keep both across an upgrade the same way.
+pub fn default_path() -> PathBuf {
+    crate::config::state_file("mint.sqlite")
+}
+
 /// Build and start this node's mint.
 pub async fn build(config: &MintConfig) -> Result<Mint> {
     let unit = currency_unit(&config.unit);
+    let path = &config.file;
+    if let Some(dir) = path.parent()
+        && !dir.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    }
     let db = Arc::new(
-        cdk_sqlite::mint::memory::empty()
+        cdk_sqlite::mint::MintSqliteDatabase::new(path.clone())
             .await
-            .context("open the mint database")?,
+            .with_context(|| format!("open the mint database at {}", path.display()))?,
     );
 
     let mut builder = MintBuilder::new(db.clone())
@@ -334,7 +364,7 @@ impl Bucket {
 ///
 /// The id doubles as the payment's id, which the mint keeps unique across
 /// every quote it has recorded. So the nonce is random rather than counted
-/// from startup: once the mint's database outlives a restart, a counter would
+/// from startup: the mint's database outlives a restart, so a counter would
 /// hand a fresh quote an id already on record, and that quote would never be
 /// paid.
 fn lookup_id(nonce: u128, amount: u64) -> PaymentIdentifier {
@@ -509,7 +539,67 @@ pub async fn serve(
 
 #[cfg(test)]
 mod tests {
+    use cashu::Amount;
+    use cashu::amount::{FeeAndAmounts, SplitTarget};
+    use cashu::dhke::construct_proofs;
+    use cashu::nuts::{
+        Keys, MintQuoteBolt11Request, MintQuoteBolt11Response, MintQuoteState as QuoteState,
+        PreMintSecrets, Proofs, SwapRequest,
+    };
+    use cdk_common::QuoteId;
+    use cdk_common::mint_quote::{MintQuoteRequest, MintQuoteResponse};
+
     use super::*;
+    use crate::tempdir::Dir;
+
+    fn byte_mint(dir: &Dir) -> MintConfig {
+        MintConfig {
+            url: "http://127.0.0.1:0".into(),
+            unit: "byte".into(),
+            seed: vec![7; 32],
+            file: dir.path().join("mint.sqlite"),
+            max_amount: 1_000_000_000,
+            auto_accept: false,
+            issue_limit: IssueLimit::default(),
+        }
+    }
+
+    /// Blinded outputs for `amount` against the mint's active byte keyset.
+    fn outputs(mint: &Mint, amount: u64) -> (PreMintSecrets, Keys) {
+        let id = mint.get_active_keysets()[&CurrencyUnit::Custom("byte".into())];
+        let keys = mint
+            .keyset_pubkeys(&id)
+            .expect("the active keyset's keys")
+            .keysets
+            .remove(0)
+            .keys;
+        let denominations: FeeAndAmounts =
+            (0, keys.keys().keys().map(|a| u64::from(*a)).collect()).into();
+        let secrets =
+            PreMintSecrets::random(id, Amount::from(amount), &SplitTarget::None, &denominations)
+                .expect("blind the outputs");
+        (secrets, keys)
+    }
+
+    /// Vouchers issued straight off the mint, the way the market issues them.
+    async fn issue(mint: &Mint, amount: u64) -> Proofs {
+        let (secrets, keys) = outputs(mint, amount);
+        let signatures = mint
+            .blind_sign(secrets.blinded_messages())
+            .await
+            .expect("sign the outputs");
+        construct_proofs(signatures, secrets.rs(), secrets.secrets(), &keys)
+            .expect("unblind the signatures")
+    }
+
+    /// Redeem `proofs` at the mint, for fresh outputs of the same value.
+    async fn redeem(mint: &Mint, proofs: Proofs) -> Result<(), cdk::Error> {
+        let amount = proofs.iter().map(|p| u64::from(p.amount)).sum();
+        let (secrets, _) = outputs(mint, amount);
+        mint.process_swap_request(SwapRequest::new(proofs, secrets.blinded_messages()))
+            .await
+            .map(|_| ())
+    }
 
     #[test]
     fn the_network_unit_is_a_custom_keyset_unit() {
@@ -616,21 +706,104 @@ mod tests {
 
     #[tokio::test]
     async fn a_byte_denominated_mint_comes_up_with_an_active_keyset() {
-        let mint = build(&MintConfig {
-            url: "http://127.0.0.1:0".into(),
-            unit: "byte".into(),
-            seed: vec![7; 32],
-            max_amount: 1_000_000_000,
-            auto_accept: false,
-            issue_limit: IssueLimit::default(),
-        })
-        .await
-        .expect("build a byte mint");
+        let dir = Dir::new();
+        let mint = build(&byte_mint(&dir)).await.expect("build a byte mint");
 
         assert!(
             mint.get_active_keysets()
                 .contains_key(&CurrencyUnit::Custom("byte".into())),
             "the byte keyset should be active"
         );
+    }
+
+    #[tokio::test]
+    async fn a_voucher_redeemed_before_a_restart_is_still_spent_after_it() {
+        // The keyset comes back after a restart because it is derived from the
+        // seed. If the spent-proof set did not come back with it, a voucher
+        // already paid out would validate a second time.
+        let dir = Dir::new();
+        let config = byte_mint(&dir);
+
+        let proofs = {
+            let mint = build(&config).await.expect("build the mint");
+            let proofs = issue(&mint, 1024).await;
+            redeem(&mint, proofs.clone())
+                .await
+                .expect("the first redemption goes through");
+            mint.stop().await.expect("stop the mint");
+            proofs
+        };
+
+        let mint = build(&config).await.expect("reopen the same database");
+        let err = redeem(&mint, proofs)
+            .await
+            .expect_err("a voucher redeemed before the restart must not redeem again");
+        assert!(
+            matches!(err, cdk::Error::TokenAlreadySpent),
+            "expected the proofs to be spent, got: {err}"
+        );
+    }
+
+    /// Ask `mint` for a quote of `amount` bytes and check it, as a wallet
+    /// would before minting against it.
+    async fn quote_and_check(mint: &Mint, amount: u64) -> MintQuoteBolt11Response<QuoteId> {
+        let created = mint
+            .get_mint_quote(MintQuoteRequest::Bolt11(MintQuoteBolt11Request {
+                amount: Amount::from(amount),
+                unit: CurrencyUnit::Custom("byte".into()),
+                description: None,
+                pubkey: None,
+            }))
+            .await
+            .expect("an auto-accepting mint issues a quote");
+        let MintQuoteResponse::Bolt11(created) = created else {
+            panic!("asked for a Bolt11 quote, got {created:?}");
+        };
+        match mint
+            .check_mint_quote(&created.quote)
+            .await
+            .expect("check the quote")
+        {
+            MintQuoteResponse::Bolt11(checked) => checked,
+            other => panic!("a Bolt11 quote checked as {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn quotes_issued_before_a_restart_do_not_collide_with_those_after_it() {
+        // The mint keeps every quote's lookup id, and every payment's id, unique
+        // across its whole database. Once that database outlives a restart, an
+        // id counted from startup would be issued a second time, and the second
+        // quote would be refused or never paid.
+        let dir = Dir::new();
+        let config = MintConfig {
+            auto_accept: true,
+            ..byte_mint(&dir)
+        };
+
+        let before = {
+            let mint = build(&config).await.expect("build the mint");
+            let quote = quote_and_check(&mint, 1024).await;
+            mint.stop().await.expect("stop the mint");
+            quote
+        };
+
+        let mint = build(&config).await.expect("reopen the same database");
+        let after = quote_and_check(&mint, 1024).await;
+
+        assert_ne!(before.quote, after.quote);
+        assert_ne!(before.request, after.request, "lookup ids are unique");
+        for quote in [&before, &after] {
+            assert_eq!(quote.state, QuoteState::Paid, "{quote:?}");
+            assert_eq!(quote.amount_paid, Amount::from(1024));
+        }
+
+        // And the quote from before the restart is still on record, still paid.
+        let reread = match mint.check_mint_quote(&before.quote).await {
+            Ok(MintQuoteResponse::Bolt11(q)) => q,
+            other => panic!("the earlier quote should still be known, got {other:?}"),
+        };
+        assert_eq!(reread.state, QuoteState::Paid);
+        assert_eq!(reread.request, before.request);
     }
 }

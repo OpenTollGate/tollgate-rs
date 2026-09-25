@@ -4,3 +4,9 @@
 # And the wallet is the money. These are bearer tokens; there is no recovering
 # them from anywhere else.
 /etc/tollgate/wallet.sqlite
+# And the mint's spent-proof set. The keys are derived from the identity, so
+# they come back without it; the memory of what was already redeemed does not.
+/etc/tollgate/mint.sqlite
+# With its write-ahead log: sysupgrade takes its copy while the node is still
+# running, and the most recent redemptions are in the log until a checkpoint.
+/etc/tollgate/mint.sqlite-wal

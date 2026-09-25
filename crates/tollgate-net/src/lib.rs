@@ -40,5 +40,8 @@ pub mod speedtest;
 pub mod wallet;
 pub mod wire;
 
+#[cfg(test)]
+mod tempdir;
+
 pub use identity::Identity;
 pub use node::{Node, NodeConfig, PeerConfig};

@@ -508,18 +508,7 @@ fn describe(token: &str) -> Result<(String, String, u64)> {
 /// Beside the state a service manager already owns, so the packages keep it
 /// across an upgrade without a special case.
 pub fn default_path() -> PathBuf {
-    for candidate in ["/var/lib/tollgate", "/usr/local/var/lib/tollgate"] {
-        let dir = Path::new(candidate);
-        if dir.is_dir() || std::fs::create_dir_all(dir).is_ok() {
-            return dir.join("wallet.sqlite");
-        }
-    }
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
-        && !xdg.is_empty()
-    {
-        return PathBuf::from(format!("{xdg}/tollgate/wallet.sqlite"));
-    }
-    PathBuf::from("/tmp/tollgate-wallet.sqlite")
+    crate::config::state_file("wallet.sqlite")
 }
 
 #[cfg(test)]
@@ -527,8 +516,8 @@ mod tests {
     use super::*;
 
     /// A wallet in a directory that removes itself.
-    async fn wallet() -> (Wallet, tempdir::Dir) {
-        let dir = tempdir::Dir::new();
+    async fn wallet() -> (Wallet, crate::tempdir::Dir) {
+        let dir = crate::tempdir::Dir::new();
         let wallet = Wallet::open(dir.path().join("wallet.sqlite"), [7u8; 64], "byte")
             .await
             .expect("open");
@@ -596,36 +585,5 @@ mod tests {
         // So every `PrepaidTransit` holding is by construction some *other*
         // mint's, and there is no case where the issuer is this node.
         assert_eq!(Kind::of("byte", "byte"), Kind::PrepaidTransit);
-    }
-
-    mod tempdir {
-        use std::path::{Path, PathBuf};
-        use std::sync::atomic::{AtomicU64, Ordering};
-
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-
-        pub struct Dir(PathBuf);
-
-        impl Dir {
-            pub fn new() -> Self {
-                let path = std::env::temp_dir().join(format!(
-                    "tollgate-wallet-test-{}-{}",
-                    std::process::id(),
-                    NEXT.fetch_add(1, Ordering::Relaxed)
-                ));
-                std::fs::create_dir_all(&path).expect("create a temporary directory");
-                Self(path)
-            }
-
-            pub fn path(&self) -> &Path {
-                &self.0
-            }
-        }
-
-        impl Drop for Dir {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
     }
 }

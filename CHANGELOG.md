@@ -170,3 +170,9 @@ Nothing has been released yet. Everything below is on `master` and will ship as
   swap goes to the mint the channel was funded in: our own in process, as
   before, and any other over HTTP. It used to go to our own mint every time,
   which never issued the funding proofs and so could not swap them.
+
+- The mint's spent-proof set is kept on disk (`mint.file`, by default
+  `mint.sqlite` beside the wallet) instead of in memory. The keyset is derived
+  from the identity and survives a restart, so an in-memory spent set let every
+  voucher already redeemed redeem again after one. Both packages keep the file
+  across an upgrade.

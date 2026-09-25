@@ -18,6 +18,7 @@ make -C packaging clean
 | Binaries | `/usr/bin/tollgated`, `/usr/bin/tolltop` | `/usr/local/bin/…` |
 | Config | `/etc/tollgate/tollgate.yaml` | `/usr/local/etc/tollgate/tollgate.yaml` |
 | Wallet | `/etc/tollgate/wallet.sqlite` | `/usr/local/var/lib/tollgate/wallet.sqlite` |
+| Mint database | `/etc/tollgate/mint.sqlite` | `/usr/local/var/lib/tollgate/mint.sqlite` |
 | Service | procd, `/etc/init.d/tollgate` | launchd, `com.tollgate.daemon` |
 | Control socket | `/run/tollgate.sock` | `/usr/local/var/run/tollgate.sock` |
 | Forwarding mode | `nftables` — the real thing | `loopback` — a socket of its own |
@@ -37,7 +38,9 @@ Losing that file is not a reinstall. It is a new node that owes nothing to
 anyone holding the old one's paper.
 
 The wallet beside it is money — bearer tokens, recoverable from nowhere else.
-Both are kept across a sysupgrade, and neither is touched by an upgrade or by
+The mint database beside that is the record of which vouchers this node has
+already redeemed: lose it and every one of them redeems again. All three are
+kept across a sysupgrade, and none is touched by an upgrade or by
 `uninstall.sh` unless you pass `--purge`.
 
 ## OpenWrt
