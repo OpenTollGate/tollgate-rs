@@ -132,6 +132,26 @@ impl ChannelBackend for LocalChannels {
         verify_update(peer, channel_id, cumulative, signature)
     }
 
+    fn record_update(
+        &self,
+        _peer: PubKey,
+        channel_id: ChannelId,
+        _cumulative: u64,
+        _signature: Signature,
+    ) -> Result<()> {
+        // Settlement moves nothing here, so there is no state to keep; what is
+        // left of the step is refusing a channel we never opened.
+        if !self
+            .known
+            .lock()
+            .expect("not poisoned")
+            .contains(&channel_id)
+        {
+            bail!("asked to record an update on a channel we have never seen");
+        }
+        Ok(())
+    }
+
     fn settle(&self, channel_id: ChannelId) -> Result<()> {
         // Settling our own vouchers costs nothing but the service we already
         // sold: it cancels our own claim. There is no mint round-trip to make.

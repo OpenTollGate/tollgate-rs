@@ -256,7 +256,9 @@ impl Node {
                 // as a whole and one bad signature makes the whole thing
                 // unauthentic. The message goes no further, but core still
                 // hears of it: the payer is owed a Reject, and a channel that
-                // keeps failing is closed.
+                // keeps failing is closed. Checking keeps nothing: the backend
+                // records the updates only once core has accepted the
+                // purchase, as `Action::RecordUpdates`.
                 if let Message::TopUp(ref t) = msg
                     && let Some(bad) = t.updates.iter().find(|u| {
                         !self
@@ -354,6 +356,20 @@ impl Node {
                 }
                 self.send(peer, Message::TopUp(TopUp { updates, window_ms }))
                     .await;
+            }
+
+            Action::RecordUpdates { peer, updates } => {
+                // In line, not on a blocking thread: keeping a signed state is
+                // local, and a settlement this purchase set off comes next in
+                // the same action list and has to see it.
+                for u in updates {
+                    if let Err(e) =
+                        self.channels
+                            .record_update(peer, u.channel_id, u.cumulative, u.signature)
+                    {
+                        warn!(%peer, error = format!("{e:#}"), "could not record a channel update");
+                    }
+                }
             }
 
             Action::SetAccess { peer, access } => {

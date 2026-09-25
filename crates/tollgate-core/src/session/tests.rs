@@ -157,7 +157,10 @@ fn run(nodes: &mut [&mut Node], now: Millis, initial: impl IntoIterator<Item = (
                     node.access.insert(peer, access);
                 }
 
-                Action::SettleChannel { .. } | Action::DropPeer { .. } => {}
+                // The channel backend's record, which only settlement reads.
+                Action::RecordUpdates { .. }
+                | Action::SettleChannel { .. }
+                | Action::DropPeer { .. } => {}
             }
         }
     }
@@ -484,6 +487,143 @@ fn a_lapsed_payment_ends_the_session_and_leaves_the_allowance() {
 
     assert_eq!(link.b.access.get(&a), Some(&AccessLevel::None));
     assert_eq!(link.b_shapes_a(), 4_096, "the allowance, not silence");
+}
+
+fn topup(channel_id: ChannelId, cumulative: u64, window_ms: u32) -> Event {
+    Event::MessageReceived {
+        peer: pubkey(0xA1),
+        msg: Message::TopUp(TopUp {
+            updates: vec![ChannelUpdate {
+                channel_id,
+                cumulative,
+                signature: Signature([7; 64]),
+            }],
+            window_ms,
+        }),
+    }
+}
+
+fn records_anything(actions: &[Action]) -> bool {
+    actions
+        .iter()
+        .any(|x| matches!(x, Action::RecordUpdates { .. }))
+}
+
+#[test]
+fn an_accepted_purchase_is_recorded_before_the_channel_it_filled_settles() {
+    // Settlement submits whatever the backend recorded, so the fill has to be
+    // recorded before the settle that follows it, or the channel settles one
+    // purchase short.
+    let mut link = Link::new();
+    link.connect();
+    let a = link.a.id;
+    let channel_id = link.b.sessions.peer(&a).expect("session").grant.channels()[0].id;
+
+    let actions = link
+        .b
+        .sessions
+        .handle(topup(channel_id, CHANNEL_CAPACITY, 1_000), link.now);
+
+    let record = actions
+        .iter()
+        .position(|x| matches!(x, Action::RecordUpdates { .. }))
+        .expect("an accepted purchase is recorded");
+    let settle = actions
+        .iter()
+        .position(|x| matches!(x, Action::SettleChannel { .. }))
+        .expect("the full channel settles");
+    assert!(record < settle, "recorded before it settles: {actions:?}");
+
+    assert_eq!(
+        actions[record],
+        Action::RecordUpdates {
+            peer: a,
+            updates: vec![ChannelUpdate {
+                channel_id,
+                cumulative: CHANNEL_CAPACITY,
+                signature: Signature([7; 64]),
+            }],
+        },
+        "exactly what the peer signed, signature included"
+    );
+}
+
+#[test]
+fn a_refused_purchase_records_nothing() {
+    // The host has already checked the signatures, but core can still refuse:
+    // a window outside what we advertised is one way. Nothing may be recorded
+    // then, or the backend would settle a state no grant paid for.
+    let mut link = Link::new();
+    link.connect();
+    let a = link.a.id;
+    let channel_id = link.b.sessions.peer(&a).expect("session").grant.channels()[0].id;
+
+    let actions = link
+        .b
+        .sessions
+        .handle(topup(channel_id, 1_000, 30_001), link.now);
+
+    assert!(
+        actions.iter().any(|x| matches!(
+            x,
+            Action::Send {
+                msg: Message::TopUpReject(r),
+                ..
+            } if r.reason == ReasonCode::WindowOutOfRange
+        )),
+        "refused for its window: {actions:?}"
+    );
+    assert!(!records_anything(&actions), "{actions:?}");
+}
+
+#[test]
+fn a_purchase_refused_for_one_of_its_updates_records_none_of_them() {
+    // One purchase spanning two channels, the second of which we do not know.
+    // The first is fine on its own, and that is exactly the case that must not
+    // leave it recorded: the purchase is refused as a whole.
+    let mut link = Link::new();
+    link.connect();
+    let a = link.a.id;
+    let channel_id = link.b.sessions.peer(&a).expect("session").grant.channels()[0].id;
+
+    let actions = link.b.sessions.handle(
+        Event::MessageReceived {
+            peer: a,
+            msg: Message::TopUp(TopUp {
+                updates: vec![
+                    ChannelUpdate {
+                        channel_id,
+                        cumulative: 1_000,
+                        signature: Signature([7; 64]),
+                    },
+                    ChannelUpdate {
+                        channel_id: ChannelId([0xEE; 32]),
+                        cumulative: 1_000,
+                        signature: Signature([7; 64]),
+                    },
+                ],
+                window_ms: 1_000,
+            }),
+        },
+        link.now,
+    );
+
+    assert!(
+        actions.iter().any(|x| matches!(
+            x,
+            Action::Send {
+                msg: Message::TopUpReject(r),
+                ..
+            } if r.reason == ReasonCode::FundingInvalid
+        )),
+        "{actions:?}"
+    );
+    assert!(!records_anything(&actions), "{actions:?}");
+    assert_eq!(
+        link.b.sessions.peer(&a).expect("session").grant.channels()[0].signed,
+        0,
+        "and the grant never moved either"
+    );
 }
 
 #[test]

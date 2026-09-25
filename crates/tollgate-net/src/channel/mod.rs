@@ -77,9 +77,14 @@ pub trait ChannelBackend: Send + Sync + std::fmt::Debug {
     /// Sign a ratchet turn on a channel we fund.
     fn sign_update(&self, channel_id: ChannelId, cumulative: u64) -> Result<Signature>;
 
-    /// Check a peer's ratchet turn on a channel it funds.
+    /// Check a peer's ratchet turn on a channel it funds, **without keeping
+    /// it**.
     ///
-    /// Called before the message reaches core, which trusts what it is handed.
+    /// Called on every update in a TopUp before the message reaches core, which
+    /// trusts what it is handed. It must not change what the backend has
+    /// recorded: a purchase is honored or refused as a whole, so an update that
+    /// verifies can still belong to one that is refused — because another
+    /// update in it did not verify, or because core declined it.
     fn verify_update(
         &self,
         peer: PubKey,
@@ -87,6 +92,21 @@ pub trait ChannelBackend: Send + Sync + std::fmt::Debug {
         cumulative: u64,
         signature: Signature,
     ) -> bool;
+
+    /// Keep a peer's ratchet turn as the channel's latest signed state — the
+    /// one [`Self::settle`] submits.
+    ///
+    /// Called only for updates that passed [`Self::verify_update`] and belong
+    /// to a purchase core accepted, when it emits [`Action::RecordUpdates`].
+    ///
+    /// [`Action::RecordUpdates`]: tollgate_core::Action::RecordUpdates
+    fn record_update(
+        &self,
+        peer: PubKey,
+        channel_id: ChannelId,
+        cumulative: u64,
+        signature: Signature,
+    ) -> Result<()>;
 
     /// Settle a channel: submit the latest signed state, reclaim the change.
     fn settle(&self, channel_id: ChannelId) -> Result<()>;
