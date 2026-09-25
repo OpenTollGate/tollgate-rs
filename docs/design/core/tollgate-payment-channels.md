@@ -144,7 +144,7 @@ Settlement complete. Proofs distributed. Channel is done.
 
 ### Free Peering Shortcut
 
-When a node decides not to charge a peer, it funds no channel toward that peer and meters nothing for it. If **both** sides decide that, the pair goes directly to Active with no funding, no channels, no metering, and no balance updates.
+When a node decides not to charge a peer, it meters nothing for it and says so in its Offer (field 5, [tollgate-protocol.md](tollgate-protocol.md)), so the peer funds no channel toward it and sends it no TopUp. If **both** sides decide that, the pair goes directly to `Free` with no funding, no channels, no metering, and no balance updates.
 
 This is a decision about a relationship, not a price — there is no delivery price to set to zero. It is also one-sided: a node chooses only whether it charges, so a peering can legitimately run with one channel.
 

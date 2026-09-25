@@ -293,7 +293,7 @@ peers:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `no_charge` | `false` | Do not charge this peer. One-sided — whether the peer charges back is its own decision |
+| `no_charge` | `false` | Do not charge this peer, and tell it so in the Offer, so it funds no channel toward this node. One-sided — whether the peer charges back is its own decision |
 | `received_multiplier` | *(from `vouchers.received_multiplier`)* | Unsigned surcharge on what this peer pushes at us, on top of it being paid for delivering it |
 | `blocked` | `false` | Refuse all service to this peer |
 | `endpoint` | *(none)* | Static endpoint for IP peering |

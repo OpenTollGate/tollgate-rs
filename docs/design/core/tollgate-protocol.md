@@ -209,7 +209,7 @@ Both peers send Announce. If versions don't match, whichever side notices sends 
 |-----|------|---------|
 | `0x01`–`0x80000000` | reserved | Must be zero in v1. Reserved for future capabilities (e.g., FSP transport, batch settlement). |
 
-Spilman support is universal in v1 — there is no per-token payment mode to signal. Free peering and channel rollover fall out of the existing message set and need no capability bit either.
+Spilman support is universal in v1 — there is no per-token payment mode to signal. Free peering (Offer field 5) and channel rollover need no capability bit either.
 
 ### 0x01 Offer
 
@@ -226,8 +226,18 @@ payment in, and how welcome the peer's outgoing traffic is.
   4: <received_multiplier>,        // u16 — surcharge on units I receive from you,
                                    //   on top of you paying for what I deliver.
                                    //   Default 0 = no surcharge
+  5: true,                         // bool, optional — I will not charge you.
+                                   //   Written only when true; absent = I charge
 }
 ```
+
+Field 5 is one-sided: it says only whether the sender charges the receiver,
+never whether the receiver charges back. A receiver that sees it funds no
+channel toward the sender, sends it no TopUp, and answers with an Accept whose
+funding is empty. It is omitted rather than written as `false`, so the Offer of
+a node that charges is byte-for-byte what it was before the field existed, and
+a peer that predates it decodes it as charging. It does not relax field 1: the
+mint list stays mandatory.
 
 Field 1 is ordered: the first entry is what the sender would rather hold, and
 a payer that can fund in any of them should fund in the earliest it can. An
@@ -654,8 +664,8 @@ service. There is no pre-channel phase.
   A → B: Announce
   B → A: Announce
 
-  A → B: Offer (no charge)
-  B → A: Offer (no charge)
+  A → B: Offer (field 5: true — no charge)
+  B → A: Offer (field 5: true — no charge)
   B → A: Accept (no Spilman funding — neither charges)
   A → B: Accept (no Spilman funding — neither charges)
 
@@ -723,7 +733,7 @@ Plus 2 bytes of length prefix per message. Setup messages are one-time. TopUp is
 | Money in the protocol | Never appears | Sats are a market concern; the payment protocol only ever counts units and vouchers |
 | Message numbering | Contiguous, 0x00–0x0B | No reserved gaps. v1 is unreleased, so the codes describe the protocol as designed rather than its history |
 | ChannelReady direction | Implied by the sender | The party that verified the funding is the party that will be paid on that channel, so a direction field would restate what the sender already says |
-| Free mode | Accept without funding, skip metering | Simplest path for free peering |
+| Free mode | Offer field 5, then Accept without funding, skip metering | Simplest path for free peering. The flag is omitted when false, so an Offer from a node that charges is unchanged |
 | Channel ownership | Each peer manages its own outgoing channel | Channels carry shared state, but rollover is initiated by the funder alone — only the party putting up new funds decides when to do it |
 | Capability signaling | u32 bitfield in Announce (field 4), all bits reserved in v1 | Spilman is universal now that per-token payment is gone; the field stays for future use |
 | Versioning | Single byte in Announce, must-match | Simple for v1, can add negotiation later |

@@ -37,6 +37,13 @@ pub struct Offer {
     /// Unsigned surcharge on units received from the peer. `0` is no surcharge;
     /// the net rate on the peer's upload is `m - 1`.
     pub received_multiplier: u16,
+    /// This node will not charge the peer, so the peer funds no channel toward
+    /// it and sends it no TopUps.
+    ///
+    /// One-sided: it says only whether *we* charge, never whether the peer
+    /// does. Key `5` on the wire, written only when `true`, so an Offer from a
+    /// node that charges is byte-for-byte what it was without this field.
+    pub no_charge: bool,
 }
 
 /// `0x02` — accept the offer and fund the outgoing channel. Nothing is echoed

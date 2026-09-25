@@ -232,12 +232,17 @@ impl Sessions {
     }
 
     /// What this node advertises to one peer: which mints it will take, the
-    /// unit, the window range, and one unsigned multiplier. No price anywhere.
+    /// unit, the window range, one unsigned multiplier, and whether we charge
+    /// it at all. No price anywhere.
     ///
     /// The multiplier is the one that peer's grant will be drawn down under,
     /// override included. The payer sizes its purchases from it, so
     /// advertising the node-wide value to a peer we surcharge harder would
     /// have it under-buy and be shaped below what it needs.
+    ///
+    /// Not charging is our decision alone, but the peer has to hear it —
+    /// otherwise its buyer funds a channel and tops up toward a node that was
+    /// never going to meter it.
     fn our_offer(&self, policy: &PeerPolicy) -> Message {
         Message::Offer(Offer {
             accepted_mints: self.node.accepted_mints.clone(),
@@ -245,6 +250,7 @@ impl Sessions {
             min_window_ms: self.node.grants.min_window_ms,
             max_window_ms: self.node.grants.max_window_ms,
             received_multiplier: policy.multiplier(&self.node),
+            no_charge: policy.no_charge,
         })
     }
 
@@ -369,6 +375,7 @@ impl Sessions {
                 max_ms: m.max_window_ms,
             },
             received_multiplier: m.received_multiplier,
+            no_charge: m.no_charge,
         });
         if session.phase == Phase::Opening {
             session.phase = Phase::Establishing;
@@ -383,9 +390,12 @@ impl Sessions {
         // their list we can use. Their own mint need not be in it: a
         // pass-through relay may name only its upstream's, so it can spend what
         // it receives without converting.
+        //
+        // Not if they will not charge us: there is nothing to buy, so no
+        // channel, and the empty Accept tells them so.
         let mint = m.accepted_mints.first().cloned();
         match mint {
-            Some(mint_url) if self.buyer_policy.max_rate > 0 => {
+            Some(mint_url) if !m.no_charge && self.buyer_policy.max_rate > 0 => {
                 out.push(Action::FundChannel {
                     peer,
                     mint_url,
@@ -393,8 +403,9 @@ impl Sessions {
                 });
             }
             _ => {
-                // We are not buying from this peer. Accept without funding,
-                // which is what free peering looks like from this side.
+                // We are not buying from this peer — it does not charge us,
+                // or we buy nothing at all. Accept without funding, which is
+                // what free peering looks like from this side.
                 out.push(Action::Send {
                     peer,
                     msg: Message::Accept(Accept {
@@ -588,6 +599,10 @@ impl Sessions {
         let Some(offer) = session.offer.as_ref() else {
             return;
         };
+        if offer.no_charge {
+            // Nothing to buy, and no channel to sign against.
+            return;
+        }
 
         // A unit we download draws one from our grant; a unit we upload draws
         // the peer's multiplier. Buying for the download alone would leave us

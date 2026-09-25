@@ -126,7 +126,9 @@ pub fn encode(msg: &Message, out: &mut Vec<u8>) -> Result<(), Error> {
             e.u8(4)?.u32(m.capabilities)?;
         }
         Message::Offer(m) => {
-            e.map(5)?;
+            // Key 5 is left out rather than written as `false`: absent is the
+            // default, and a peer that predates it skips nothing it never saw.
+            e.map(if m.no_charge { 6 } else { 5 })?;
             e.u8(0)?.u8(tag)?;
             e.u8(1)?.array(m.accepted_mints.len() as u64)?;
             for mint in &m.accepted_mints {
@@ -138,6 +140,9 @@ pub fn encode(msg: &Message, out: &mut Vec<u8>) -> Result<(), Error> {
                 .u32(m.min_window_ms)?
                 .u32(m.max_window_ms)?;
             e.u8(4)?.u16(m.received_multiplier)?;
+            if m.no_charge {
+                e.u8(5)?.bool(true)?;
+            }
         }
         Message::Accept(m) => {
             e.map(2)?;
@@ -324,7 +329,7 @@ fn decode_announce(d: &mut Decoder<'_>, pairs: u64) -> Result<Announce, Error> {
 
 fn decode_offer(d: &mut Decoder<'_>, pairs: u64) -> Result<Offer, Error> {
     let mut mints: Option<Vec<String>> = None;
-    let (mut unit, mut windows, mut multiplier) = (None, None, None);
+    let (mut unit, mut windows, mut multiplier, mut no_charge) = (None, None, None, None);
     for _ in 0..pairs {
         match d.u8()? {
             0 => {
@@ -351,6 +356,7 @@ fn decode_offer(d: &mut Decoder<'_>, pairs: u64) -> Result<Offer, Error> {
                 windows = Some((d.u32()?, d.u32()?));
             }
             4 => multiplier = Some(d.u16()?),
+            5 => no_charge = Some(d.bool()?),
             _ => d.skip()?,
         }
     }
@@ -375,6 +381,8 @@ fn decode_offer(d: &mut Decoder<'_>, pairs: u64) -> Result<Offer, Error> {
         max_window_ms,
         // The multiplier defaults to 0 — no surcharge, the base rule stands.
         received_multiplier: multiplier.unwrap_or(0),
+        // Absent means the sender charges, which is the ordinary case.
+        no_charge: no_charge.unwrap_or(false),
     })
 }
 
