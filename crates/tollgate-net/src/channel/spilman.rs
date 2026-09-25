@@ -44,6 +44,10 @@ use tracing::debug;
 
 use super::{CannotSettle, ChannelBackend, FundedChannel, MintNotAccepted, VerifiedChannel};
 
+mod funding;
+
+use funding::Funding;
+
 /// Shortest expiry we will accept on a channel a peer funds to pay us.
 ///
 /// The refund timelock is what a payer would rely on if the receiver vanished,
@@ -220,33 +224,23 @@ impl SpilmanChannels {
         mint_of_params(&funding.params_json)
     }
 
-    /// Make sure we hold the keys for the keyset a peer funded against.
+    /// Make sure we hold the keys for the keyset a peer funded against, and
+    /// return them as cdk-spilman reads them.
     ///
     /// The receiver will not accept a channel on a keyset it cannot verify
     /// signatures against, and there is no way to know ahead of time which
     /// keyset of which accepted mint a peer will choose.
-    fn cache_keyset(&self, params: &serde_json::Value) -> Result<()> {
-        let mint = params["mint"]
-            .as_str()
-            .ok_or_else(|| anyhow!("channel parameters name no mint"))?;
-        let keyset_id = params["keyset_id"]
-            .as_str()
-            .or_else(|| params["keyset_info"]["keysetId"].as_str())
-            .ok_or_else(|| anyhow!("channel parameters name no keyset"))?;
-
+    fn cache_keyset(&self, mint: &str, id: cashu::nuts::Id) -> Result<String> {
         if !self.config.accepted_mints.iter().any(|m| m == mint) {
             return Err(MintNotAccepted(mint.to_owned()).into());
         }
 
-        let id: cashu::nuts::Id = keyset_id
-            .parse()
-            .map_err(|e| anyhow!("keyset id {keyset_id:?}: {e}"))?;
-
+        let keyset_id = id.to_string();
         let info = self
             .client
             .lock()
             .expect("not poisoned")
-            .fetch_keyset_info(mint, keyset_id)
+            .fetch_keyset_info(mint, &keyset_id)
             .map_err(|e| anyhow!("read keyset {keyset_id} from {mint}: {e}"))?;
 
         self.server
@@ -255,13 +249,13 @@ impl SpilmanChannels {
                 mint,
                 id,
                 KeysetCacheEntry {
-                    info_json: info,
+                    info_json: info.clone(),
                     active: true,
                     unit: crate::mint::currency_unit(&self.config.unit),
                 },
             )
             .map_err(|e| anyhow!("cache keyset {keyset_id}: {e}"))?;
-        Ok(())
+        Ok(info)
     }
 }
 
@@ -323,20 +317,6 @@ fn signature_from_hex(s: &str) -> Result<Signature> {
         .try_into()
         .map_err(|_| anyhow!("signature is not 64 bytes"))?;
     Ok(Signature(bytes))
-}
-
-/// What travels in `Accept` and `RolloverInit`.
-///
-/// Spilman carries funding with the first payment; the TollGate handshake
-/// confirms a channel before any grant, so the opening payment is pulled out
-/// and sent here instead. Its balance is zero — it buys nothing, it only opens.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct FundingBlob {
-    channel_id: String,
-    balance: u64,
-    signature: String,
-    params: serde_json::Value,
-    funding_proofs: serde_json::Value,
 }
 
 impl SpilmanChannels {
@@ -434,9 +414,9 @@ impl SpilmanChannels {
         })
     }
 
-    /// Open a channel to pay `peer` out of vouchers already held, and package
-    /// what the peer needs to verify it.
-    fn open_funded(
+    /// Open a channel to `peer` from a token of its vouchers, and describe the
+    /// funding for the peer.
+    fn open(
         &self,
         peer: PubKey,
         mint_url: &str,
@@ -464,26 +444,10 @@ impl SpilmanChannels {
             .sign_channel_registration(&opened.channel_id)
             .map_err(|e| anyhow!("prepare funding for {}: {e}", opened.channel_id))?;
 
-        let blob = FundingBlob {
-            channel_id: opened.channel_id.clone(),
-            balance: opening.balance,
-            signature: opening.signature.clone(),
-            params: opening
-                .params
-                .clone()
-                .ok_or_else(|| anyhow!("the opening payment carried no channel parameters"))?,
-            funding_proofs: serde_json::to_value(
-                opening
-                    .funding_proofs
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("the opening payment carried no proofs"))?,
-            )?,
-        };
-
         Ok(FundedChannel {
             channel_id: channel_id_from_hex(&opened.channel_id)?,
             capacity: opened.capacity,
-            funding: serde_json::to_vec(&blob)?,
+            funding: Funding::from_opening(&opening)?.encode(),
         })
     }
 }
@@ -508,43 +472,41 @@ impl ChannelBackend for SpilmanChannels {
             .buy_vouchers(mint_url, capacity, &keyset_info)
             .with_context(|| format!("buy {capacity} {} from {mint_url}", self.config.unit))?;
 
-        self.open_funded(peer, mint_url, &token, &keyset_info)
+        self.open(peer, mint_url, &token, &keyset_info)
     }
 
     fn verify(&self, _peer: PubKey, funding: &[u8]) -> Result<VerifiedChannel> {
-        let blob: FundingBlob =
-            serde_json::from_slice(funding).context("funding blob is not the expected shape")?;
-        let proofs: Vec<cashu::nuts::Proof> = serde_json::from_value(blob.funding_proofs)
-            .context("funding blob carried unreadable proofs")?;
+        let funding = Funding::decode(funding)?;
 
         // A keyset is only acceptable once we hold its keys, and we cannot know
         // in advance which of our accepted mints a peer will fund against — or
         // which keyset that mint had active at the time. So it is fetched when
         // the funding names it, from the mint that issued it.
-        self.cache_keyset(&blob.params)?;
+        let keyset_info = self.cache_keyset(&funding.terms.mint, funding.terms.keyset_id)?;
+
+        // Everything the peer left out, rebuilt from what it sent: the keyset,
+        // the secret we share, and from those the proofs themselves.
+        let ours = cashu::nuts::SecretKey::from_hex(&self.config.secret_key_hex)
+            .map_err(|e| anyhow!("bad secret: {e}"))?;
+        let opening = funding.open(&keyset_info, &ours)?;
 
         // This is where the money is checked: locked to the two of us, against
         // a mint and keyset we accept, and not already spent.
         let funded = self
             .server
             .fund_channel(
-                &blob.channel_id,
-                blob.balance,
-                &blob.signature,
-                Some(&blob.params),
-                Some(&proofs),
+                &opening.channel_id,
+                0,
+                &opening.signature,
+                Some(&opening.params),
+                Some(&opening.proofs),
             )
             .map_err(|e| anyhow!("peer funding did not verify: {e:?}"))?;
 
-        let mint_url = blob.params["mint"]
-            .as_str()
-            .ok_or_else(|| anyhow!("channel parameters name no mint"))?
-            .to_owned();
-
         Ok(VerifiedChannel {
-            channel_id: channel_id_from_hex(&blob.channel_id)?,
+            channel_id: channel_id_from_hex(&opening.channel_id)?,
             capacity: funded.capacity,
-            mint_url,
+            mint_url: funding.terms.mint,
         })
     }
 
@@ -795,6 +757,149 @@ mod tests {
         assert!(signature_from_hex(&hex::encode([0u8; 32])).is_err());
     }
 
+    /// Byte mints on loopback ports and backends around them, shared by the
+    /// purchase, funding and settlement tests below.
+    mod live {
+        use std::str::FromStr;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        use cashu::amount::{FeeAndAmounts, SplitTarget};
+        use cashu::mint_url::MintUrl;
+        use cashu::nuts::{CurrencyUnit, PreMintSecrets, Token};
+        use cdk_spilman::parse_keyset_info_from_json;
+
+        use super::*;
+        use crate::mint::MintConfig;
+
+        pub(super) const PAYER: [u8; 32] = [1; 32];
+        pub(super) const PAYEE: [u8; 32] = [2; 32];
+
+        pub(super) fn pubkey(secret: [u8; 32]) -> PubKey {
+            PubKey(
+                cashu::nuts::SecretKey::from_slice(&secret)
+                    .expect("key")
+                    .public_key()
+                    .to_bytes(),
+            )
+        }
+
+        /// A byte mint served over HTTP, as a peer reaches it.
+        pub(super) async fn serve_mint(seed: u8) -> (Arc<Mint>, String) {
+            let addr = std::net::TcpListener::bind("127.0.0.1:0")
+                .and_then(|l| l.local_addr())
+                .expect("a free port");
+            let url = format!("http://{addr}");
+            let mint = Arc::new(
+                crate::mint::build(&MintConfig {
+                    url: url.clone(),
+                    unit: "byte".into(),
+                    seed: vec![seed; 32],
+                    max_amount: u64::MAX,
+                })
+                .await
+                .expect("build the mint"),
+            );
+            tokio::spawn(crate::mint::serve(
+                Arc::clone(&mint),
+                axum::Router::new(),
+                addr,
+                std::future::pending(),
+            ));
+            for _ in 0..100 {
+                if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                    return (mint, url);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            panic!("the mint never came up on {addr}");
+        }
+
+        /// A directory that removes itself, for a wallet nothing reads again.
+        pub(super) struct TempDir(std::path::PathBuf);
+
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        /// A backend running `mint` at `mint_url` and taking payment in
+        /// `accepted_mints`, with a wallet it never uses.
+        pub(super) async fn backend(
+            mint: &Arc<Mint>,
+            mint_url: &str,
+            accepted_mints: Vec<String>,
+            secret: [u8; 32],
+        ) -> (SpilmanChannels, TempDir) {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let dir = TempDir(std::env::temp_dir().join(format!(
+                "tollgate-spilman-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            )));
+            let wallet = crate::wallet::Wallet::open(dir.0.join("wallet.sqlite"), [7; 64], "byte")
+                .await
+                .expect("open a wallet");
+            let backend = SpilmanChannels::new(SpilmanConfig {
+                mint: Arc::clone(mint),
+                mint_url: mint_url.into(),
+                unit: "byte".into(),
+                accepted_mints,
+                secret_key_hex: hex::encode(secret),
+                wallet,
+                money: None,
+            })
+            .expect("build the backend");
+            (backend, dir)
+        }
+
+        /// The active byte keyset of the mint at `mint_url`, as `payer` reads
+        /// it to fund a channel there.
+        pub(super) fn keyset_info(payer: &SpilmanChannels, mint_url: &str) -> String {
+            let keyset_id = crate::market::active_keyset(mint_url, "byte").expect("keyset");
+            payer
+                .client
+                .lock()
+                .expect("not poisoned")
+                .fetch_keyset_info(mint_url, &keyset_id)
+                .expect("keyset info")
+        }
+
+        /// A token of `amount` vouchers, signed by the mint directly — the
+        /// same thing the market does once it has been paid.
+        pub(super) fn vouchers(
+            mint: &Mint,
+            mint_url: &str,
+            keyset_info: &str,
+            amount: u64,
+        ) -> String {
+            let info = parse_keyset_info_from_json(keyset_info).expect("keyset info");
+            let mut amounts = info.amounts_largest_first.clone();
+            amounts.reverse();
+            let fees: FeeAndAmounts = (info.input_fee_ppk, amounts).into();
+            let premint =
+                PreMintSecrets::random(info.keyset_id, amount.into(), &SplitTarget::None, &fees)
+                    .expect("blinded messages");
+            let signatures = tokio::runtime::Handle::current()
+                .block_on(mint.blind_sign(premint.blinded_messages()))
+                .expect("blind sign");
+            let proofs = cashu::dhke::construct_proofs(
+                signatures,
+                premint.rs(),
+                premint.secrets(),
+                &info.active_keys,
+            )
+            .expect("unblind");
+            Token::new(
+                MintUrl::from_str(mint_url).expect("mint url"),
+                proofs,
+                None,
+                CurrencyUnit::Custom("byte".into()),
+            )
+            .to_string()
+        }
+    }
+
     /// A receiver with a real mint served over HTTP, and a payer holding its
     /// vouchers.
     struct Pair {
@@ -804,73 +909,26 @@ mod tests {
         receiver_key: PubKey,
         payer: SpilmanChannels,
         payer_key: PubKey,
-        dir: std::path::PathBuf,
+        _wallets: [live::TempDir; 2],
     }
 
     impl Pair {
         async fn start() -> Self {
-            let port = std::net::TcpListener::bind("127.0.0.1:0")
-                .expect("find a free port")
-                .local_addr()
-                .expect("its address")
-                .port();
-            let mint_url = format!("http://127.0.0.1:{port}");
-            let mint = Arc::new(
-                crate::mint::build(&crate::mint::MintConfig {
-                    url: mint_url.clone(),
-                    unit: "byte".into(),
-                    seed: vec![3; 32],
-                    max_amount: 1 << 30,
-                })
-                .await
-                .expect("build the mint"),
-            );
-            tokio::spawn(crate::mint::serve(
-                Arc::clone(&mint),
-                axum::Router::new(),
-                ([127, 0, 0, 1], port).into(),
-                std::future::pending(),
-            ));
-
-            let dir = std::env::temp_dir().join(format!(
-                "tollgate-spilman-test-{}-{port}",
-                std::process::id()
-            ));
-            let receiver_id = crate::identity::Identity::generate();
-            let payer_id = crate::identity::Identity::generate();
-            let backend = |id: &crate::identity::Identity, name: &str| {
-                let dir = dir.clone();
-                let mint = Arc::clone(&mint);
-                let mint_url = mint_url.clone();
-                let secret_key_hex = id.secret_hex();
-                let name = name.to_owned();
-                async move {
-                    let wallet = crate::wallet::Wallet::open(dir.join(name), [9; 64], "byte")
-                        .await
-                        .expect("open a wallet");
-                    SpilmanChannels::new(SpilmanConfig {
-                        mint,
-                        mint_url: mint_url.clone(),
-                        unit: "byte".into(),
-                        accepted_mints: vec![mint_url],
-                        secret_key_hex,
-                        wallet,
-                        money: None,
-                    })
-                    .expect("build a backend")
-                }
-            };
-            let receiver = backend(&receiver_id, "receiver.sqlite").await;
-            let payer = backend(&payer_id, "payer.sqlite").await;
+            let (mint, mint_url) = live::serve_mint(3).await;
+            let accepted = vec![mint_url.clone()];
+            let (receiver, receiver_wallet) =
+                live::backend(&mint, &mint_url, accepted.clone(), live::PAYEE).await;
+            let (payer, payer_wallet) =
+                live::backend(&mint, &mint_url, accepted, live::PAYER).await;
 
             Self {
                 mint,
                 mint_url,
                 receiver,
-                receiver_key: receiver_id.pubkey(),
+                receiver_key: live::pubkey(live::PAYEE),
                 payer,
-                payer_key: payer_id.pubkey(),
-                dir,
+                payer_key: live::pubkey(live::PAYER),
+                _wallets: [receiver_wallet, payer_wallet],
             }
         }
 
@@ -878,42 +936,12 @@ mod tests {
         /// would sell — and open a channel on them that the receiver has
         /// verified. Runs on a blocking thread: every call here is.
         fn open_channel(&self, amount: u64) -> ChannelId {
-            let keyset_id = (0..50)
-                .find_map(|_| {
-                    crate::market::active_keyset(&self.mint_url, "byte")
-                        .map_err(|_| std::thread::sleep(std::time::Duration::from_millis(50)))
-                        .ok()
-                })
-                .expect("the mint comes up");
-            let keyset_info = self
-                .payer
-                .client
-                .lock()
-                .expect("not poisoned")
-                .fetch_keyset_info(&self.mint_url, &keyset_id)
-                .expect("keyset info");
-
-            let blinded: serde_json::Value = serde_json::from_str(
-                &cdk_spilman::create_plain_blinded_messages(amount, &keyset_info).expect("blind"),
-            )
-            .expect("blinded json");
-            let outputs: Vec<cdk::nuts::BlindedMessage> =
-                serde_json::from_value(blinded["blinded_messages"].clone()).expect("outputs");
-            let signatures = tokio::runtime::Handle::current()
-                .block_on(self.mint.blind_sign(outputs))
-                .expect("the mint signs");
-            let proofs = cdk_spilman::construct_proofs(
-                &serde_json::to_string(&signatures).expect("signatures"),
-                &blinded["secrets_with_blinding"].to_string(),
-                &keyset_info,
-            )
-            .expect("unblind");
-            let token =
-                cdk_spilman::build_cashu_b_token(&self.mint_url, "byte", &proofs).expect("token");
+            let keyset_info = live::keyset_info(&self.payer, &self.mint_url);
+            let token = live::vouchers(&self.mint, &self.mint_url, &keyset_info, amount);
 
             let funded = self
                 .payer
-                .open_funded(self.receiver_key, &self.mint_url, &token, &keyset_info)
+                .open(self.receiver_key, &self.mint_url, &token, &keyset_info)
                 .expect("open a channel");
             let verified = self
                 .receiver
@@ -929,12 +957,6 @@ mod tests {
                 .host()
                 .get_balance(&channel_id_to_hex(channel_id))
                 .map_or(0, |p| p.balance)
-        }
-    }
-
-    impl Drop for Pair {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
 
@@ -985,116 +1007,100 @@ mod tests {
         .expect("the test ran");
     }
 
+    /// Real funding, end to end: a byte mint on a loopback port, two backends,
+    /// a channel opened by one and verified by the other through the blob.
+    mod funded {
+        use super::live::{PAYEE, PAYER, backend, keyset_info, pubkey, serve_mint, vouchers};
+        use super::*;
+
+        const GIB: u64 = 1 << 30;
+
+        /// The blob as it was before: cdk-spilman's opening payment, as JSON.
+        fn legacy_size(opening: &cdk_spilman::Payment) -> usize {
+            serde_json::to_vec(&serde_json::json!({
+                "channel_id": opening.channel_id,
+                "balance": opening.balance,
+                "signature": opening.signature,
+                "params": opening.params,
+                "funding_proofs": opening.funding_proofs,
+            }))
+            .expect("serialize")
+            .len()
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_channel_funded_by_one_side_verifies_on_the_other() {
+            let (mint, url) = serve_mint(7).await;
+            let (payer, _payer_wallet) = backend(&mint, &url, vec![url.clone()], PAYER).await;
+            let (payee, _payee_wallet) = backend(&mint, &url, vec![url.clone()], PAYEE).await;
+
+            // Every backend call blocks, as it does when the node drives it.
+            tokio::task::spawn_blocking(move || {
+                let keyset_info = keyset_info(&payer, &url);
+
+                // Exactly 1 GiB is a single proof; one byte short of it is
+                // thirty, the most a channel that size can take.
+                for capacity in [GIB, GIB - 1] {
+                    let token = vouchers(&mint, &url, &keyset_info, capacity);
+                    let funded = payer
+                        .open(pubkey(PAYEE), &url, &token, &keyset_info)
+                        .expect("fund");
+                    assert_eq!(funded.capacity, capacity);
+
+                    let opening = payer
+                        .client
+                        .lock()
+                        .expect("not poisoned")
+                        .sign_channel_registration(&channel_id_to_hex(funded.channel_id))
+                        .expect("opening payment");
+                    let proofs = opening.funding_proofs.as_ref().map_or(0, Vec::len);
+                    let (old, new) = (legacy_size(&opening), funded.funding.len());
+                    println!(
+                        "capacity {capacity}: {proofs} proofs, JSON blob {old} bytes, CBOR blob {new} bytes"
+                    );
+                    assert!(new * 4 < old, "{new} bytes is not much smaller than {old}");
+
+                    // A mint signature the payer cannot vouch for is refused.
+                    let mut forged = funded.funding.clone();
+                    let at = forged.len() - 40;
+                    forged[at] ^= 1;
+                    assert!(payee.verify(pubkey(PAYER), &forged).is_err());
+
+                    // A mint we do not accept is refused as that, before its
+                    // keyset is fetched from an address nothing answers on.
+                    let mut elsewhere = Funding::decode(&funded.funding).expect("decode");
+                    elsewhere.terms.mint = "http://127.0.0.1:9".into();
+                    let refused = payee
+                        .verify(pubkey(PAYER), &elsewhere.encode())
+                        .expect_err("an unaccepted mint");
+                    assert!(refused.downcast_ref::<MintNotAccepted>().is_some());
+
+                    // Terms that would split the funding into more proofs than
+                    // were sent are refused before any is derived.
+                    let mut split = Funding::decode(&funded.funding).expect("decode");
+                    split.terms.maximum_amount = 1;
+                    assert!(payee.verify(pubkey(PAYER), &split.encode()).is_err());
+
+                    let verified = payee
+                        .verify(pubkey(PAYER), &funded.funding)
+                        .expect("the payee accepts the funding");
+                    assert_eq!(verified.channel_id, funded.channel_id);
+                    assert_eq!(verified.capacity, capacity);
+                    assert_eq!(verified.mint_url, url);
+                }
+            })
+            .await
+            .expect("funding");
+        }
+    }
+
     /// Real settlement, end to end: two byte mints on loopback ports, a payee
     /// running one and accepting both, and a payer funding a channel in each.
     mod settled {
-        use std::sync::atomic::{AtomicU64, Ordering};
-
+        use super::live::{PAYEE, PAYER, backend, keyset_info, pubkey, serve_mint, vouchers};
         use super::*;
-        use crate::mint::MintConfig;
 
-        const PAYER: [u8; 32] = [1; 32];
-        const PAYEE: [u8; 32] = [2; 32];
         const CAPACITY: u64 = 1 << 20;
-
-        fn pubkey(secret: [u8; 32]) -> PubKey {
-            PubKey(
-                cashu::nuts::SecretKey::from_slice(&secret)
-                    .expect("key")
-                    .public_key()
-                    .to_bytes(),
-            )
-        }
-
-        /// A byte mint served over HTTP, as a peer reaches it.
-        async fn serve_mint(seed: u8) -> (Arc<Mint>, String) {
-            let addr = std::net::TcpListener::bind("127.0.0.1:0")
-                .and_then(|l| l.local_addr())
-                .expect("a free port");
-            let url = format!("http://{addr}");
-            let mint = Arc::new(
-                crate::mint::build(&MintConfig {
-                    url: url.clone(),
-                    unit: "byte".into(),
-                    seed: vec![seed; 32],
-                    max_amount: u64::MAX,
-                })
-                .await
-                .expect("build the mint"),
-            );
-            tokio::spawn(crate::mint::serve(
-                Arc::clone(&mint),
-                axum::Router::new(),
-                addr,
-                std::future::pending(),
-            ));
-            for _ in 0..100 {
-                if tokio::net::TcpStream::connect(addr).await.is_ok() {
-                    return (mint, url);
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-            panic!("the mint never came up on {addr}");
-        }
-
-        /// A directory that removes itself, for a wallet nothing reads again.
-        struct TempDir(std::path::PathBuf);
-
-        impl Drop for TempDir {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-
-        /// A backend running `mint` at `mint_url` and taking payment in
-        /// `accepted_mints`, with a wallet it never uses.
-        async fn backend(
-            mint: &Arc<Mint>,
-            mint_url: &str,
-            accepted_mints: Vec<String>,
-            secret: [u8; 32],
-        ) -> (SpilmanChannels, TempDir) {
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            let dir = TempDir(std::env::temp_dir().join(format!(
-                "tollgate-settle-test-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            )));
-            let wallet = crate::wallet::Wallet::open(dir.0.join("wallet.sqlite"), [7; 64], "byte")
-                .await
-                .expect("open a wallet");
-            let backend = SpilmanChannels::new(SpilmanConfig {
-                mint: Arc::clone(mint),
-                mint_url: mint_url.into(),
-                unit: "byte".into(),
-                accepted_mints,
-                secret_key_hex: hex::encode(secret),
-                wallet,
-                money: None,
-            })
-            .expect("build the backend");
-            (backend, dir)
-        }
-
-        /// A token of `amount` vouchers, signed by the mint directly — the
-        /// same thing the market does once it has been paid.
-        fn vouchers(mint: &Mint, mint_url: &str, keyset_info: &str, amount: u64) -> String {
-            let blinded = cdk_spilman::create_plain_blinded_messages(amount, keyset_info)
-                .expect("blinded messages");
-            let blinded: serde_json::Value = serde_json::from_str(&blinded).expect("json");
-            let outputs = serde_json::from_value(blinded["blinded_messages"].clone())
-                .expect("blinded messages");
-            let signatures = tokio::runtime::Handle::current()
-                .block_on(mint.blind_sign(outputs))
-                .expect("blind sign");
-            let proofs = cdk_spilman::construct_proofs(
-                &serde_json::to_string(&signatures).expect("json"),
-                &blinded["secrets_with_blinding"].to_string(),
-                keyset_info,
-            )
-            .expect("unblind");
-            cdk_spilman::build_cashu_b_token(mint_url, "byte", &proofs).expect("token")
-        }
 
         /// Fund a channel from `payer` to `payee` in the mint at `mint_url`,
         /// have the payee verify it, and pay `balance` over it.
@@ -1105,42 +1111,15 @@ mod tests {
             mint_url: &str,
             balance: u64,
         ) -> ChannelId {
-            let keyset_id = crate::market::active_keyset(mint_url, "byte").expect("keyset");
-            let keyset_info = payer
-                .client
-                .lock()
-                .expect("not poisoned")
-                .fetch_keyset_info(mint_url, &keyset_id)
-                .expect("keyset info");
+            let keyset_info = keyset_info(payer, mint_url);
             let token = vouchers(mint, mint_url, &keyset_info, CAPACITY);
-
-            // What `fund` does once it holds the vouchers.
-            let client = payer.client.lock().expect("not poisoned");
-            let opened = client
-                .open_channel_from_token(
-                    &token,
-                    &hex::encode(pubkey(PAYEE).0),
-                    &hex::encode(pubkey(PAYER).0),
-                    now_seconds() + CHANNEL_TTL_SECONDS,
-                    &keyset_info,
-                    MAX_PROOF_AMOUNT,
-                )
+            let funded = payer
+                .open(pubkey(PAYEE), mint_url, &token, &keyset_info)
                 .expect("open");
-            let opening = client
-                .sign_channel_registration(&opened.channel_id)
-                .expect("opening payment");
-            drop(client);
-            let blob = serde_json::to_vec(&FundingBlob {
-                channel_id: opened.channel_id.clone(),
-                balance: opening.balance,
-                signature: opening.signature.clone(),
-                params: opening.params.clone().expect("params"),
-                funding_proofs: serde_json::to_value(opening.funding_proofs.expect("proofs"))
-                    .expect("json"),
-            })
-            .expect("json");
 
-            let verified = payee.verify(pubkey(PAYER), &blob).expect("verify");
+            let verified = payee
+                .verify(pubkey(PAYER), &funded.funding)
+                .expect("verify");
             assert_eq!(verified.mint_url, mint_url);
 
             let signature = payer
