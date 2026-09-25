@@ -127,13 +127,28 @@ sends nothing at all for `stale_timeout_seconds` (default 60) is dropped, which
 covers both setup and a peer content to sit on the free allowance. The knob
 already exists in [tollgate-configuration.md](tollgate-configuration.md).
 
-**Orderly teardown:** send Disconnect, then close. A bare FIN is treated as an
-unclean disconnect and triggers the same cleanup as a timeout — see
+**Orderly teardown:** send Disconnect, then close. The session is over: each
+side settles the channels the other paid it on and holds nothing for a return.
+A bare FIN is treated as an unclean disconnect and triggers the same cleanup as
+a timeout — see
 [Reboot / State Loss](tollgate-payment-channels.md#reboot--state-loss).
+
+**Unclean disconnect:** after a bare FIN or `stale_timeout_seconds` of silence,
+the session is held for another `stale_timeout_seconds` rather than dropped, so
+a peer that comes back after a blip can resume its channels. If it does not, the
+channels it paid on are settled. With the timeout at `0` nothing is held, and
+they are settled at once.
 
 **Reconnection:** a new connection starts a fresh session with a new Announce.
 If the listener still holds state for that pubkey, the friendly path applies
-and it shares the channel state back.
+and it shares the channel state back. Where both sides still hold it — a blip
+rather than a reboot — the session starts over the kept channels: grants are
+zeroed as for any new session, but the channel ids and the totals signed on
+them carry over. Each side sends one ChannelReady per channel it is still paid
+on, between its Announce and its Offer. A payer that sees its channel named
+keeps paying on it and funds nothing; one that does not, funds a new channel
+and sends Accept, and an Accept tells the other side to settle the channels it
+still held for that payer.
 
 ### Future: HTTP polling
 
@@ -325,6 +340,11 @@ Sent by the party that verified the funding, which is the party that will be
 paid on that channel — so the direction is implied by who sent it and needs no
 field. Both peers send one, for the channel each will receive on. Delivery may
 begin as soon as a channel's first grant arrives.
+
+On a reconnect that resumes a session, it is also sent between Announce and
+Offer for each channel the sender still holds and is paid on, so the payer
+knows before it decides whether to fund — see Reconnection under
+[Raw TCP](#raw-tcp).
 
 ### Grant State
 

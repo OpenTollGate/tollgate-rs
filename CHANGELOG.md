@@ -69,6 +69,18 @@ Nothing has been released yet. Everything below is on `master` and will ship as
   `wallet.mint` over Lightning when a purchase needs more, and collects what it
   was paid for.
 
+- A peer that drops without a Disconnect — a Wi-Fi blip, a bare FIN, or
+  silence — is held for `stale_timeout_seconds`, and one that reconnects in
+  that time resumes both channels instead of funding new ones. The grants start
+  again from zero; the channels and what was signed on them carry over. A
+  ChannelReady between Announce and Offer says which channels are still held,
+  so nothing changes on the wire. A held session that expires, an orderly
+  Disconnect and shutdown all settle the channels the peer paid on, each with
+  its expiry as the retry deadline, and a held channel that reaches its settle
+  point inside the grace period is settled then rather than resumed. A resumed
+  channel starts its verification-failure count over, and keeps growing on
+  rollover from its own capacity.
+
 - `tolltop`, a dashboard over each node's control socket, which it finds on
   its own. Tabs for peers, pricing and the wallet; a top-up shows its Lightning
   invoice as a QR.
