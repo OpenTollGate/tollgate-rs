@@ -138,3 +138,8 @@ Nothing has been released yet. Everything below is on `master` and will ship as
   grant paid for. `ChannelBackend::verify_update` now keeps nothing; a new
   `record_update` keeps the state, called only once core accepts the whole
   purchase and emits `Action::RecordUpdates`.
+
+- A channel a peer funded in another mint we accept now settles. The closing
+  swap goes to the mint the channel was funded in: our own in process, as
+  before, and any other over HTTP. It used to go to our own mint every time,
+  which never issued the funding proofs and so could not swap them.
