@@ -30,8 +30,16 @@ services:
   # a node buys its paper here and pays a peer with it, because a peer sells
   # capacity for money it can hold, not for its own vouchers.
   sat-mint:
-    image: cashubtc/mintd:latest
-    command: ["cdk-mintd", "--config", "/etc/cdk/mintd.toml"]
+    # Pinned: mintd's CLI and config format change between releases.
+    image: cashubtc/mintd:0.18.1
+    # 0.18 keeps its configuration in the database: import the document into a
+    # fresh one, then start the mint from it.
+    command:
+      - sh
+      - -c
+      - cdk-mintd config init --new-mint --file /etc/cdk/mintd.toml && exec cdk-mintd
+    environment:
+      MINT_MNEMONIC: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
     volumes:
       - ../mint/mintd.toml:/etc/cdk/mintd.toml:ro
     networks:
