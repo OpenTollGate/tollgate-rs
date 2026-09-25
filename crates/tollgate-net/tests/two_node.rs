@@ -8,19 +8,22 @@
 //! Every node binds ports the OS picked, so these tests run in parallel with
 //! each other and with another `cargo test` on the same machine.
 
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::net::TcpListener;
 use tollgate_core::buyer::BuyerPolicy;
 use tollgate_core::config::{GrantPolicy, NodePolicy, PeerPolicy};
 use tollgate_net::adapter::{Loopback, ResourceAdapter};
-use tollgate_net::channel::LocalChannels;
+use tollgate_net::channel::{ChannelBackend, FundedChannel, LocalChannels, VerifiedChannel};
 use tollgate_net::identity::Identity;
 use tollgate_net::node::{Node, NodeConfig, PeerConfig};
+use tollgate_net::settle::Backoff;
 use tollgate_net::wire::Identify;
-use tollgate_protocol::PubKey;
+use tollgate_protocol::{ChannelId, PubKey, Signature};
 
 /// How long to wait for something the protocol does on its own: a peering, a
 /// purchase, a grant lapsing.
@@ -471,4 +474,165 @@ async fn a_blocked_peer_that_dials_in_is_refused() {
         peers.is_empty(),
         "the blocked peer opened a session anyway: {peers:?}"
     );
+}
+
+/// A backend whose first few attempts to settle each channel fail, as they
+/// would against a mint that is briefly unreachable. Everything else is
+/// `LocalChannels`.
+///
+/// Failing per channel rather than overall means a node that never retries
+/// never settles anything: a later channel's first attempt cannot stand in for
+/// an earlier one's retry.
+#[derive(Debug)]
+struct FlakySettle {
+    inner: LocalChannels,
+    failures: u32,
+    attempts: Mutex<HashMap<ChannelId, u32>>,
+    settled: AtomicU32,
+}
+
+impl ChannelBackend for FlakySettle {
+    fn fund(&self, peer: PubKey, mint_url: &str, capacity: u64) -> anyhow::Result<FundedChannel> {
+        self.inner.fund(peer, mint_url, capacity)
+    }
+
+    fn verify(&self, peer: PubKey, funding: &[u8]) -> anyhow::Result<VerifiedChannel> {
+        self.inner.verify(peer, funding)
+    }
+
+    fn sign_update(&self, channel_id: ChannelId, cumulative: u64) -> anyhow::Result<Signature> {
+        self.inner.sign_update(channel_id, cumulative)
+    }
+
+    fn verify_update(
+        &self,
+        peer: PubKey,
+        channel_id: ChannelId,
+        cumulative: u64,
+        signature: Signature,
+    ) -> bool {
+        self.inner
+            .verify_update(peer, channel_id, cumulative, signature)
+    }
+
+    fn record_update(
+        &self,
+        peer: PubKey,
+        channel_id: ChannelId,
+        cumulative: u64,
+        signature: Signature,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .record_update(peer, channel_id, cumulative, signature)
+    }
+
+    fn settle(&self, channel_id: ChannelId) -> anyhow::Result<()> {
+        let attempt = {
+            let mut attempts = self.attempts.lock().expect("not poisoned");
+            let n = attempts.entry(channel_id).or_default();
+            *n += 1;
+            *n
+        };
+        if attempt <= self.failures {
+            anyhow::bail!("mint unreachable (attempt {attempt})");
+        }
+        self.inner.settle(channel_id)?;
+        self.settled.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Start a node whose first `failures` settlements fail, retrying on a
+/// schedule short enough for a test.
+async fn spawn_flaky_node(
+    policy: NodePolicy,
+    peers: Vec<PeerConfig>,
+    failures: u32,
+) -> (Spawned, Arc<FlakySettle>) {
+    let identity = Identity::generate();
+    let pubkey = identity.pubkey();
+    let (control, data) = bind_planes().await;
+    let listen = control.local_addr().expect("a bound address");
+    let config = NodeConfig {
+        identity,
+        policy,
+        buyer: buyer_policy(),
+        listen,
+        identify: Identify::Claimed,
+        // Unused here: these tests drive `LocalChannels`, so no mint is served
+        // and nothing binds this.
+        mint_listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        mint_url: "http://127.0.0.1/unused".into(),
+        peers,
+    };
+    let backend = Arc::new(FlakySettle {
+        inner: LocalChannels::new(config.identity.clone()),
+        failures,
+        attempts: Mutex::default(),
+        settled: AtomicU32::new(0),
+    });
+    let adapter = Arc::new(Loopback::new());
+    let node = Node::new(&config, backend.clone(), adapter.clone()).with_settle_backoff(Backoff {
+        initial: Duration::from_millis(10),
+        max: Duration::from_millis(100),
+    });
+    let published = node.published();
+    spawn_loopback_plane(&config, data, adapter.clone());
+    tokio::spawn(async move {
+        if let Err(e) = node.run_on(control, config, std::future::pending()).await {
+            eprintln!("node stopped: {e}");
+        }
+    });
+    let spawned = Spawned {
+        pubkey,
+        adapter,
+        published,
+        endpoint: listen.to_string(),
+    };
+    (spawned, backend)
+}
+
+/// A settlement that fails is tried again until it goes through.
+///
+/// Core lets go of a channel the moment it asks for it to be settled, so
+/// before retries a mint that blinked at the wrong moment lost the channel for
+/// good: after its refund timelock the funder could take all of it back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_settlement_that_fails_is_retried_until_it_succeeds() {
+    // Channels small enough to drain, and be settled, within seconds.
+    let small_channels = |mint: &str| NodePolicy {
+        initial_channel_capacity: 5_000_000,
+        ..node_policy(mint)
+    };
+    let (provider_node, provider_backend) =
+        spawn_flaky_node(small_channels("https://provider.example/mint"), vec![], 3).await;
+    let (client_node, client_backend) = spawn_flaky_node(
+        small_channels("https://client.example/mint"),
+        vec![dial(&provider_node)],
+        3,
+    )
+    .await;
+    let (provider, client) = (provider_node.pubkey, client_node.pubkey);
+    let client_adapter = Arc::clone(&client_node.adapter);
+
+    let probe = Arc::clone(&provider_node.adapter);
+    wait_for("the peering", move || probe.peers().contains(&client)).await;
+
+    client_adapter.set_demand(provider, 2_000_000);
+
+    // Both ends settle a drained channel: the provider to claim what it
+    // earned, the client to retire it. Each has three failures to get past.
+    for (side, backend) in [("provider", provider_backend), ("client", client_backend)] {
+        let probe = Arc::clone(&backend);
+        wait_for(
+            &format!("the {side} to settle a drained channel despite the failures"),
+            move || probe.settled.load(Ordering::SeqCst) >= 1,
+        )
+        .await;
+        let attempts = backend.attempts.lock().expect("not poisoned");
+        assert!(
+            attempts.values().any(|&n| n == backend.failures + 1),
+            "the {side} should have settled on the attempt after its failures: {attempts:?}"
+        );
+    }
 }

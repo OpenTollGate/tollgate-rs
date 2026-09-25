@@ -60,6 +60,16 @@ pub struct VerifiedChannel {
 #[error("{0} is not a mint we take payment in")]
 pub struct MintNotAccepted(pub String);
 
+/// A settlement that no retry can make succeed.
+///
+/// The node retries a failed [`ChannelBackend::settle`] until it works, which
+/// is right for a mint that is briefly unreachable and pure noise for a
+/// channel the backend has never seen or one its funder has already
+/// reclaimed. A backend returns this for those, and the node stops.
+#[derive(Debug, thiserror::Error)]
+#[error("cannot settle: {0}")]
+pub struct CannotSettle(pub String);
+
 /// What a payment-channel implementation has to provide.
 ///
 /// Signing lives here rather than beside the node's identity because **what a
@@ -109,5 +119,11 @@ pub trait ChannelBackend: Send + Sync + std::fmt::Debug {
     ) -> Result<()>;
 
     /// Settle a channel: submit the latest signed state, reclaim the change.
+    ///
+    /// The node retries this until it succeeds, so it must be **idempotent**:
+    /// settling a channel that has already settled returns `Ok` and moves
+    /// nothing. An error the node should not retry — a channel never seen,
+    /// nothing left to claim — is a [`CannotSettle`]; any other error is taken
+    /// to be transient.
     fn settle(&self, channel_id: ChannelId) -> Result<()>;
 }

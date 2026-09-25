@@ -266,8 +266,8 @@ If mint connectivity is lost during rollover:
 - Funding fails. Retry when mint connectivity returns.
 
 **Mint goes down during settlement/close:**
-- Close is queued. Receiver holds the latest signed update.
-- When mint returns, submit the swap.
+- The settlement is retried with backoff (see [Settlement Failure](#settlement-failure)). Receiver holds the latest signed update.
+- When mint returns, the next retry submits the swap.
 - Keyset errors (12xxx) trigger one retry after refresh.
 
 ---
@@ -440,11 +440,20 @@ If channel funding fails (mint unreachable, insufficient balance, keyset error):
 
 ### Settlement Failure
 
-If settlement fails (mint swap rejected):
-- Check NUT-00 error code
-- Keyset errors (12xxx): refresh keysets, retry once
-- Proof errors (10xxx, 11xxx): fail permanently — channel state is corrupted
-- Queue for retry if mint is unreachable
+Core emits `SettleChannel` once and drops the channel from the grant in the same step, so it never asks again. A failed settlement that nobody retried would be lost outright: after the refund timelock the funder reclaims the whole channel, including what it had already paid. Retrying is therefore the host's job — it is I/O and time, which core does not do.
+
+If settlement fails:
+- Keyset errors (12xxx): the backend refreshes keysets and retries once, inside the one `settle` call
+- **Permanent** errors — a channel the backend has never seen, one with nothing to claim, one its funder already reclaimed, or a mint rejecting the proofs themselves (10xxx, 11xxx: the channel state is corrupted or already spent) — are reported as `CannotSettle` and not retried; retrying them would only make noise
+- Anything else (the mint unreachable, a keyset still stale) is **transient**, and the node retries it: after 1 s, doubling to a cap of 5 min, until it succeeds or the node shuts down. Each failure is logged at `warn` with the attempt count and the next wait; a success after retries is logged at `info`
+- One channel is never settled by two attempts at once
+- `settle` is idempotent: settling a channel that already settled succeeds and moves nothing, so a retry that races a success is harmless
+
+On shutdown the node settles every channel still in a grant, and every retry still waiting wakes for a last attempt. They all share a short grace period (5 s), retrying on the same backoff but never past it; whatever is still unsettled then is abandoned rather than holding the node open.
+
+Each retry can carry a deadline past which it gives up. Nothing sets one yet: the natural one is the channel's refund expiry, once the backend reports it, since past it the funder can take the money back.
+
+Retries live in memory only. A settlement still failing when the node stops is forgotten, and a restart does not resume it.
 
 ### Balance Verification Failure
 
