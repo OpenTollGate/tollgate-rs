@@ -24,7 +24,7 @@ SKIP_BUILD=1 testing/purchase/test.sh
 | `refusal/` | The gateway sells at most 3 MB/s across all its buyers; the client wants 8. It ends up shaped at the cap rather than blocked, and both sides log the refusal. A second client then arrives wanting 2 MB/s: it is refused, and the gateway's buyers together stay within the one cap. |
 | `rollover/` | Channels sized to exhaust in seconds, so the test runs through several. Buying continues across each boundary. |
 | `allowance/` | A client that buys nothing stays on the minimum flow allowance — not blocked, because that allowance is what lets a peer with no vouchers acquire some. |
-| `forwarding/` | The gateway carries somebody else's packets: the client pulls a large file from a third host, every packet crosses the gateway, and nftables and `tc` hold it to the rate it bought. Asserts bytes, not elapsed time. |
+| `forwarding/` | The gateway carries somebody else's packets: the client pulls a large file from a third host, every packet crosses the gateway, and nftables and `tc` hold it to the rate it bought. A dual-stack customer's IPv6 is dropped before it pays, forwarded, shaped and counted once it has, and dropped again when its grant lapses. Asserts bytes, not elapsed time. |
 | `fips/` | The same claim with the enforcement in a FIPS mesh instead of the local kernel — three nodes, all traffic over `fips0`, the gateway the only node the other two can reach. Also asserts what only a mesh can: the peer that gets the grant is the peer that holds the key. |
 
 ## Where a node's vouchers come from

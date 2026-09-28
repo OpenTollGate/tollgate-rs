@@ -9,6 +9,15 @@
 #
 #   client ──edge── gateway ──transit── origin
 #    .30             .20 .20             .10
+#   phone ───┘
+#    .40
+#
+# Both segments are dual-stack. `phone` is a second customer that also has an
+# IPv6 address (fd00:28::40): its IPv6 is gated, shaped and counted with the
+# IPv4 its session comes from, tied to it by its MAC. It is a network
+# namespace and nothing else; its node is `phone-node`, which shares that
+# namespace, so the node can be paused — its grant left to lapse while the
+# session stays up — while the phone keeps sending.
 services:
   # The money. A sat-denominated mint standing in for the likes of minibits:
   # a node buys its paper here and pays a peer with it, because a peer sells
@@ -42,10 +51,11 @@ services:
       - -c
       - >
         head -c 200000000 /dev/zero > /srv/blob &&
-        cd /srv && exec python3 -m http.server 8080
+        cd /srv && exec python3 -m http.server 8080 --bind ::
     networks:
       transit:
         ipv4_address: 172.29.0.10
+        ipv6_address: fd00:29::10
 
   gateway:
     image: tollgate-test:latest
@@ -67,25 +77,28 @@ services:
         transit=$$(ip -o -4 addr show | awk '$$4 ~ /^172\.29\.0\.20\// {print $$2}') &&
         [ -n "$$edge" ] && [ -n "$$transit" ] &&
         sed "s/EDGE_INTERFACE/$$edge/" /etc/tollgate/gateway.yaml > /run/gateway.yaml &&
-        nft add table ip tollgate_nat &&
-        nft add chain ip tollgate_nat postrouting
+        nft add table inet tollgate_nat &&
+        nft add chain inet tollgate_nat postrouting
         '{ type nat hook postrouting priority 100; }' &&
-        nft add rule ip tollgate_nat postrouting oifname "$$transit" masquerade &&
+        nft add rule inet tollgate_nat postrouting oifname "$$transit" masquerade &&
         exec tollgate-node -c /run/gateway.yaml --control-socket /run/tollgate.sock
     volumes:
       - ./gateway.yaml:/etc/tollgate/gateway.yaml:ro
     environment:
       RUST_LOG: "${RUST_LOG:-tollgate_net=debug,info}"
     # Installing nftables rules and tc classes is privileged, and forwarding has
-    # to be switched on explicitly.
+    # to be switched on explicitly, for each family.
     cap_add: [NET_ADMIN]
     sysctls:
       net.ipv4.ip_forward: 1
+      net.ipv6.conf.all.forwarding: 1
     networks:
       edge:
         ipv4_address: 172.28.0.20
+        ipv6_address: fd00:28::20
       transit:
         ipv4_address: 172.29.0.20
+        ipv6_address: fd00:29::20
 
   client:
     image: tollgate-test:latest
@@ -110,14 +123,61 @@ services:
       - origin
       - sat-mint
 
+  # The dual-stack customer's network namespace: an address in each family,
+  # routes to the origin's segment through the gateway in each, and nothing
+  # running but the traffic the test sends from it.
+  phone:
+    image: tollgate-test:latest
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        ip route replace 172.29.0.0/24 via 172.28.0.20 &&
+        ip -6 route replace fd00:29::/64 via fd00:28::20 &&
+        exec sleep infinity
+    init: true
+    cap_add: [NET_ADMIN]
+    networks:
+      edge:
+        ipv4_address: 172.28.0.40
+        ipv6_address: fd00:28::40
+    depends_on:
+      - gateway
+      - origin
+
+  # The phone's node, in the phone's namespace: its session comes from the
+  # phone's IPv4 address and MAC. It buys nothing until the test recreates it
+  # with PHONE_DEMAND set.
+  phone-node:
+    image: tollgate-test:latest
+    network_mode: "service:phone"
+    command:
+      - -c
+      - /etc/tollgate/phone.yaml
+      - --control-socket
+      - /run/tollgate.sock
+      - --demand
+      - "${PHONE_DEMAND:-0}"
+    volumes:
+      - ./phone.yaml:/etc/tollgate/phone.yaml:ro
+    environment:
+      RUST_LOG: "${RUST_LOG:-tollgate_net=debug,info}"
+    depends_on:
+      - phone
+      - sat-mint
+
 networks:
   # The gateway shapes on the interface facing the client. Which kernel name
   # that gets is docker's business, so the gateway finds it by address at
   # startup, and the test checks the interface it actually shapes on.
+  #
+  # Both are dual-stack: `enable_ipv6` on these two networks is all docker
+  # needs, with no daemon configuration.
   edge:
+    enable_ipv6: true
     ipam:
       config:
         - subnet: 172.28.0.0/24
+        - subnet: fd00:28::/64
   # Routed, not docker's default NAT mode. Since docker 28 the host drops a
   # packet for a NAT-mode container's address that arrives from any bridge
   # but the container's own (a raw-table rule per container). The client's
@@ -125,8 +185,11 @@ networks:
   # their way to the gateway, which routes them. Routed mode leaves that
   # alone, and the origin needs no NAT to reach anything.
   transit:
+    enable_ipv6: true
     driver_opts:
       com.docker.network.bridge.gateway_mode_ipv4: routed
+      com.docker.network.bridge.gateway_mode_ipv6: routed
     ipam:
       config:
         - subnet: 172.29.0.0/24
+        - subnet: fd00:29::/64

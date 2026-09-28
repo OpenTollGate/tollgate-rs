@@ -59,15 +59,51 @@
 //! moves between the two ways of counting without its totals resetting: the
 //! counters are named objects, and only which map points at them changes.
 //!
+//! # A customer's IPv6
+//!
+//! A peer is registered by the IPv4 address its session comes from, but a
+//! customer on the LAN is a device, and a dual-stack device sends much of its
+//! traffic over IPv6 from addresses it picks itself — several at once, and
+//! privacy addresses that change by the day. Keyed by the IPv4 address alone,
+//! all of that would be forwarded unshaped and uncounted, whatever the peer
+//! had paid.
+//!
+//! So a customer that is on the link is also tied to its **MAC**, read from
+//! the IPv4 neighbour table, and through the MAC to the IPv6 addresses the
+//! IPv6 neighbour table lists for it (a [`Link`]). Its IPv6 traffic is then
+//! charged to the same grant as its IPv4:
+//!
+//! - **gated** by source MAC on the way out, and by destination address on
+//!   the way in, through `known_mac` / `allowed_mac` and `known6` /
+//!   `allowed6`, which follow the IPv4 `allowed` set;
+//! - **shaped** by marking what is forwarded to its IPv6 addresses with its
+//!   class (the `mark6` map);
+//! - **counted** into the same two counters: delivered by destination IPv6
+//!   (`down6_tx`), received by source MAC, IPv6 only (`down6_rx`) — its IPv4
+//!   is already counted by address.
+//!
+//! No new interface is needed for it: the host registers the IPv4 address as
+//! before, and the adapter learns the rest from the kernel on the same
+//! refresh that tells customers from upstreams. An address seen once stays
+//! the peer's until another MAC claims it, so an idle privacy address that
+//! drops out of the neighbour table is not left ungated.
+//!
+//! A MAC with more addresses than [`MAX_V6_PER_PEER`] fails closed: it stays
+//! known, with the addresses it had, but none of its IPv6 is forwarded until
+//! the count drops back. Keeping only some of them would leave the rest
+//! ungated, unshaped and uncounted, and the device picks which exist.
+//!
 //! # Requirements
 //!
 //! Linux, `CAP_NET_ADMIN`, and `net.ipv4.ip_forward=1`. Without the capability
 //! every command fails and the node would gate nothing while believing it had,
 //! so construction probes for it and refuses to start rather than pretending.
 
-use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::hash::Hash;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::process::Command;
+use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -107,6 +143,16 @@ const BURST_MS: u64 = 10;
 /// collision is a deliberate choice rather than an accident.
 const MARK_BASE: u32 = 0x7011_0000;
 
+/// The most IPv6 addresses one customer is tied to.
+///
+/// A device picks its own addresses, so one that invented them by the
+/// thousand would otherwise grow the sets without bound. A phone uses a
+/// handful: a stable one, a privacy one or two, per prefix.
+///
+/// Past it, the peer's IPv6 is withheld rather than truncated to some of its
+/// addresses: see [`customer_link`].
+const MAX_V6_PER_PEER: usize = 16;
+
 /// How often routes and neighbour entries are re-read.
 ///
 /// Counters are sampled every tick, but which side a peer is on and what its
@@ -129,6 +175,17 @@ mod maps {
     pub const UP_TX: &str = "up_tx";
     /// Upstream, by the frame's source MAC: received from it.
     pub const UP_RX: &str = "up_rx";
+    /// Customer, by destination IPv6: delivered to it.
+    pub const DOWN6_TX: &str = "down6_tx";
+    /// Customer, by the frame's source MAC, IPv6 only: received from it.
+    pub const DOWN6_RX: &str = "down6_rx";
+    /// Customer, by destination IPv6: the mark that selects its class.
+    pub const MARK6: &str = "mark6";
+    /// Customers' MACs and IPv6 addresses, and the subsets forwarded for.
+    pub const KNOWN_MAC: &str = "known_mac";
+    pub const ALLOWED_MAC: &str = "allowed_mac";
+    pub const KNOWN6: &str = "known6";
+    pub const ALLOWED6: &str = "allowed6";
 }
 
 /// One peer, as the kernel knows it.
@@ -143,6 +200,20 @@ struct Peer {
     carried: bool,
     /// How its traffic is currently being counted.
     metering: Metering,
+    /// A customer on the link: its MAC and IPv6 addresses. `None` until the
+    /// neighbour table has one, and always for an upstream.
+    link: Option<Link>,
+}
+
+/// What ties a customer's IPv6 traffic to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Link {
+    mac: String,
+    /// Global and unique-local only: link-local traffic is never forwarded.
+    v6: BTreeSet<Ipv6Addr>,
+    /// The neighbour table shows more than [`MAX_V6_PER_PEER`] addresses for
+    /// the MAC. Its IPv6 is then gated shut whatever the peer has paid.
+    overflowed: bool,
 }
 
 /// How a peer's traffic is matched to its counters.
@@ -228,6 +299,30 @@ impl Nftables {
         ])
         .context("gate traffic toward known peers")?;
 
+        // The same gate for a customer's IPv6: out by its MAC, in by its
+        // addresses. The MAC rule is IPv6 only, since IPv4 is gated above.
+        for (set, key) in [
+            (maps::KNOWN_MAC, "ether_addr"),
+            (maps::ALLOWED_MAC, "ether_addr"),
+            (maps::KNOWN6, "ipv6_addr"),
+            (maps::ALLOWED6, "ipv6_addr"),
+        ] {
+            nft(&[
+                "add",
+                "set",
+                "inet",
+                TABLE,
+                set,
+                &format!("{{ type {key}; }}"),
+            ])
+            .with_context(|| format!("create the {set} set"))?;
+        }
+        for rule in ipv6_gate_rules() {
+            let mut args = vec!["add", "rule", "inet", TABLE, "forward"];
+            args.extend(rule.iter().copied());
+            nft(&args).with_context(|| format!("add the rule {}", rule.join(" ")))?;
+        }
+
         // Counting, after the gate so a dropped packet is not counted as
         // delivered. One rule per map, covering every peer for the life of the
         // node; which peer a packet is counted against is a map lookup, and a
@@ -237,6 +332,8 @@ impl Nftables {
             (maps::DOWN_RX, "ipv4_addr"),
             (maps::UP_TX, "ipv4_addr"),
             (maps::UP_RX, "ether_addr"),
+            (maps::DOWN6_TX, "ipv6_addr"),
+            (maps::DOWN6_RX, "ether_addr"),
         ] {
             nft(&[
                 "add",
@@ -253,6 +350,24 @@ impl Nftables {
             args.extend(rule.iter().copied());
             nft(&args).with_context(|| format!("add the rule {}", rule.join(" ")))?;
         }
+
+        // Marking a customer's IPv6 for its class. A map rather than a rule
+        // per peer, because a peer's addresses come and go; a packet to an
+        // address in no peer's entry is left unmarked.
+        nft(&[
+            "add",
+            "map",
+            "inet",
+            TABLE,
+            maps::MARK6,
+            "{ type ipv6_addr : mark; }",
+        ])
+        .context("create the mark6 map")?;
+        nft(&[
+            "add", "rule", "inet", TABLE, "forward", "meta", "mark", "set", "ip6", "daddr", "map",
+            "@mark6",
+        ])
+        .context("mark customers' IPv6")?;
 
         // The root qdisc every peer's class hangs off. `replace` so a restart
         // does not fail on one that already exists.
@@ -310,28 +425,122 @@ impl Nftables {
             return;
         };
         let neigh = ["-4", "-j", "neigh", "show"];
-        let Some(neighbours) = read_table("neighbour", &neigh, parse_neighbours) else {
+        let Some(neighbours) = read_table("neighbour", &neigh, parse_neighbours::<Ipv4Addr>) else {
             return;
         };
+        // A node without IPv6 has no IPv6 neighbours; that is not a reason
+        // to stop telling customers from upstreams.
+        let neigh6 = ["-6", "-j", "neigh", "show"];
+        let neighbours6 =
+            read_table("neighbour", &neigh6, parse_neighbours::<Ipv6Addr>).unwrap_or_default();
 
         let mut peers = self.peers.lock().expect("not poisoned");
-        for (peer, entry) in peers.iter_mut() {
-            let next = classify(entry.addr, &gateways, &neighbours);
-            if next == entry.metering {
+        // Every peer's new state first, then every removal, then every
+        // addition. The maps are shared, so an address moving from one peer
+        // to another is one peer's removal and another's addition: applied
+        // peer by peer, the addition could run first, collide with the
+        // element still there, and fail — and the removal then delete it.
+        let next: Vec<(PubKey, Metering, Option<Link>, Move)> = peers
+            .iter()
+            .map(|(peer, entry)| {
+                let metering = classify(entry.addr, &gateways, &neighbours);
+                let link = customer_link(
+                    entry.addr,
+                    &metering,
+                    &neighbours,
+                    &neighbours6,
+                    entry.link.as_ref(),
+                );
+                let (delivered, received) = Self::counter_names(*peer);
+                let mark = MARK_BASE | entry.classid as u32;
+                let elements = |metering: &Metering, link: Option<&Link>| {
+                    [
+                        map_elements(entry.addr, metering, &delivered, &received),
+                        link_elements(link, entry.carried, &delivered, &received, mark),
+                    ]
+                    .concat()
+                };
+                let change = Move {
+                    before: elements(&entry.metering, entry.link.as_ref()),
+                    after: elements(&metering, link.as_ref()),
+                };
+                (*peer, metering, link, change)
+            })
+            .collect();
+        let moves: Vec<Move> = next.iter().map(|(.., m)| m.clone()).collect();
+        let (removals, additions) = plan_moves(&moves);
+        remove_elements(&removals);
+
+        for ((peer, metering, link, _), added) in next.into_iter().zip(additions) {
+            let entry = peers.get_mut(&peer).expect("planned from this map");
+            if metering == entry.metering && link == entry.link {
                 continue;
             }
-            let (delivered, received) = Self::counter_names(*peer);
-            let moved = apply_elements(
-                &map_elements(entry.addr, &entry.metering, &delivered, &received),
-                &map_elements(entry.addr, &next, &delivered, &received),
-            );
-            if !moved {
+            // A failed addition leaves the peer as it was, so the next
+            // refresh tries the move again.
+            if !add_elements(&added) {
                 continue;
             }
-            info!(%peer, addr = %entry.addr, from = ?entry.metering, to = ?next, "counting the peer differently");
-            entry.metering = next;
+            if metering != entry.metering {
+                info!(%peer, addr = %entry.addr, from = ?entry.metering, to = ?metering, "counting the peer differently");
+            }
+            let was_over = entry.link.as_ref().is_some_and(|l| l.overflowed);
+            let is_over = link.as_ref().is_some_and(|l| l.overflowed);
+            if is_over && !was_over {
+                warn!(
+                    %peer,
+                    addr = %entry.addr,
+                    mac = link.as_ref().map(|l| l.mac.as_str()),
+                    max = MAX_V6_PER_PEER,
+                    "the peer's MAC has more IPv6 addresses than it may; its IPv6 is not forwarded until that drops"
+                );
+            } else if was_over && !is_over {
+                info!(%peer, addr = %entry.addr, "the peer's MAC is back within its IPv6 addresses");
+            }
+            if link != entry.link {
+                info!(%peer, addr = %entry.addr, link = ?link, "the peer's IPv6 follows its grant");
+            }
+            entry.metering = metering;
+            entry.link = link;
         }
     }
+}
+
+/// One peer's elements before and after a refresh.
+#[derive(Debug, Clone)]
+struct Move {
+    before: Vec<Element>,
+    after: Vec<Element>,
+}
+
+/// What a refresh removes, across every peer, and what each peer then adds.
+///
+/// All removals go before any addition, so a key moving between peers is
+/// free by the time its new owner adds it. An element some peer's new state
+/// holds exactly — a MAC or address in one of the `known` sets, say — is not
+/// removed at all: that would open a gap in the gate for nothing, and adding
+/// an element that is already there is not an error.
+fn plan_moves(moves: &[Move]) -> (Vec<Element>, Vec<Vec<Element>>) {
+    let claimed: HashSet<&Element> = moves.iter().flat_map(|m| &m.after).collect();
+    let mut removals: Vec<Element> = Vec::new();
+    for m in moves {
+        for e in &m.before {
+            if !m.after.contains(e) && !claimed.contains(e) && !removals.contains(e) {
+                removals.push(e.clone());
+            }
+        }
+    }
+    let additions = moves
+        .iter()
+        .map(|m| {
+            m.after
+                .iter()
+                .filter(|e| !m.before.contains(e))
+                .cloned()
+                .collect()
+        })
+        .collect();
+    (removals, additions)
 }
 
 /// Read one of the kernel's tables with `ip`, or `None` if it could not be
@@ -352,6 +561,38 @@ fn read_table<T>(what: &str, args: &[&str], parse: fn(&str) -> Option<T>) -> Opt
     }
 }
 
+/// The IPv6 gate: a customer's traffic out by its MAC, in by its addresses.
+///
+/// The MAC rule is limited to IPv6 because the peer's IPv4 is gated by
+/// address already, and an upstream's frames carry a MAC too.
+fn ipv6_gate_rules() -> [Vec<&'static str>; 2] {
+    [
+        vec![
+            "meta",
+            "nfproto",
+            "ipv6",
+            "ether",
+            "saddr",
+            "@known_mac",
+            "ether",
+            "saddr",
+            "!=",
+            "@allowed_mac",
+            "drop",
+        ],
+        vec![
+            "ip6",
+            "daddr",
+            "@known6",
+            "ip6",
+            "daddr",
+            "!=",
+            "@allowed6",
+            "drop",
+        ],
+    ]
+}
+
 /// The counting rules, one per map, in the forward chain.
 ///
 /// All four live in the forward hook, so only traffic we forward is counted —
@@ -359,12 +600,28 @@ fn read_table<T>(what: &str, args: &[&str], parse: fn(&str) -> Option<T>) -> Opt
 /// for a packet that arrived over Ethernet, and, unlike early prerouting, the
 /// hook sits after connection tracking has undone any NAT: before that, a
 /// reply to a masqueraded customer is still addressed to this node.
-fn counting_rules() -> [Vec<&'static str>; 4] {
+///
+/// The two IPv6 rules count a customer's IPv6 into the same counters: by
+/// destination address, and by source MAC for IPv6 alone, since its IPv4 is
+/// counted by address.
+fn counting_rules() -> [Vec<&'static str>; 6] {
     [
         vec!["counter", "name", "ip", "daddr", "map", "@down_tx"],
         vec!["counter", "name", "ip", "saddr", "map", "@down_rx"],
         vec!["counter", "name", "rt", "ip", "nexthop", "map", "@up_tx"],
         vec!["counter", "name", "ether", "saddr", "map", "@up_rx"],
+        vec!["counter", "name", "ip6", "daddr", "map", "@down6_tx"],
+        vec![
+            "meta",
+            "nfproto",
+            "ipv6",
+            "counter",
+            "name",
+            "ether",
+            "saddr",
+            "map",
+            "@down6_rx",
+        ],
     ]
 }
 
@@ -388,8 +645,144 @@ fn classify(
     }
 }
 
-/// One entry in a counting map: which map, the key, and the counter it names.
-type Element = (&'static str, String, String);
+/// A customer's MAC and IPv6 addresses, from the neighbour tables.
+///
+/// Only for a customer whose IPv4 address has a MAC: an upstream's MAC is the
+/// source of everything it forwards to us, and a peer that is not on the link
+/// has no MAC we could see. An address the peer had stays its own until
+/// another MAC claims it, so an idle privacy address is not dropped just
+/// because its neighbour entry was collected. A MAC that is gone from the
+/// table keeps the link it had; a different MAC starts a new one.
+///
+/// More than [`MAX_V6_PER_PEER`] addresses in the table for the MAC fails
+/// closed: the link is marked overflowed, which keeps the MAC and its
+/// addresses known but none of them allowed. Which addresses it keeps are the
+/// ones it had, before any new one, so a flood of fresh addresses cannot push
+/// the real ones out. It clears once the table shows few enough again.
+///
+/// The table is the device's to fill — any host can create a neighbour entry
+/// with a Neighbour Solicitation — and truncating instead would let it pick
+/// which of its addresses fall outside the gate, class and counters. That
+/// includes another customer's: the MAC an entry records is the one in the
+/// solicitation's link-layer option, not the frame's. Failing closed turns
+/// that from free, unmetered IPv6 into a denial of the victim's IPv6 while
+/// the flood lasts; its IPv4, gated by address, is untouched.
+fn customer_link(
+    addr: IpAddr,
+    metering: &Metering,
+    neighbours: &HashMap<Ipv4Addr, String>,
+    neighbours6: &HashMap<Ipv6Addr, String>,
+    previous: Option<&Link>,
+) -> Option<Link> {
+    let IpAddr::V4(v4) = addr else {
+        return None;
+    };
+    if *metering != Metering::Addr {
+        return None;
+    }
+    let Some(mac) = neighbours.get(&v4) else {
+        return previous.cloned();
+    };
+    let kept: Vec<Ipv6Addr> = previous
+        .filter(|link| link.mac == *mac)
+        .into_iter()
+        .flat_map(|link| link.v6.iter())
+        .filter(|a| neighbours6.get(a).is_none_or(|m| m == mac))
+        .copied()
+        .collect();
+    let seen: BTreeSet<Ipv6Addr> = neighbours6
+        .iter()
+        .filter(|(a, m)| *m == mac && forwardable(a))
+        .map(|(a, _)| *a)
+        .collect();
+    let overflowed = seen.len() > MAX_V6_PER_PEER;
+    // Within the cap, everything the table shows now, then what the peer had.
+    // Over it, what the peer had, then new ones: nothing is allowed either
+    // way, and the addresses it was using stay gated.
+    let (first, then): (Vec<Ipv6Addr>, Vec<Ipv6Addr>) = if overflowed {
+        (kept, seen.into_iter().collect())
+    } else {
+        (seen.into_iter().collect(), kept)
+    };
+    let mut v6 = BTreeSet::new();
+    for a in first.into_iter().chain(then) {
+        if v6.len() >= MAX_V6_PER_PEER {
+            break;
+        }
+        v6.insert(a);
+    }
+    Some(Link {
+        mac: mac.clone(),
+        v6,
+        overflowed,
+    })
+}
+
+/// An IPv6 address traffic could be forwarded to or from: not link-local,
+/// multicast, loopback or unspecified.
+fn forwardable(a: &Ipv6Addr) -> bool {
+    !(a.is_unspecified()
+        || a.is_loopback()
+        || a.is_multicast()
+        || (a.segments()[0] & 0xffc0) == 0xfe80)
+}
+
+/// What a map or set element holds besides its key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Value {
+    /// A set member: the key alone.
+    Member,
+    /// A named counter.
+    Counter(String),
+    /// A packet mark.
+    Mark(u32),
+}
+
+/// One entry in a map or set: which one, the key, and what it holds.
+type Element = (&'static str, String, Value);
+
+/// The elements that tie a customer's IPv6 to its gate, class and counters.
+///
+/// `carried` is whether the peer is forwarded for, which the `allowed` sets
+/// follow exactly as the IPv4 one does — unless the link has overflowed, when
+/// they hold none of it.
+fn link_elements(
+    link: Option<&Link>,
+    carried: bool,
+    delivered: &str,
+    received: &str,
+    mark: u32,
+) -> Vec<Element> {
+    let Some(link) = link else {
+        return Vec::new();
+    };
+    let carried = carried && !link.overflowed;
+    let mut out = vec![
+        (maps::KNOWN_MAC, link.mac.clone(), Value::Member),
+        (
+            maps::DOWN6_RX,
+            link.mac.clone(),
+            Value::Counter(received.to_owned()),
+        ),
+    ];
+    if carried {
+        out.push((maps::ALLOWED_MAC, link.mac.clone(), Value::Member));
+    }
+    for a in &link.v6 {
+        let key = a.to_string();
+        out.push((maps::KNOWN6, key.clone(), Value::Member));
+        if carried {
+            out.push((maps::ALLOWED6, key.clone(), Value::Member));
+        }
+        out.push((
+            maps::DOWN6_TX,
+            key.clone(),
+            Value::Counter(delivered.to_owned()),
+        ));
+        out.push((maps::MARK6, key, Value::Mark(mark)));
+    }
+    out
+}
 
 /// The map elements that count a peer one way.
 ///
@@ -401,20 +794,22 @@ fn map_elements(
     received: &str,
 ) -> Vec<Element> {
     let ip = addr.to_string();
+    let delivered = Value::Counter(delivered.to_owned());
+    let received = Value::Counter(received.to_owned());
     match metering {
         Metering::Addr => vec![
-            (maps::DOWN_TX, ip.clone(), delivered.to_owned()),
-            (maps::DOWN_RX, ip, received.to_owned()),
+            (maps::DOWN_TX, ip.clone(), delivered),
+            (maps::DOWN_RX, ip, received),
         ],
         Metering::Upstream { mac } => {
             // The next hop covers traffic addressed to the upstream itself as
             // well: for a destination on the link, the next hop is the
             // destination. So nothing to it is left to the per-IP map.
             let rx = match mac {
-                Some(mac) => (maps::UP_RX, mac.clone(), received.to_owned()),
-                None => (maps::DOWN_RX, ip.clone(), received.to_owned()),
+                Some(mac) => (maps::UP_RX, mac.clone(), received),
+                None => (maps::DOWN_RX, ip.clone(), received),
             };
-            vec![(maps::UP_TX, ip, delivered.to_owned()), rx]
+            vec![(maps::UP_TX, ip, delivered), rx]
         }
     }
 }
@@ -425,11 +820,21 @@ fn map_elements(
 /// Removal first, because a counter briefly reached through neither map loses
 /// a few packets, where one reached through both would count them twice.
 ///
-/// Whether every new element went in. A failed removal does not count against
-/// it: the usual cause is an element that is already gone, which is where it
-/// was headed anyway.
-fn apply_elements(old: &[Element], new: &[Element]) -> bool {
-    for (map, key, _) in old.iter().filter(|e| !new.contains(e)) {
+/// Whether every new element went in, and every old one came out. Callers
+/// that only move counters look at `added` alone: a failed removal's usual
+/// cause is an element that is already gone, which is where it was headed.
+fn apply_elements(old: &[Element], new: &[Element]) -> Applied {
+    let gone: Vec<Element> = old.iter().filter(|e| !new.contains(e)).cloned().collect();
+    let fresh: Vec<Element> = new.iter().filter(|e| !old.contains(e)).cloned().collect();
+    let removed = remove_elements(&gone);
+    let added = add_elements(&fresh);
+    Applied { added, removed }
+}
+
+/// Delete each element, logging any that would not go. Whether all did.
+fn remove_elements(elements: &[Element]) -> bool {
+    let mut all = true;
+    for (map, key, _) in elements {
         if let Err(e) = nft(&[
             "delete",
             "element",
@@ -438,22 +843,39 @@ fn apply_elements(old: &[Element], new: &[Element]) -> bool {
             map,
             &format!("{{ {key} }}"),
         ]) {
-            warn!(map, key, error = %e, "could not remove a counting element");
+            warn!(map, key, error = %e, "could not remove an element");
+            all = false;
         }
     }
-    let mut added = true;
-    for (map, key, counter) in new.iter().filter(|e| !old.contains(e)) {
-        if let Err(e) = nft(&["add", "element", "inet", TABLE, map, &element(key, counter)]) {
-            warn!(map, key, error = %e, "could not add a counting element");
-            added = false;
-        }
-    }
-    added
+    all
 }
 
-/// A map element pointing a key at a named counter.
-fn element(key: &str, counter: &str) -> String {
-    format!("{{ {key} : \"{counter}\" }}")
+/// Add each element, logging any that would not go in. Whether all did.
+fn add_elements(elements: &[Element]) -> bool {
+    let mut all = true;
+    for (map, key, value) in elements {
+        if let Err(e) = nft(&["add", "element", "inet", TABLE, map, &element(key, value)]) {
+            warn!(map, key, error = %e, "could not add an element");
+            all = false;
+        }
+    }
+    all
+}
+
+/// What [`apply_elements`] managed.
+#[derive(Debug, Clone, Copy)]
+struct Applied {
+    added: bool,
+    removed: bool,
+}
+
+/// An element as `nft add element` takes it.
+fn element(key: &str, value: &Value) -> String {
+    match value {
+        Value::Member => format!("{{ {key} }}"),
+        Value::Counter(counter) => format!("{{ {key} : \"{counter}\" }}"),
+        Value::Mark(mark) => format!("{{ {key} : {mark:#x} }}"),
+    }
 }
 
 /// Every IPv4 address some route uses as its gateway, from `ip -j route`.
@@ -483,14 +905,16 @@ fn parse_gateways(json: &str) -> Option<HashSet<Ipv4Addr>> {
     Some(gateways)
 }
 
-/// IPv4 neighbours with a usable link address, from `ip -j neigh`.
+/// Neighbours with a usable link address, from `ip -4 -j neigh` or
+/// `ip -6 -j neigh` — whichever family `A` is; entries of the other are
+/// skipped.
 ///
 /// An entry that failed or is still being resolved has no address worth
 /// counting by. A stale one does: stale means unconfirmed lately, not wrong,
 /// and an upstream we mostly receive from goes stale while still sending.
 ///
 /// `None` if the output is not a JSON array, as for [`parse_gateways`].
-fn parse_neighbours(json: &str) -> Option<HashMap<Ipv4Addr, String>> {
+fn parse_neighbours<A: FromStr + Eq + Hash>(json: &str) -> Option<HashMap<A, String>> {
     let Ok(serde_json::Value::Array(entries)) = serde_json::from_str(json) else {
         return None;
     };
@@ -507,7 +931,7 @@ fn parse_neighbours(json: &str) -> Option<HashMap<Ipv4Addr, String>> {
             if failed {
                 return None;
             }
-            let ip = entry.get("dst")?.as_str()?.parse::<Ipv4Addr>().ok()?;
+            let ip = entry.get("dst")?.as_str()?.parse::<A>().ok()?;
             let mac = normalize_mac(entry.get("lladdr")?.as_str()?)?;
             Some((ip, mac))
         })
@@ -619,6 +1043,25 @@ impl ResourceAdapter for Nftables {
             "flowid",
             &class,
         ]);
+        // The same class for its IPv6, marked through `mark6`. A filter is
+        // per protocol, so this one has a priority of its own.
+        let _ = tc(&[
+            "filter",
+            "replace",
+            "dev",
+            &self.interface,
+            "protocol",
+            "ipv6",
+            "parent",
+            "1:",
+            "prio",
+            "2",
+            "handle",
+            &format!("{mark:#x}"),
+            "fw",
+            "flowid",
+            &class,
+        ]);
 
         peers.insert(
             peer,
@@ -629,6 +1072,7 @@ impl ResourceAdapter for Nftables {
                 rate: 0,
                 carried: false,
                 metering,
+                link: None,
             },
         );
         debug!(%peer, %addr, classid, "peer registered with the kernel");
@@ -732,8 +1176,19 @@ impl ResourceAdapter for Nftables {
         // Out of the maps, so its counters stop counting and a MAC or address
         // reused by someone else is not counted against it.
         let (delivered, received) = Self::counter_names(peer);
+        let mark = MARK_BASE | entry.classid as u32;
         apply_elements(
-            &map_elements(entry.addr, &entry.metering, &delivered, &received),
+            &[
+                map_elements(entry.addr, &entry.metering, &delivered, &received),
+                link_elements(
+                    entry.link.as_ref(),
+                    entry.carried,
+                    &delivered,
+                    &received,
+                    mark,
+                ),
+            ]
+            .concat(),
             &[],
         );
         let ip = entry.addr.to_string();
@@ -752,22 +1207,23 @@ impl ResourceAdapter for Nftables {
         // because a peering that ends and starts again gets a fresh classid —
         // so a filter left behind is a permanent one, and enough churn fills
         // the qdisc with filters selecting classes that no longer exist.
-        let mark = MARK_BASE | entry.classid as u32;
-        let _ = tc(&[
-            "filter",
-            "delete",
-            "dev",
-            &self.interface,
-            "parent",
-            "1:",
-            "protocol",
-            "ip",
-            "prio",
-            "1",
-            "handle",
-            &format!("{mark:#x}"),
-            "fw",
-        ]);
+        for (protocol, prio) in [("ip", "1"), ("ipv6", "2")] {
+            let _ = tc(&[
+                "filter",
+                "delete",
+                "dev",
+                &self.interface,
+                "parent",
+                "1:",
+                "protocol",
+                protocol,
+                "prio",
+                prio,
+                "handle",
+                &format!("{mark:#x}"),
+                "fw",
+            ]);
+        }
         let _ = tc(&[
             "class",
             "delete",
@@ -807,7 +1263,22 @@ fn gate(peer: PubKey, entry: &mut Peer) {
         nft(&["delete", "element", "inet", TABLE, "allowed", &element])
     };
     match result {
-        Ok(_) => entry.carried = carried,
+        Ok(_) => {
+            // Its IPv6, if it has a link, follows. A failure there is logged
+            // and not retried off this verdict: the IPv4 set is what the
+            // verdict is recorded against, and the next change moves both.
+            let (delivered, received) = Nftables::counter_names(peer);
+            let mark = MARK_BASE | entry.classid as u32;
+            let link = entry.link.as_ref();
+            let applied = apply_elements(
+                &link_elements(link, entry.carried, &delivered, &received, mark),
+                &link_elements(link, carried, &delivered, &received, mark),
+            );
+            if !(applied.added && applied.removed) {
+                warn!(%peer, carried, "could not update the peer's IPv6 gate");
+            }
+            entry.carried = carried;
+        }
         Err(e) => {
             warn!(%peer, access = ?entry.access, rate = entry.rate, error = %e, "could not update the allowed set")
         }
@@ -901,6 +1372,15 @@ mod tests {
         s.parse().unwrap()
     }
 
+    fn v6(s: &str) -> Ipv6Addr {
+        s.parse().unwrap()
+    }
+
+    /// A named counter, as an element holds it.
+    fn c(name: &str) -> Value {
+        Value::Counter(name.to_owned())
+    }
+
     // Shaped like `ip -4 -j route show table all` from iproute2: a default
     // route, an ECMP route across two gateways, and on-link routes that name
     // no gateway at all.
@@ -936,7 +1416,7 @@ mod tests {
 
     #[test]
     fn neighbours_keep_usable_macs_only() {
-        let neighbours = parse_neighbours(NEIGHBOURS).unwrap();
+        let neighbours = parse_neighbours::<Ipv4Addr>(NEIGHBOURS).unwrap();
         // Normalized, since it is compared against what was applied before.
         assert_eq!(neighbours[&v4("192.168.1.1")], "52:54:00:aa:bb:cc");
         // Stale is unconfirmed, not wrong.
@@ -951,10 +1431,10 @@ mod tests {
         // or every upstream would be moved back to counting by IP.
         assert_eq!(parse_gateways(""), None);
         assert_eq!(parse_gateways("{}"), None);
-        assert_eq!(parse_neighbours("not json"), None);
+        assert_eq!(parse_neighbours::<Ipv4Addr>("not json"), None);
         // An empty table is still a table.
         assert_eq!(parse_gateways("[]"), Some(HashSet::new()));
-        assert_eq!(parse_neighbours("[]"), Some(HashMap::new()));
+        assert_eq!(parse_neighbours::<Ipv4Addr>("[]"), Some(HashMap::new()));
     }
 
     #[test]
@@ -978,7 +1458,7 @@ mod tests {
     #[test]
     fn a_peer_is_an_upstream_when_a_route_goes_through_it() {
         let gateways = parse_gateways(ROUTES).unwrap();
-        let neighbours = parse_neighbours(NEIGHBOURS).unwrap();
+        let neighbours = parse_neighbours::<Ipv4Addr>(NEIGHBOURS).unwrap();
 
         // A customer on the link: nothing is routed via it.
         assert_eq!(
@@ -1011,8 +1491,8 @@ mod tests {
         assert_eq!(
             map_elements(addr, &Metering::Addr, "d1", "r1"),
             vec![
-                (maps::DOWN_TX, "10.0.0.42".to_owned(), "d1".to_owned()),
-                (maps::DOWN_RX, "10.0.0.42".to_owned(), "r1".to_owned()),
+                (maps::DOWN_TX, "10.0.0.42".to_owned(), c("d1")),
+                (maps::DOWN_RX, "10.0.0.42".to_owned(), c("r1")),
             ]
         );
     }
@@ -1027,8 +1507,8 @@ mod tests {
         assert_eq!(
             elements,
             vec![
-                (maps::UP_TX, "192.168.1.1".to_owned(), "d1".to_owned()),
-                (maps::UP_RX, "52:54:00:aa:bb:cc".to_owned(), "r1".to_owned()),
+                (maps::UP_TX, "192.168.1.1".to_owned(), c("d1")),
+                (maps::UP_RX, "52:54:00:aa:bb:cc".to_owned(), c("r1")),
             ]
         );
         // No per-IP element survives, or traffic addressed to the upstream
@@ -1046,8 +1526,8 @@ mod tests {
         assert_eq!(
             map_elements(addr, &Metering::Upstream { mac: None }, "d1", "r1"),
             vec![
-                (maps::UP_TX, "192.168.1.1".to_owned(), "d1".to_owned()),
-                (maps::DOWN_RX, "192.168.1.1".to_owned(), "r1".to_owned()),
+                (maps::UP_TX, "192.168.1.1".to_owned(), c("d1")),
+                (maps::DOWN_RX, "192.168.1.1".to_owned(), c("r1")),
             ]
         );
     }
@@ -1078,19 +1558,27 @@ mod tests {
         let added: Vec<_> = new.iter().filter(|e| !old.contains(e)).collect();
         assert_eq!(
             removed,
-            vec![&(maps::UP_RX, "52:54:00:aa:bb:cc".to_owned(), "r1".to_owned())]
+            vec![&(maps::UP_RX, "52:54:00:aa:bb:cc".to_owned(), c("r1"))]
         );
         assert_eq!(
             added,
-            vec![&(maps::UP_RX, "52:54:00:aa:bb:dd".to_owned(), "r1".to_owned())]
+            vec![&(maps::UP_RX, "52:54:00:aa:bb:dd".to_owned(), c("r1"))]
         );
     }
 
     #[test]
     fn rule_and_element_text_is_what_nft_takes() {
         assert_eq!(
-            element("52:54:00:aa:bb:cc", "rabc"),
+            element("52:54:00:aa:bb:cc", &c("rabc")),
             r#"{ 52:54:00:aa:bb:cc : "rabc" }"#
+        );
+        assert_eq!(
+            element("2001:db8::23", &Value::Mark(0x7011_0002)),
+            "{ 2001:db8::23 : 0x70110002 }"
+        );
+        assert_eq!(
+            element("52:54:00:aa:bb:cc", &Value::Member),
+            "{ 52:54:00:aa:bb:cc }"
         );
         let rules: Vec<String> = counting_rules().iter().map(|r| r.join(" ")).collect();
         assert_eq!(
@@ -1100,11 +1588,334 @@ mod tests {
                 "counter name ip saddr map @down_rx",
                 "counter name rt ip nexthop map @up_tx",
                 "counter name ether saddr map @up_rx",
+                "counter name ip6 daddr map @down6_tx",
+                "meta nfproto ipv6 counter name ether saddr map @down6_rx",
             ]
         );
         // Every map a rule names is one an element can be put in.
-        for map in [maps::DOWN_TX, maps::DOWN_RX, maps::UP_TX, maps::UP_RX] {
+        for map in [
+            maps::DOWN_TX,
+            maps::DOWN_RX,
+            maps::UP_TX,
+            maps::UP_RX,
+            maps::DOWN6_TX,
+            maps::DOWN6_RX,
+        ] {
             assert!(rules.iter().any(|r| r.ends_with(&format!("@{map}"))));
+        }
+    }
+
+    #[test]
+    fn the_ipv6_gate_is_by_mac_out_and_by_address_in() {
+        let rules: Vec<String> = ipv6_gate_rules().iter().map(|r| r.join(" ")).collect();
+        assert_eq!(
+            rules,
+            [
+                // IPv6 only: the peer's IPv4 is gated by address already.
+                "meta nfproto ipv6 ether saddr @known_mac ether saddr != @allowed_mac drop",
+                "ip6 daddr @known6 ip6 daddr != @allowed6 drop",
+            ]
+        );
+    }
+
+    // Shaped like `ip -6 -j neigh show`: a phone's stable and privacy global
+    // addresses, a ULA, its link-local, another device, and a failed entry.
+    const NEIGHBOURS6: &str = r#"[
+        {"dst":"2001:db8:1::a","dev":"br-lan","lladdr":"AA:BB:CC:00:00:23","state":["REACHABLE"]},
+        {"dst":"2001:db8:1::5eed","dev":"br-lan","lladdr":"aa:bb:cc:00:00:23","state":["STALE"]},
+        {"dst":"fd00:1::23","dev":"br-lan","lladdr":"aa:bb:cc:00:00:23","state":["DELAY"]},
+        {"dst":"fe80::a8bb:ccff:fe00:23","dev":"br-lan","lladdr":"aa:bb:cc:00:00:23","state":["STALE"]},
+        {"dst":"2001:db8:1::77","dev":"br-lan","lladdr":"aa:bb:cc:00:00:77","state":["REACHABLE"]},
+        {"dst":"2001:db8:1::99","dev":"br-lan","state":["FAILED"]}
+    ]"#;
+
+    const PHONE_MAC: &str = "aa:bb:cc:00:00:23";
+
+    fn phone_neighbours() -> HashMap<Ipv4Addr, String> {
+        HashMap::from([(v4("192.168.1.23"), PHONE_MAC.to_owned())])
+    }
+
+    #[test]
+    fn ipv6_neighbours_parse_with_the_same_rules() {
+        let n = parse_neighbours::<Ipv6Addr>(NEIGHBOURS6).unwrap();
+        assert_eq!(n[&v6("2001:db8:1::a")], PHONE_MAC, "normalized");
+        assert_eq!(n.len(), 5, "the failed entry is dropped");
+        // A table of the other family parses to nothing, not to garbage.
+        assert!(parse_neighbours::<Ipv6Addr>(NEIGHBOURS).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_customer_on_the_link_is_tied_to_its_mac_and_forwardable_ipv6() {
+        let n6 = parse_neighbours::<Ipv6Addr>(NEIGHBOURS6).unwrap();
+        let link = customer_link(
+            "192.168.1.23".parse().unwrap(),
+            &Metering::Addr,
+            &phone_neighbours(),
+            &n6,
+            None,
+        )
+        .unwrap();
+        assert_eq!(link.mac, PHONE_MAC);
+        // Link-local is never forwarded; the other device's address is not
+        // the phone's.
+        assert_eq!(
+            link.v6,
+            BTreeSet::from([
+                v6("2001:db8:1::5eed"),
+                v6("2001:db8:1::a"),
+                v6("fd00:1::23")
+            ])
+        );
+    }
+
+    #[test]
+    fn upstreams_and_strangers_get_no_link() {
+        let n6 = parse_neighbours::<Ipv6Addr>(NEIGHBOURS6).unwrap();
+        let addr: IpAddr = "192.168.1.23".parse().unwrap();
+        // An upstream's MAC is the source of everything it forwards.
+        let upstream = Metering::Upstream {
+            mac: Some(PHONE_MAC.into()),
+        };
+        assert_eq!(
+            customer_link(addr, &upstream, &phone_neighbours(), &n6, None),
+            None
+        );
+        // Not on the link: no MAC to tie anything to.
+        assert_eq!(
+            customer_link(addr, &Metering::Addr, &HashMap::new(), &n6, None),
+            None
+        );
+        // An IPv6 peer is its own address already.
+        assert_eq!(
+            customer_link(
+                "2001:db8::1".parse().unwrap(),
+                &Metering::Addr,
+                &phone_neighbours(),
+                &n6,
+                None
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn an_idle_privacy_address_stays_until_another_mac_claims_it() {
+        let addr: IpAddr = "192.168.1.23".parse().unwrap();
+        let before = Link {
+            mac: PHONE_MAC.into(),
+            v6: BTreeSet::from([v6("2001:db8:1::aa01"), v6("2001:db8:1::77")]),
+            overflowed: false,
+        };
+        // `::aa01` fell out of the table; `::77` now belongs to another MAC;
+        // `::bb02` is the day's fresh privacy address.
+        let n6 = HashMap::from([
+            (v6("2001:db8:1::77"), "aa:bb:cc:00:00:77".to_owned()),
+            (v6("2001:db8:1::bb02"), PHONE_MAC.to_owned()),
+        ]);
+        let after = customer_link(
+            addr,
+            &Metering::Addr,
+            &phone_neighbours(),
+            &n6,
+            Some(&before),
+        )
+        .unwrap();
+        assert_eq!(
+            after.v6,
+            BTreeSet::from([v6("2001:db8:1::bb02"), v6("2001:db8:1::aa01")])
+        );
+        // The ARP entry expired: the link is kept as it was.
+        assert_eq!(
+            customer_link(addr, &Metering::Addr, &HashMap::new(), &n6, Some(&before)),
+            Some(before.clone())
+        );
+        // The address went to a different device: a new link, nothing kept.
+        let other = HashMap::from([(v4("192.168.1.23"), "aa:bb:cc:00:00:99".to_owned())]);
+        let replaced = customer_link(addr, &Metering::Addr, &other, &n6, Some(&before)).unwrap();
+        assert_eq!(replaced.mac, "aa:bb:cc:00:00:99");
+        assert!(replaced.v6.is_empty());
+    }
+
+    /// `count` addresses in the phone's prefix, all on its MAC.
+    fn invented(count: u16) -> HashMap<Ipv6Addr, String> {
+        (0..count)
+            .map(|i| {
+                (
+                    Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, i),
+                    PHONE_MAC.to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_device_inventing_addresses_is_capped() {
+        let link = customer_link(
+            "192.168.1.23".parse().unwrap(),
+            &Metering::Addr,
+            &phone_neighbours(),
+            &invented(100),
+            None,
+        )
+        .unwrap();
+        assert_eq!(link.v6.len(), MAX_V6_PER_PEER);
+        assert!(link.overflowed);
+        // Exactly at the cap is not over it.
+        let at = customer_link(
+            "192.168.1.23".parse().unwrap(),
+            &Metering::Addr,
+            &phone_neighbours(),
+            &invented(MAX_V6_PER_PEER as u16),
+            None,
+        )
+        .unwrap();
+        assert_eq!(at.v6.len(), MAX_V6_PER_PEER);
+        assert!(!at.overflowed);
+    }
+
+    #[test]
+    fn over_the_cap_the_link_is_known_but_not_allowed_until_it_drops() {
+        // A paid phone using one real address. Then sixteen lower ones appear
+        // on its MAC — invented by it, or by a neighbour's solicitations — and
+        // truncating by address would push the real one out of the gate, the
+        // class and the counters, while its MAC was still allowed out.
+        let addr: IpAddr = "192.168.1.23".parse().unwrap();
+        let real = v6("2001:db8:1::5eed");
+        let mut n6 = HashMap::from([(real, PHONE_MAC.to_owned())]);
+        let before = customer_link(addr, &Metering::Addr, &phone_neighbours(), &n6, None).unwrap();
+        assert!(!before.overflowed);
+        n6.extend(invented(MAX_V6_PER_PEER as u16));
+
+        let over = customer_link(
+            addr,
+            &Metering::Addr,
+            &phone_neighbours(),
+            &n6,
+            Some(&before),
+        )
+        .unwrap();
+        assert!(over.overflowed);
+        assert!(over.v6.contains(&real), "the address it had is kept first");
+        assert_eq!(over.v6.len(), MAX_V6_PER_PEER);
+
+        // Paid, and still nothing of its IPv6 is allowed: the MAC and every
+        // address it holds stay known, so all of it is dropped.
+        let mark = MARK_BASE | 2;
+        let elements = link_elements(Some(&over), true, "d1", "r1", mark);
+        assert!(
+            elements
+                .iter()
+                .all(|(m, _, _)| *m != maps::ALLOWED_MAC && *m != maps::ALLOWED6)
+        );
+        assert!(elements.contains(&(maps::KNOWN_MAC, PHONE_MAC.to_owned(), Value::Member)));
+        assert!(elements.contains(&(maps::KNOWN6, real.to_string(), Value::Member)));
+
+        // The invented entries age out: allowed again, real address and all.
+        n6.retain(|a, _| *a == real);
+        let recovered =
+            customer_link(addr, &Metering::Addr, &phone_neighbours(), &n6, Some(&over)).unwrap();
+        assert!(!recovered.overflowed);
+        assert!(recovered.v6.contains(&real));
+        let elements = link_elements(Some(&recovered), true, "d1", "r1", mark);
+        assert!(elements.contains(&(maps::ALLOWED_MAC, PHONE_MAC.to_owned(), Value::Member)));
+        assert!(elements.contains(&(maps::ALLOWED6, real.to_string(), Value::Member)));
+    }
+
+    #[test]
+    fn an_address_moving_between_peers_is_removed_before_it_is_added() {
+        // `::77` moves from P1 to P2. Whatever order the peers come in, P1's
+        // elements for it go before P2's go in, and neither peer's removal
+        // takes out what the other now holds.
+        let a = "2001:db8:1::77".to_owned();
+        let p1_before = vec![
+            (maps::KNOWN6, a.clone(), Value::Member),
+            (maps::DOWN6_TX, a.clone(), c("d1")),
+            (maps::MARK6, a.clone(), Value::Mark(MARK_BASE | 2)),
+        ];
+        let p2_after = vec![
+            (maps::KNOWN6, a.clone(), Value::Member),
+            (maps::DOWN6_TX, a.clone(), c("d2")),
+            (maps::MARK6, a.clone(), Value::Mark(MARK_BASE | 3)),
+        ];
+        let p1 = Move {
+            before: p1_before,
+            after: vec![],
+        };
+        let p2 = Move {
+            before: vec![],
+            after: p2_after.clone(),
+        };
+        for moves in [vec![p1.clone(), p2.clone()], vec![p2.clone(), p1.clone()]] {
+            let (removals, additions) = plan_moves(&moves);
+            // P1's counter and mark for the address come out; its `known6`
+            // member does not, since P2 holds the identical one — removing it
+            // would open the gate for the address until P2's went in.
+            assert_eq!(
+                removals,
+                vec![
+                    (maps::DOWN6_TX, a.clone(), c("d1")),
+                    (maps::MARK6, a.clone(), Value::Mark(MARK_BASE | 2)),
+                ]
+            );
+            let p2_added = if moves[0].after.is_empty() {
+                &additions[1]
+            } else {
+                &additions[0]
+            };
+            assert_eq!(*p2_added, p2_after);
+        }
+        // An unchanged peer contributes nothing to either side.
+        let still = Move {
+            before: vec![(maps::KNOWN6, a.clone(), Value::Member)],
+            after: vec![(maps::KNOWN6, a.clone(), Value::Member)],
+        };
+        let (removals, additions) = plan_moves(&[still]);
+        assert!(removals.is_empty());
+        assert!(additions[0].is_empty());
+    }
+
+    #[test]
+    fn a_customers_ipv6_is_gated_shaped_and_counted_with_its_ipv4() {
+        let link = Link {
+            mac: PHONE_MAC.into(),
+            v6: BTreeSet::from([v6("2001:db8:1::a")]),
+            overflowed: false,
+        };
+        let mark = MARK_BASE | 2;
+        let unpaid = link_elements(Some(&link), false, "d1", "r1", mark);
+        let a = "2001:db8:1::a".to_owned();
+        assert_eq!(
+            unpaid,
+            vec![
+                (maps::KNOWN_MAC, PHONE_MAC.to_owned(), Value::Member),
+                (maps::DOWN6_RX, PHONE_MAC.to_owned(), c("r1")),
+                (maps::KNOWN6, a.clone(), Value::Member),
+                (maps::DOWN6_TX, a.clone(), c("d1")),
+                (maps::MARK6, a.clone(), Value::Mark(0x7011_0002)),
+            ]
+        );
+        // Carrying the peer adds exactly the two `allowed` members: that is
+        // the whole diff `gate` applies.
+        let paid = link_elements(Some(&link), true, "d1", "r1", mark);
+        let added: Vec<_> = paid.iter().filter(|e| !unpaid.contains(e)).collect();
+        assert_eq!(
+            added,
+            vec![
+                &(maps::ALLOWED_MAC, PHONE_MAC.to_owned(), Value::Member),
+                &(maps::ALLOWED6, a, Value::Member),
+            ]
+        );
+        assert!(unpaid.iter().all(|e| paid.contains(e)));
+        assert!(link_elements(None, true, "d1", "r1", mark).is_empty());
+    }
+
+    #[test]
+    fn only_forwardable_ipv6_is_tied_to_a_peer() {
+        for a in ["2001:db8::1", "fd00::1"] {
+            assert!(forwardable(&v6(a)), "{a}");
+        }
+        for a in ["fe80::1", "febf::1", "ff02::1", "::1", "::"] {
+            assert!(!forwardable(&v6(a)), "{a}");
         }
     }
 }

@@ -8,9 +8,11 @@ vouchers:
   accepted_mints:
     - "http://gateway:3338"
 access:
+  # No allowance: a customer that has not paid, or whose grant has lapsed, is
+  # dropped rather than carried slowly, so the test can see the gate shut.
+  # Its control plane and the mint are this node, which is never gated.
   minimum_flow:
-    enabled: true
-    bytes_per_second: 4096
+    enabled: false
 grants:
   window_range_ms: [200, 30000]
 forwarding:

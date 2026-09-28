@@ -12,6 +12,19 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 ### Added
 
+- A customer's IPv6 is gated, shaped and metered with its IPv4. The nftables
+  adapter ties a customer on the link to its MAC (from the IPv4 neighbour
+  table) and to the global and ULA IPv6 addresses the IPv6 neighbour table
+  lists for it, on the existing refresh: out by source MAC, in by destination
+  address, marked into the peer's `tc` class and counted into its counters.
+  An address stays with its peer until another MAC claims it. Past 16
+  addresses for one MAC, its IPv6 is withheld until the count drops back
+  (logged once at warn), so extra addresses cannot push the real one out of
+  the class and counters; its IPv4 is unaffected. Documented in
+  `peering-ip.md`, "A Customer's IPv6". `testing/forwarding` now runs a
+  dual-stack customer, and its gateway has no minimum flow allowance, so an
+  unpaid or lapsed customer is dropped rather than carried at 4096 B/s.
+
 - The market publishes `max_amount` in `info`: the most one sale may be for,
   the lower of `merchantd`'s `mint.max_amount` and `mintd`'s per-quote limit,
   and refuses a larger sale before taking the payment. If issuing fails after
