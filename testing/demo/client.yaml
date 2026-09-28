@@ -8,7 +8,6 @@ identity:
   secret_key: "e320cb6477ed200fa997b77fdbbeb76f26f9b4672ac390cccde71292097b2b4b"
 mint:
   url: "http://client:3338"
-  listen: "0.0.0.0:3338"
   unit: "byte"
 vouchers:
   accepted_mints:

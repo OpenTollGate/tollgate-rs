@@ -59,7 +59,11 @@ pub struct IdentitySection {
     pub secret_key: Option<String>,
 }
 
-/// This node's own mint.
+/// Where this node's own mint is.
+///
+/// The mint is `mintd`, a separate daemon with its own `mint.yaml`
+/// ([`crate::mintd`]). `tollgated` holds none of its keys: it advertises the
+/// mint to peers and settles at it like any other Cashu client.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct MintSection {
@@ -68,57 +72,34 @@ pub struct MintSection {
     /// It has to be reachable *by peers*, which it always is — it is the node
     /// they are already talking to.
     pub url: String,
-    /// Where to serve the mint. Peers reach it at [`Self::url`].
-    pub listen: String,
+    /// Where `tollgated` reaches `mintd` itself, when that differs from what
+    /// peers are told. Empty means [`Self::url`].
+    pub local: String,
     /// Quantity unit. Fixed by the resource and identical across every node
     /// selling it.
     ///
     /// `"byte"` for network forwarding: a proof is then a claim on one byte of
     /// this node's capacity rather than on money.
     pub unit: String,
-    /// Mint vouchers for anyone who asks, without being paid.
-    ///
-    /// On by default, because until there is a market this is how a peer comes
-    /// to hold this node's vouchers at all: it asks the mint for a quote, the
-    /// quote is paid the moment it exists, and the peer mints against it. That
-    /// makes service here free to any peer that can reach the mint.
-    ///
-    /// Off, the mint serves no mint quotes and issues nothing to anybody, so
-    /// peers can only pay with vouchers they came by some other way.
-    pub auto_accept: bool,
-    /// Mint quotes an auto-accepting mint creates per minute, across everybody
-    /// who asks. `0` is unlimited. What a quote may be for is not capped:
-    /// auto-accept is free or it is off. See [`crate::mint::IssueLimit`].
-    pub issue_quotes_per_minute: u64,
-    /// Where the mint database lives. Empty picks the state directory the
-    /// packages keep across an upgrade, beside the wallet.
-    ///
-    /// It holds the spent-proof set and the mint quotes the mint has issued.
-    /// The keyset is derived from the identity and comes back on its own, so
-    /// losing this file does not lose the keys: it makes every voucher this
-    /// node has already redeemed redeemable again.
-    pub file: String,
 }
 
 impl Default for MintSection {
     fn default() -> Self {
-        let limit = crate::mint::IssueLimit::default();
         Self {
             url: "http://127.0.0.1:3338".into(),
-            listen: "0.0.0.0:3338".into(),
+            local: String::new(),
             unit: "byte".into(),
-            auto_accept: true,
-            issue_quotes_per_minute: limit.quotes_per_minute,
-            file: String::new(),
         }
     }
 }
 
 impl MintSection {
-    /// The issue limit these settings describe.
-    pub fn issue_limit(&self) -> crate::mint::IssueLimit {
-        crate::mint::IssueLimit {
-            quotes_per_minute: self.issue_quotes_per_minute,
+    /// Where to reach the mint from this machine.
+    pub fn local_url(&self) -> &str {
+        if self.local.is_empty() {
+            &self.url
+        } else {
+            &self.local
         }
     }
 }
@@ -658,11 +639,6 @@ impl File {
         let listen: SocketAddr = self.network.listen.parse().with_context(|| {
             format!("network.listen {:?} is not an address", self.network.listen)
         })?;
-        let mint_listen: SocketAddr = self
-            .mint
-            .listen
-            .parse()
-            .with_context(|| format!("mint.listen {:?} is not an address", self.mint.listen))?;
 
         let mut peers = Vec::new();
         for (key, section) in &self.peers {
@@ -698,8 +674,8 @@ impl File {
             buyer,
             listen,
             identify,
-            mint_listen,
             mint_url: self.mint.url.clone(),
+            mint_local: self.mint.local_url().to_owned(),
             channel_ttl_seconds: self.channels.ttl_seconds,
             peers,
         })
@@ -868,44 +844,18 @@ mod tests {
             // install time. Anything else in them has to be usable as it is.
             assert_eq!(config.policy.unit, "byte", "{name}");
             assert!(config.policy.minimum_flow > 0, "{name}: no allowance");
-
-            // The mint database sits beside the wallet, where the package
-            // keeps its state across an upgrade.
-            let (mint, wallet) = (Path::new(&file.mint.file), Path::new(&file.wallet.file));
-            assert_eq!(mint.file_name(), Some("mint.sqlite".as_ref()), "{name}");
-            assert_eq!(
-                mint.parent(),
-                wallet.parent(),
-                "{name}: mint and wallet apart"
-            );
-            assert!(mint.is_absolute(), "{name}: a relative mint database");
         }
     }
 
     #[test]
-    fn the_mint_gives_vouchers_away_unless_told_not_to() {
-        // Until there is a market, minting at the peer is how a buyer comes to
-        // hold anything, so a node that says nothing has to allow it.
-        let file: File = serde_yaml::from_str("{}").expect("parse");
-        assert!(file.mint.auto_accept);
-
-        let file: File = serde_yaml::from_str("mint:\n  auto_accept: false\n").expect("parse");
-        assert!(!file.mint.auto_accept);
-    }
-
-    #[test]
-    fn the_issue_limit_defaults_to_the_mints_own_and_can_be_set() {
-        let file: File = serde_yaml::from_str("{}").expect("parse");
-        assert_eq!(file.mint.issue_limit(), crate::mint::IssueLimit::default());
+    fn the_mint_is_reached_where_peers_are_told_unless_said_otherwise() {
+        let file: File = serde_yaml::from_str("mint:\n  url: http://gw:3338\n").expect("parse");
+        assert_eq!(file.mint.local_url(), "http://gw:3338");
 
         let file: File =
-            serde_yaml::from_str("mint:\n  issue_quotes_per_minute: 3\n").expect("parse");
-        assert_eq!(
-            file.mint.issue_limit(),
-            crate::mint::IssueLimit {
-                quotes_per_minute: 3,
-            }
-        );
+            serde_yaml::from_str("mint:\n  url: http://gw:3338\n  local: http://127.0.0.1:3338\n")
+                .expect("parse");
+        assert_eq!(file.mint.local_url(), "http://127.0.0.1:3338");
     }
 
     #[test]

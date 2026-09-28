@@ -4,6 +4,11 @@ Docker topologies for `tollgate-net`. The workspace is compiled **once** into
 `tollgate-test:latest`; every topology runs that same image with different
 configs. Nothing is rebuilt per container.
 
+Each node container runs a node as the packages do: `mintd`, the mint, beside
+`tollgated`, started by `testing/docker/tollgate-node.sh`. `mintd` uses its
+defaults — public on 3338, private on loopback, giving vouchers away — unless a
+topology mounts `/etc/tollgate/mint.yaml`, as `fips/` does to listen on IPv6.
+
 ```sh
 testing/scripts/build.sh          # build the image
 testing/peering/test.sh           # run one topology
@@ -49,8 +54,8 @@ limit.
 
 ## The FIPS topology needs a second image
 
-`fips/` runs two daemons per container — `fipsd` forwards and `tollgated`
-sells — so it builds `tollgate-fips-test:latest` on top of the ordinary image:
+`fips/` runs `fipsd` in every container as well — `fipsd` forwards, and
+`mintd` and `tollgated` sell — so it builds `tollgate-fips-test:latest` on top of the ordinary image:
 
 ```sh
 testing/scripts/build-fips.sh     # tollgate-test, then fips-node, then both

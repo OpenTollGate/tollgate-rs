@@ -80,11 +80,11 @@ else
 
     echo "==> Compiling..."
     (cd "$PROJECT_ROOT" && cargo zigbuild --release --target "$RUST_TARGET" \
-        --bin tollgated --bin tolltop)
+        --bin tollgated --bin tolltop --bin mintd --bin minttop)
     RELEASE_DIR="$PROJECT_ROOT/target/$RUST_TARGET/release"
 fi
 
-for bin in tollgated tolltop; do
+for bin in tollgated tolltop mintd minttop; do
     [ -f "$RELEASE_DIR/$bin" ] || { echo "Missing binary: $RELEASE_DIR/$bin" >&2; exit 1; }
 done
 
@@ -101,9 +101,12 @@ mkdir -p "$CONTROL_DIR" "$DATA_DIR"
 install -d "$DATA_DIR/usr/bin"
 install -m 0755 "$RELEASE_DIR/tollgated" "$DATA_DIR/usr/bin/tollgated"
 install -m 0755 "$RELEASE_DIR/tolltop"   "$DATA_DIR/usr/bin/tolltop"
+install -m 0755 "$RELEASE_DIR/mintd"     "$DATA_DIR/usr/bin/mintd"
+install -m 0755 "$RELEASE_DIR/minttop"   "$DATA_DIR/usr/bin/minttop"
 # Stripped after install so a --bin-dir of unstripped binaries still works and
 # the originals are left alone.
-"${LLVM_STRIP:-strip}" "$DATA_DIR/usr/bin/tollgated" "$DATA_DIR/usr/bin/tolltop" 2>/dev/null || true
+"${LLVM_STRIP:-strip}" "$DATA_DIR/usr/bin/tollgated" "$DATA_DIR/usr/bin/tolltop" \
+    "$DATA_DIR/usr/bin/mintd" "$DATA_DIR/usr/bin/minttop" 2>/dev/null || true
 
 install -d "$DATA_DIR/etc/init.d"
 install -m 0755 "$FILES_DIR/etc/init.d/tollgate" "$DATA_DIR/etc/init.d/tollgate"
@@ -112,6 +115,7 @@ install -m 0755 "$FILES_DIR/etc/init.d/tollgate" "$DATA_DIR/etc/init.d/tollgate"
 # written one into it.
 install -d "$DATA_DIR/etc/tollgate"
 install -m 0600 "$FILES_DIR/etc/tollgate/tollgate.yaml" "$DATA_DIR/etc/tollgate/tollgate.yaml"
+install -m 0600 "$FILES_DIR/etc/tollgate/mint.yaml" "$DATA_DIR/etc/tollgate/mint.yaml"
 
 install -d "$DATA_DIR/etc/uci-defaults"
 install -m 0755 "$FILES_DIR/etc/uci-defaults/90-tollgate-setup" \
@@ -147,6 +151,7 @@ EOF
 # and whatever the operator has priced.
 cat > "$CONTROL_DIR/conffiles" <<EOF
 /etc/tollgate/tollgate.yaml
+/etc/tollgate/mint.yaml
 EOF
 
 cat > "$CONTROL_DIR/postinst" <<'EOF'

@@ -23,7 +23,6 @@ const UNIT: &str = "byte";
 
 /// A seller's mint, serving on a port of its own.
 struct Seller {
-    mint: Arc<cdk::mint::Mint>,
     url: String,
     /// Where the mint's database lives, for as long as the mint does.
     _dir: TempDir,
@@ -42,10 +41,11 @@ async fn seller_limited(max_amount: u64, limit: IssueLimit) -> Seller {
 async fn serve_seller(auto_accept: bool, max_amount: u64, issue_limit: IssueLimit) -> Seller {
     // Bound and released to learn a free port. Something else could take it in
     // between, but on a test machine that is not worth more machinery.
-    let listen: SocketAddr = {
+    let free = || -> SocketAddr {
         let probe = TcpListener::bind("127.0.0.1:0").expect("find a free port");
         probe.local_addr().expect("its address")
     };
+    let (listen, private) = (free(), free());
     let url = format!("http://{listen}");
     let dir = TempDir::new();
 
@@ -56,8 +56,6 @@ async fn serve_seller(auto_accept: bool, max_amount: u64, issue_limit: IssueLimi
             seed: vec![9; 32],
             file: dir.path().join("mint.sqlite"),
             max_amount,
-            auto_accept,
-            issue_limit,
         })
         .await
         .expect("build the mint"),
@@ -66,7 +64,13 @@ async fn serve_seller(auto_accept: bool, max_amount: u64, issue_limit: IssueLimi
     {
         let mint = Arc::clone(&mint);
         tokio::spawn(async move {
-            let _ = mint::serve(mint, axum::Router::new(), listen, std::future::pending()).await;
+            let listeners = mint::Listeners {
+                public: listen,
+                private,
+                auto_accept,
+                issue_limit,
+            };
+            let _ = mint::serve(mint, listeners, Arc::default(), std::future::pending()).await;
         });
     }
 
@@ -79,11 +83,7 @@ async fn serve_seller(auto_accept: bool, max_amount: u64, issue_limit: IssueLimi
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    Seller {
-        mint,
-        url,
-        _dir: dir,
-    }
+    Seller { url, _dir: dir }
 }
 
 /// A directory that removes itself.
@@ -192,25 +192,12 @@ async fn fund_and_verify(
 ) -> (FundedChannel, VerifiedChannel) {
     let (buyer_id, seller_id) = (Identity::generate(), Identity::generate());
     let seller_dir = TempDir::new();
-    let buyer_mint_dir = TempDir::new();
 
     // The buyer's own mint only matters for channels paid *to* it; here it is
     // simply somewhere to point the config.
-    let buyer_mint = mint::build(&MintConfig {
-        url: "http://127.0.0.1:1".into(),
-        unit: UNIT.into(),
-        seed: vec![4; 32],
-        file: buyer_mint_dir.path().join("mint.sqlite"),
-        max_amount: 1 << 30,
-        auto_accept: false,
-        issue_limit: IssueLimit::default(),
-    })
-    .await
-    .expect("build the buyer's mint");
-
     let buyer = SpilmanChannels::new(SpilmanConfig {
-        mint: Arc::new(buyer_mint),
         mint_url: "http://127.0.0.1:1".into(),
+        mint_local: "http://127.0.0.1:1".into(),
         unit: UNIT.into(),
         accepted_mints: vec!["http://127.0.0.1:1".into()],
         secret_key_hex: buyer_id.secret_hex(),
@@ -220,8 +207,8 @@ async fn fund_and_verify(
     .expect("the buyer's channels");
 
     let sellers = SpilmanChannels::new(SpilmanConfig {
-        mint: Arc::clone(&seller.mint),
         mint_url: seller.url.clone(),
+        mint_local: seller.url.clone(),
         unit: UNIT.into(),
         accepted_mints: vec![seller.url.clone()],
         secret_key_hex: seller_id.secret_hex(),
@@ -298,12 +285,11 @@ async fn funding_is_served_and_a_flood_past_the_issue_limit_is_refused() {
         .issue(&seller.url, UNIT, 1_000)
         .await
         .expect_err("the issue limit is spent");
-    // cdk hands a wallet any refusal from the payment processor as a generic
-    // "Invalid payment request", so what shows here is that the quote itself
-    // was refused, rather than the mint after it.
+    // Refused by the public listener when the quote was asked for, with the
+    // reason, before the mint did any work.
     let refused = format!("{refused:#}");
     assert!(
-        refused.contains("ask ") && refused.contains("Invalid payment request"),
+        refused.contains("ask ") && refused.contains("too many quotes"),
         "refused when the quote was asked for: {refused}"
     );
     assert_eq!(flooder.balance_of(&seller.url, UNIT).await, 0);

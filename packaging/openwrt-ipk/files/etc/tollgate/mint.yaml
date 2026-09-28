@@ -1,0 +1,28 @@
+# mintd: this node's own mint. Issues the node's byte vouchers and redeems
+# them on delivery. No Lightning, and nothing but the standard Cashu API.
+# Every change here needs a restart of mintd.
+
+unit: "byte"
+# The URL peers reach the mint on. Must match mint.url in tollgate.yaml.
+url: "http://192.168.1.1:3338"
+
+# The mint's own secret, created on first start. Losing it retires every
+# voucher outstanding, since the keyset cannot be rebuilt. Kept across a
+# sysupgrade.
+seed_file: "/etc/tollgate/mint.seed"
+# The record of which vouchers this mint has already redeemed. Without it
+# every voucher already paid out redeems again. Kept across a sysupgrade.
+file: "/etc/tollgate/mint.sqlite"
+
+public:
+  listen: "0.0.0.0:3338"
+# Mint quotes here are paid on creation: whoever reaches it can print this
+# node's vouchers. Loopback only, for merchantd.
+private:
+  listen: "127.0.0.1:3337"
+
+# Give vouchers away to any peer that asks, on the public listener. For
+# testing and for handing free vouchers to third parties; a node that sells
+# turns it off. Uncapped in value: only requests are rationed.
+auto_accept: true
+issue_quotes_per_minute: 60

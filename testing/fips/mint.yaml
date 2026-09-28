@@ -1,0 +1,4 @@
+# Every node's mint in this topology. Peers reach a node's mint over the mesh,
+# on its fips0 address, so the public listener has to take IPv6.
+public:
+  listen: "[::]:3338"

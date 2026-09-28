@@ -4,6 +4,8 @@
 /reference
 /docs
 /testing
+# Except the script every node container starts with.
+!/testing/docker/tollgate-node.sh
 /memory-project
 /memory-global
 /skills

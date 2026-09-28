@@ -3,7 +3,6 @@ identity:
   secret_key: "e320cb6477ed200fa997b77fdbbeb76f26f9b4672ac390cccde71292097b2b4b"
 mint:
   url: "http://[fd81:f1b:5135:2317:58f9:eb75:dc4d:98b8]:3338"
-  listen: "[::]:3338"
   unit: "byte"
 buying:
   # As in the nftables forwarding topology, and for the same reason: this

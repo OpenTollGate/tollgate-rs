@@ -233,16 +233,19 @@ how a mint quote gets paid.
 
 ```yaml
 unit: "byte"
+url: "http://192.168.1.1:3338"          # as tollgate.yaml advertises it
 seed_file: "/etc/tollgate/mint.seed"    # this mint's own seed; keysets derive from it
 file: ""                                # mint.sqlite in the state directory
+max_amount: 17179869184                 # largest single quote: the largest channel
 
 public:
   listen: "0.0.0.0:3338"                # anyone: swap, melt (burn), state check, …
 private:
-  socket: "/run/tollgate/mintd.sock"    # merchantd only: mint quotes paid on creation
+  listen: "127.0.0.1:3337"              # merchantd only: mint quotes paid on creation
 
 auto_accept: true                       # public mint quotes paid on creation too
 issue_quotes_per_minute: 60             # ...but no more quotes than this
+control_socket: ""                      # what minttop reads
 ```
 
 ### Defaults
@@ -250,12 +253,15 @@ issue_quotes_per_minute: 60             # ...but no more quotes than this
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `unit` | `"byte"` | Must match `mint.unit` in `tollgate.yaml` |
-| `seed_file` | *(generated on first start)* | The mint's own secret, separate from the node's identity key. Keysets are derived from it |
+| `url` | `"http://127.0.0.1:3338"` | Must match `mint.url` in `tollgate.yaml`; the mint names itself by it |
+| `seed_file` | `mint.seed` in the state directory, generated on first start | The mint's own secret, separate from the node's identity key. Keysets are derived from it |
+| `max_amount` | `17179869184` | Largest amount one quote may be for. At least the largest channel `tollgated` funds (`channels.max_capacity`) |
 | `public.listen` | `"0.0.0.0:3338"` | The mint as peers and wallets see it. Mint quotes here are never paid unless auto-accept is on |
-| `private.socket` | *(platform state dir)* | Mint quotes here are paid on creation. Whoever can open it can print this node's vouchers, so only `merchantd` should |
+| `private.listen` | `"127.0.0.1:3337"` | Mint quotes here are paid on creation. Whoever reaches it can print this node's vouchers, so it stays on loopback, for `merchantd` |
 | `auto_accept` | `true` | Report every NUT-04 mint quote on the public listener paid, so a peer mints what it needs for free |
 | `issue_quotes_per_minute` | `60` | Mint quotes created per minute, a minute's worth at once; `0` = unlimited |
 | `file` | `mint.sqlite` in the state directory | The mint database: the spent-proof set and the mint quotes issued |
+| `control_socket` | `mintd.sock` in the temp directory | Local socket `minttop` reads: listeners, auto-accept, quotes served on each listener |
 
 There is no issuance ceiling, on what `merchantd` sells or on what auto-accept gives away: auto-accept is free or it is off.
 
@@ -301,7 +307,7 @@ market:
                                         #   delegate to a third-party market
 
 mint:
-  private: "/run/tollgate/mintd.sock"   # where this node's vouchers are issued
+  private: "http://127.0.0.1:3337"      # where this node's vouchers are issued
 
 price:                                  # default, for accepts entries without their own
   unit: "usd"                           # usd, eur or sat
@@ -390,7 +396,7 @@ external market through the gate is a possible later option.
 | `control` | *(platform state dir)* | Local control socket: price, rate sources and `accepts` changed at runtime |
 | `market.enabled` | `false` | Off by default; a node without a market still delivers and gets paid |
 | `market.path` | `"/tollgate/market/v1"` | Local prefix, or an external URL to delegate to |
-| `mint.private` | *(platform state dir)* | `mintd`'s private listener |
+| `mint.private` | `"http://127.0.0.1:3337"` | `mintd`'s private listener |
 | `price.unit` | `"usd"` | `usd`, `eur` or `sat`. Decides whether a rate is needed at all |
 | `price.per_mbit` | *(required unless every entry has its own)* | Default price. An entry with neither its own price nor a default is not sold against |
 | `accepts[].price` | *(none: `price` applies)* | This issuer's own price, `unit` and `per_mbit` |

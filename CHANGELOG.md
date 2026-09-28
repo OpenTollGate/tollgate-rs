@@ -12,6 +12,20 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 ### Added
 
+- `mintd`: the mint is its own daemon, reading `mint.yaml`, so `tollgated`
+  holds none of its keys. It serves the standard Cashu API and nothing else,
+  on a public listener for peers and wallets and a private one, on loopback,
+  where mint quotes are paid on creation — how `merchantd` will sell. The
+  public listener hands out quotes only when `auto_accept` is on, rationed by
+  `issue_quotes_per_minute`. The keyset comes from the mint's own seed
+  (`seed_file`, created on first start) rather than from the node's identity,
+  so upgrading a node issues against new keys. `minttop` watches it.
+  `tollgated` no longer runs a mint: `mint.url` is what it advertises, and it
+  settles channels funded in its own vouchers at `mint.local` over HTTP like any
+  other mint. The dormant market endpoint is no longer served until
+  `merchantd` takes it over. The packages and the docker topologies run both
+  daemons.
+
 - `tollgate-protocol`: the wire format — messages, the CBOR codec and TCP
   framing — `no_std` + `alloc`. Messages are numbered contiguously, and every
   refusal carries a reason a peer can act on; `TopUpReject` names a rate the

@@ -5,7 +5,6 @@ mint:
   # Reachable by the client under its compose service name — a peer funds its
   # channel against this, so it has to resolve from the peer's side.
   url: "http://gateway:3338"
-  listen: "0.0.0.0:3338"
   unit: "byte"
 vouchers:
   accepted_mints:

@@ -29,6 +29,7 @@ fi
 LAN_IP="$(uci -q get network.lan.ipaddr)"
 if [ -n "$LAN_IP" ]; then
 	sed -i "s|^\(\s*\)url: \"http://192.168.1.1:3338\"|\1url: \"http://$LAN_IP:3338\"|" "$CONFIG"
+	sed -i "s|^url: \"http://192.168.1.1:3338\"|url: \"http://$LAN_IP:3338\"|" /etc/tollgate/mint.yaml
 	logger -t tollgate "mint advertised at http://$LAN_IP:3338"
 fi
 
