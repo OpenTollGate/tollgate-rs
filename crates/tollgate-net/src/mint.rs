@@ -318,12 +318,40 @@ pub async fn build(config: &MintConfig) -> Result<Mint> {
         .nut05
         .methods
         .retain(|m| m.method == burn_method());
-    builder = builder.with_mint_info(info);
+    builder = builder.with_mint_info(info.clone());
 
     let mint = builder
         .build_with_seed(db.clone(), &config.seed)
         .await
         .context("build the mint")?;
+
+    // cdk writes its info to the database on first start and serves that copy
+    // ever after, limits included: raising `max_amount`, or a first-boot
+    // rewrite of the URL, would otherwise never take effect. This file is
+    // what the operator edits, so what it says wins.
+    let mut stored = mint.mint_info().await.context("read the mint's info")?;
+    if (
+        &stored.name,
+        &stored.description,
+        &stored.urls,
+        &stored.nuts.nut04,
+        &stored.nuts.nut05,
+    ) != (
+        &info.name,
+        &info.description,
+        &info.urls,
+        &info.nuts.nut04,
+        &info.nuts.nut05,
+    ) {
+        stored.name = info.name;
+        stored.description = info.description;
+        stored.urls = info.urls;
+        stored.nuts.nut04 = info.nuts.nut04;
+        stored.nuts.nut05 = info.nuts.nut05;
+        mint.set_mint_info(stored)
+            .await
+            .context("update the mint's stored info")?;
+    }
 
     mint.set_quote_ttl(QuoteTTL::new(10_000, 10_000))
         .await
@@ -1011,6 +1039,33 @@ mod tests {
             matches!(err, cdk::Error::TokenAlreadySpent),
             "expected the proofs to be spent, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_raised_limit_takes_effect_after_a_restart() {
+        // cdk keeps its info in the database from the first start, limits
+        // included; the router's mint kept refusing quotes over the old 16 GiB
+        // after mint.yaml said 1 TiB.
+        let dir = Dir::new();
+        let mut config = byte_mint(&dir);
+        let quote = |amount: u64| {
+            MintQuoteRequest::Bolt11(MintQuoteBolt11Request {
+                amount: Amount::from(amount),
+                unit: CurrencyUnit::Custom("byte".into()),
+                description: None,
+                pubkey: None,
+            })
+        };
+        {
+            let mint = build(&config).await.expect("build the mint");
+            assert!(mint.get_mint_quote(quote(2_000_000_000)).await.is_err());
+            mint.stop().await.expect("stop the mint");
+        }
+        config.max_amount = 1 << 40;
+        let mint = build(&config).await.expect("reopen with a higher limit");
+        mint.get_mint_quote(quote(2_000_000_000))
+            .await
+            .expect("the new limit is the one enforced");
     }
 
     /// Ask `mint` for a quote of `amount` bytes and check it, as a wallet

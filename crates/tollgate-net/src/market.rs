@@ -178,6 +178,12 @@ pub struct Info {
     pub mint: String,
     /// What it takes as payment, and at what price.
     pub accepts: Vec<Accepted>,
+    /// The most one sale may be for, in `unit`: the lower of this market's
+    /// own ceiling and what the mint issues against one quote. A buyer paying
+    /// for more splits the payment into several sales. Absent from markets
+    /// older than it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_amount: Option<u64>,
 }
 
 /// Money in, blinded outputs to sign.
@@ -205,7 +211,32 @@ pub struct Issuer {
     /// The unit this node's vouchers denominate in.
     pub unit: String,
     http: reqwest::Client,
+    /// The last lookup of the mint's ceiling on one quote: when it was
+    /// made, what it found (`None` for no ceiling, or for no answer), and
+    /// how long to trust it.
+    limit: Arc<std::sync::Mutex<Option<Looked>>>,
 }
+
+/// One lookup of the mint's quote ceiling.
+#[derive(Debug, Clone, Copy)]
+struct Looked {
+    at: std::time::Instant,
+    max: Option<u64>,
+    ttl: std::time::Duration,
+}
+
+/// How long the mint's quote ceiling is trusted: it changes only when mintd
+/// restarts with a new `max_amount`.
+const LIMIT_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long a lookup that got no answer stands before the mint is asked
+/// again. Without it, a mintd that is hung rather than down would hold every
+/// `info` and every `swap` for the whole lookup timeout.
+const FAILED_LIMIT_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long one lookup of the ceiling may take. Shorter than issuing's
+/// timeout: nothing is at stake in asking, and a sale waits on the answer.
+const LIMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Issuer {
     /// Issue at `url`, in `unit`.
@@ -217,7 +248,58 @@ impl Issuer {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("an HTTP client"),
+            limit: Arc::default(),
         }
+    }
+
+    /// The most the mint issues against one quote in this unit: NUT-06's
+    /// `nut04` `max_amount` for bolt11. `None` when the mint cannot be asked
+    /// or sets no ceiling.
+    ///
+    /// Both answers are cached: a ceiling (or its absence) for
+    /// [`LIMIT_TTL`], and no answer at all for [`FAILED_LIMIT_TTL`], after
+    /// which the mint is asked again.
+    pub async fn limit(&self) -> Option<u64> {
+        if let Some(looked) = *self.limit.lock().expect("not poisoned")
+            && looked.at.elapsed() < looked.ttl
+        {
+            return looked.max;
+        }
+        let (max, ttl) = match self.read_limit().await {
+            Ok(max) => (max, LIMIT_TTL),
+            Err(e) => {
+                debug!(mint = %self.url, error = %format!("{e:#}"), "could not read the mint's quote ceiling");
+                (None, FAILED_LIMIT_TTL)
+            }
+        };
+        *self.limit.lock().expect("not poisoned") = Some(Looked {
+            at: std::time::Instant::now(),
+            max,
+            ttl,
+        });
+        max
+    }
+
+    /// Ask the mint for its quote ceiling: `Ok(None)` if it answered and
+    /// sets none, an error if it did not answer.
+    async fn read_limit(&self) -> Result<Option<u64>> {
+        let info: serde_json::Value = self
+            .http
+            .get(format!("{}/v1/info", self.url))
+            .timeout(LIMIT_TIMEOUT)
+            .send()
+            .await
+            .context("reach the mint")?
+            .error_for_status()?
+            .json()
+            .await
+            .context("read the mint's info")?;
+        Ok(info["nuts"]["4"]["methods"].as_array().and_then(|methods| {
+            methods
+                .iter()
+                .find(|m| m["method"] == "bolt11" && m["unit"] == self.unit.as_str())?["max_amount"]
+                .as_u64()
+        }))
     }
 
     /// Have `outputs` signed: a NUT-04 quote for their total, paid on
@@ -231,18 +313,16 @@ impl Issuer {
             .iter()
             .map(|o| u64::from(o.amount))
             .fold(0, u64::saturating_add);
-        let quote: serde_json::Value = self
+        let response = self
             .http
             .post(format!("{}/v1/mint/quote/bolt11", self.url))
             .json(&serde_json::json!({ "amount": amount, "unit": self.unit }))
             .send()
             .await
-            .with_context(|| format!("reach the mint at {}", self.url))?
-            .error_for_status()
-            .context("ask the mint for a quote")?
-            .json()
+            .with_context(|| format!("reach the mint at {}", self.url))?;
+        let quote: serde_json::Value = mint_answer(response)
             .await
-            .context("read the mint's quote")?;
+            .with_context(|| format!("ask the mint for a quote of {amount} {}", self.unit))?;
         let quote = quote["quote"]
             .as_str()
             .ok_or_else(|| anyhow!("the mint's quote had no id: {quote}"))?
@@ -252,20 +332,36 @@ impl Issuer {
         struct Minted {
             signatures: Vec<BlindSignature>,
         }
-        let minted: Minted = self
+        let response = self
             .http
             .post(format!("{}/v1/mint/bolt11", self.url))
             .json(&serde_json::json!({ "quote": quote, "outputs": outputs }))
             .send()
             .await
-            .with_context(|| format!("reach the mint at {} to mint quote {quote}", self.url))?
-            .error_for_status()
-            .with_context(|| format!("mint against quote {quote}"))?
-            .json()
-            .await
-            .with_context(|| format!("read the signatures for quote {quote}"))?;
+            .with_context(|| format!("reach the mint at {} to mint quote {quote}", self.url))?;
+        let minted: Minted = serde_json::from_value(
+            mint_answer(response)
+                .await
+                .with_context(|| format!("mint against quote {quote}"))?,
+        )
+        .with_context(|| format!("read the signatures for quote {quote}"))?;
         Ok(minted.signatures)
     }
+}
+
+/// A mint's JSON answer, or its refusal in its own words: cdk says what was
+/// wrong in the body (`{"code", "detail"}`), which a bare status throws away.
+async fn mint_answer(response: reqwest::Response) -> Result<serde_json::Value> {
+    let status = response.status();
+    let text = response.text().await.context("read the mint's answer")?;
+    if !status.is_success() {
+        let detail = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v["detail"].as_str().map(str::to_owned))
+            .unwrap_or(text);
+        bail!("{status}: {detail}");
+    }
+    serde_json::from_str(&text).with_context(|| format!("not JSON: {text}"))
 }
 
 /// The market's state.
@@ -304,10 +400,26 @@ pub fn router(
         })
 }
 
-type Failure = (axum::http::StatusCode, String);
+type Failure = axum::response::Response;
 
+/// A refused swap: logged, since the buyer is often a daemon whose own log
+/// is the only other place the reason would show.
 fn bad_request(message: impl Into<String>) -> Failure {
-    (axum::http::StatusCode::BAD_REQUEST, message.into())
+    use axum::response::IntoResponse;
+    let message = message.into();
+    warn!(reason = %message, "refused a swap");
+    (axum::http::StatusCode::BAD_REQUEST, message).into_response()
+}
+
+impl Market {
+    /// The most one sale may be for: this market's own ceiling, and the
+    /// mint's on one quote, whichever is lower.
+    async fn max_sale(&self) -> u64 {
+        match self.issuer.limit().await {
+            Some(mint) => self.max_amount.min(mint),
+            None => self.max_amount,
+        }
+    }
 }
 
 async fn info(State(market): State<Market>) -> Json<Info> {
@@ -315,6 +427,7 @@ async fn info(State(market): State<Market>) -> Json<Info> {
         unit: market.unit.clone(),
         mint: market.mint_url.clone(),
         accepts: market.prices.listed(),
+        max_amount: Some(market.max_sale().await),
     })
 }
 
@@ -327,13 +440,20 @@ async fn swap(
     State(market): State<Market>,
     Json(request): Json<SwapRequest>,
 ) -> Result<Json<SwapResponse>, Failure> {
-    let token = Token::from_str(request.token.trim())
-        .map_err(|e| bad_request(format!("that is not a Cashu token: {e}")))?;
+    // Refusals are read by people, on a captive portal: in plain words, with
+    // the library's in the log.
+    let token = Token::from_str(request.token.trim()).map_err(|e| {
+        debug!(error = %e, "unreadable payment");
+        bad_request("that is not a voucher")
+    })?;
 
     let paid_mint = normalise(
         &token
             .mint_url()
-            .map_err(|e| bad_request(e.to_string()))?
+            .map_err(|e| {
+                debug!(error = %e, "payment without an issuer");
+                bad_request("that voucher names no issuer")
+            })?
             .to_string(),
     );
     let paid_unit = token
@@ -342,7 +462,10 @@ async fn swap(
         .unwrap_or_else(|| "sat".into());
     let paid: u64 = token
         .value()
-        .map_err(|e| bad_request(e.to_string()))?
+        .map_err(|e| {
+            debug!(error = %e, "payment without a value");
+            bad_request("that voucher looks damaged")
+        })?
         .into();
 
     let wanted: u64 = request
@@ -350,9 +473,12 @@ async fn swap(
         .iter()
         .map(|o| u64::from(o.amount))
         .fold(0, u64::saturating_add);
+    // Checked against the mint's ceiling as well as ours before the money is
+    // taken: a quote the mint refuses after the deposit leaves the buyer paid
+    // up with nothing to show for it.
     let bought = priced_purchase(
         &market.prices,
-        market.max_amount,
+        market.max_sale().await,
         &market.unit,
         (&paid_mint, &paid_unit, paid),
         wanted,
@@ -364,12 +490,18 @@ async fn swap(
     // spending them again while this request is in flight. It is also what
     // makes this payment rather than a receipt — a balance is what a node has
     // actually been paid.
-    let held = market
-        .wallet
-        .deposit(&request.token)
-        .await
-        .map_err(|e| bad_request(format!("that payment did not clear: {e:#}")))?;
+    let started = std::time::Instant::now();
+    let held = market.wallet.deposit(&request.token).await.map_err(|e| {
+        let e = format!("{e:#}");
+        warn!(error = %e, from = %paid_mint, "a payment did not clear");
+        bad_request(if e.to_ascii_lowercase().contains("spent") {
+            "that payment did not clear: already spent"
+        } else {
+            "that payment did not clear"
+        })
+    })?;
 
+    let cleared_ms = started.elapsed().as_millis();
     match market.issuer.issue(request.outputs).await {
         Ok(signatures) => {
             info!(
@@ -377,25 +509,99 @@ async fn swap(
                 unit = %paid_unit,
                 from = %paid_mint,
                 sold = bought,
+                cleared_ms,
+                issued_ms = started.elapsed().as_millis() - cleared_ms,
                 "sold capacity"
             );
             debug!(banked = held.amount, unit = %held.unit, "payment banked");
             Ok(Json(SwapResponse { signatures }))
         }
         Err(e) => {
-            // The money is already ours and the buyer has nothing. Loud,
-            // because it is the one outcome this design cannot make good
-            // automatically — and the reason a buyer is trusting the seller.
-            warn!(
-                paid,
-                unit = %paid_unit,
-                error = %format!("{e:#}"),
-                "took payment and could not issue against it"
-            );
-            Err(bad_request(e.to_string()))
+            // The money is already ours and the buyer has nothing: hand back
+            // what cleared, as a token in the same paper, beside the reason.
+            let reason = format!("{e:#}");
+            match market
+                .wallet
+                .refund(&held.mint, &held.unit, held.amount)
+                .await
+            {
+                Ok(refund) => {
+                    warn!(
+                        paid,
+                        refunded = refund.worth,
+                        fee = refund.fee,
+                        unit = %paid_unit,
+                        error = %reason,
+                        "could not issue against a payment; refunded it"
+                    );
+                    Err(refused_with_refund(
+                        "the router could not issue the data just now",
+                        &refund.token,
+                    ))
+                }
+                Err(why) => {
+                    // Loud, because nothing more can be done automatically:
+                    // the money is in the wallet and an operator has to
+                    // return it.
+                    warn!(
+                        paid,
+                        held = held.amount,
+                        unit = %paid_unit,
+                        from = %paid_mint,
+                        error = %reason,
+                        refund_error = %format!("{why:#}"),
+                        "took payment, could not issue against it, and could not refund it"
+                    );
+                    Err(bad_request(
+                        "the router took the payment and could not issue the data; \
+                         ask the operator for a refund",
+                    ))
+                }
+            }
         }
     }
 }
+
+/// A sale refused after its payment was taken, with the payment handed back:
+/// `{"error", "refund"}`, which [`buy`] turns into [`Refunded`].
+fn refused_with_refund(reason: &str, token: &str) -> Failure {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::BAD_GATEWAY,
+        Json(serde_json::json!({ "error": reason, "refund": token })),
+    )
+        .into_response()
+}
+
+/// A purchase the market refused after taking the payment, and paid back.
+///
+/// `refund` is a token for what cleared, in the paper that was paid, less
+/// the mint's fee for making it: the buyer's money, to keep or to try again
+/// with. It is money, so neither `Display` nor `Debug` shows it, and nothing
+/// that logs this error can leak it.
+#[derive(Clone)]
+pub struct Refunded {
+    /// Why nothing was sold.
+    pub reason: String,
+    /// The payment, returned.
+    pub refund: String,
+}
+
+impl std::fmt::Display for Refunded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (the payment was refunded)", self.reason)
+    }
+}
+
+impl std::fmt::Debug for Refunded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Refunded")
+            .field("reason", &self.reason)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::error::Error for Refunded {}
 
 /// What a payment buys: `wanted`, if `paid` is exactly its price.
 ///
@@ -442,6 +648,13 @@ fn priced_purchase(
 /// `money` is a token from a mint the peer accepts — this node's own holdings,
 /// obtained wherever money is obtained. What comes back is a token of the
 /// peer's paper, which is what funds a channel to pay it.
+///
+/// A market that took the payment and could not sell answers with a refund,
+/// which comes back as an error that downcasts to [`Refunded`]. The refund is
+/// a token, which is money, so it never reaches this error's `Display` or
+/// `Debug`, nor any other error this returns: a caller logging the error
+/// logs the reason only, and has to take the token out of [`Refunded`] to
+/// keep it.
 pub fn buy(
     market_url: &str,
     amount: u64,
@@ -463,7 +676,10 @@ pub fn buy(
         })
         .to_string(),
     )
-    .map_err(|e| anyhow!("buy {amount} {unit} from {market_url}: {e}"))?;
+    .map_err(|e| match refund_in(&e) {
+        Some(refunded) => anyhow::Error::new(refunded),
+        None => anyhow!("buy {amount} {unit} from {market_url}: {}", withheld(&e)),
+    })?;
 
     let response: serde_json::Value = serde_json::from_str(&body).context("swap response")?;
     let signatures = response["signatures"]
@@ -476,6 +692,28 @@ pub fn buy(
 
     cdk_spilman::build_cashu_b_token(market_url, unit, &proofs)
         .map_err(|e| anyhow!("build a token: {e}"))
+}
+
+/// A refusal from [`http`] that carries the payment back.
+fn refund_in(error: &str) -> Option<Refunded> {
+    let body = &error[error.find('{')?..];
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    Some(Refunded {
+        reason: v["error"].as_str().unwrap_or("refused").to_owned(),
+        refund: v["refund"].as_str()?.to_owned(),
+    })
+}
+
+/// A refusal as it may be shown, with any refund in it kept out.
+///
+/// [`refund_in`] takes a well-formed refund out whole; this is for one it
+/// could not read, which still must not put a token in a log.
+fn withheld(error: &str) -> String {
+    if !error.contains("\"refund\"") && !error.contains("cashuA") && !error.contains("cashuB") {
+        return error.to_owned();
+    }
+    let status = error.split(": ").next().unwrap_or("refused");
+    format!("{status} (the answer mentions a refund, and is not repeated here)")
 }
 
 /// What a market takes as payment.
@@ -716,6 +954,75 @@ mod tests {
         assert_eq!(price_of(1_000, 0), None);
         assert_eq!(price_of(0, 1_000), None);
         assert_eq!(price_of(u64::MAX, 1), Some(u64::MAX));
+    }
+
+    #[tokio::test]
+    async fn a_mint_that_does_not_answer_is_asked_again_only_after_a_while() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // A "mint" that takes the connection and hangs up without a word.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("address");
+        let asked = Arc::new(AtomicUsize::new(0));
+        {
+            let asked = Arc::clone(&asked);
+            tokio::spawn(async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    asked.fetch_add(1, Ordering::SeqCst);
+                    drop(stream);
+                }
+            });
+        }
+
+        let issuer = Issuer::new(format!("http://{addr}"), "byte");
+        assert_eq!(issuer.limit().await, None, "no answer, no ceiling");
+        let first = asked.load(Ordering::SeqCst);
+        assert!(first >= 1, "the mint was asked");
+
+        // Within the failure window, nobody waits on the mint again.
+        assert_eq!(issuer.limit().await, None);
+        assert_eq!(asked.load(Ordering::SeqCst), first, "the failure is cached");
+
+        // Once it has passed, the mint is asked again.
+        {
+            let mut looked = issuer.limit.lock().expect("not poisoned");
+            let looked = looked.as_mut().expect("a lookup is cached");
+            assert_eq!(looked.ttl, FAILED_LIMIT_TTL, "a failure stands briefly");
+            looked.at = std::time::Instant::now()
+                .checked_sub(FAILED_LIMIT_TTL)
+                .expect("an earlier instant");
+        }
+        assert_eq!(issuer.limit().await, None);
+        assert!(
+            asked.load(Ordering::SeqCst) > first,
+            "asked again after the failure expired"
+        );
+    }
+
+    #[test]
+    fn a_refund_never_reaches_an_error_message() {
+        let body = r#"502 Bad Gateway: {"error":"could not issue","refund":"cashuBsecret"}"#;
+        let refunded = refund_in(body).expect("a refund");
+        assert_eq!(refunded.refund, "cashuBsecret");
+        let error = anyhow::Error::new(refunded);
+        for shown in [
+            format!("{error}"),
+            format!("{error:#}"),
+            format!("{error:?}"),
+        ] {
+            assert!(!shown.contains("cashuB"), "{shown}");
+        }
+        assert!(error.downcast_ref::<Refunded>().is_some());
+
+        // One the buyer cannot read is withheld whole rather than repeated.
+        let garbled = r#"502 Bad Gateway: {"error":"x","refund":["cashuBsecret"]}"#;
+        assert!(refund_in(garbled).is_none());
+        assert!(!withheld(garbled).contains("cashuB"));
+        // And an ordinary refusal is repeated as it was.
+        let plain = "400 Bad Request: that is not a voucher";
+        assert_eq!(withheld(plain), plain);
     }
 
     #[test]

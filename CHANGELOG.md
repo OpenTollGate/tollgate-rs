@@ -12,6 +12,19 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 ### Added
 
+- The market publishes `max_amount` in `info`: the most one sale may be for,
+  the lower of `merchantd`'s `mint.max_amount` and `mintd`'s per-quote limit,
+  and refuses a larger sale before taking the payment. If issuing fails after
+  the payment was taken, `merchantd` refunds it as a token in the same paper
+  (`502 {"error", "refund"}`, `market::Refunded` to a buyer). Refused swaps are
+  logged at warn. The refund pays its own swap fee, sized by what the mint
+  quotes, and never draws on `merchantd`'s other money; a refund token never
+  reaches a buyer's error message or log. A mint that does not answer the
+  limit lookup is asked again only after 5 s, so a hung `mintd` does not hold
+  every `info` and `swap` for 30 s. `Wallet::split` swaps a token into parts
+  of at most a given size, fees paid out of it, for buyers splitting one
+  payment into several sales.
+
 - Settling disposes of what a channel paid. `tollgated` keeps nothing a
   settlement brings in: a channel funded in this node's own vouchers is burned
   at `mintd` (`mint.local`) once closed, and one funded in another mint is
@@ -247,6 +260,17 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 - `tollgate-bootstrap.md` and its diagrams, with bootstrap tokens.
 
 ### Fixed
+
+- `mintd` applies `max_amount` (and its URL, name and methods) from its config
+  at every start: cdk kept serving the copy of its info saved on first start,
+  so a raised limit never took effect. The default `max_amount` for `mintd`
+  and `merchantd` is now 1 TiB, up from 16 GiB, which about 960 sat bought at
+  the packaged price.
+
+- `Wallet::collect` checks that a quote is paid before minting against it.
+  cdk reserved an unpaid quote and never released it, so every later claim,
+  once paid, failed with "already in use by another operation"; such a quote
+  is now released and claimed.
 
 - A `TopUp` refused in part no longer moves a channel's recorded state. The
   Spilman backend kept each update as it verified it, so when a purchase

@@ -315,6 +315,34 @@ to issue, just as it is about to trust the node to deliver. What changes is
 that a failure between the two steps leaves a paid quote behind instead of
 nothing.
 
+**How big one sale may be.** `merchantd` sells no more at once than the
+lower of its own `mint.max_amount` and what `mintd` issues against one quote
+(its NUT-06 `nut04` bolt11 `max_amount`, read from the private listener), and
+publishes that as `max_amount` in `info`. The check is made **before** the
+payment is deposited, so a sale the mint would refuse costs the buyer nothing.
+A buyer whose payment buys more splits it into several sales under the limit
+(proxyd does, through `Wallet::split`). `mintd`'s `max_amount` is read at
+every start and overrides the copy of its info cdk keeps in the database.
+
+**When issuing fails after the payment was taken** — `mintd` down, or
+refusing — `merchantd` hands the payment back: it makes a token in the same
+paper out of its wallet, and answers `502` with
+`{"error", "refund": "<token>"}`. The buyer pays the fees. The refund is
+sized by the fee the paying mint quotes for the swap that makes it, and the
+token and that fee together come to no more than what cleared, so
+`merchantd`'s balance in that paper ends no lower than it was before the
+payment came in: none of its other money pays for the refund. Redeeming the
+token then costs the buyer the mint's input fee on its proofs, as any token
+does. `market::buy` turns the answer into `market::Refunded`, and the buyer
+keeps the refund to try again with; the token is money, so it never appears
+in that error's message. Only if the spend fails is the money left in
+`merchantd`'s wallet for the operator to return, and logged as such.
+
+A lookup of `mintd`'s ceiling that gets no answer is not repeated for a few
+seconds, so a `mintd` that hangs rather than refuses does not hold every
+`info` and `swap` for the whole lookup timeout. Meanwhile the market's own
+ceiling applies.
+
 ### Between tollgated and merchantd
 
 A private interface on a local socket. Two calls:

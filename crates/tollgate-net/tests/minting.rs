@@ -157,6 +157,28 @@ async fn more_than_one_quote_allows_is_asked_for_in_several() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_token_splits_into_parts_none_over_the_most_and_nothing_else_is_spent() {
+    let seller = seller(true, 1 << 30).await;
+    let (dir, other) = (TempDir::new(), TempDir::new());
+    let wallet = buyer_wallet(&dir, 3).await;
+    let payer = buyer_wallet(&other, 4).await;
+
+    // Something already held, which the split must leave alone.
+    wallet.issue(&seller.url, UNIT, 500).await.expect("held");
+    payer.issue(&seller.url, UNIT, 2_500).await.expect("money");
+    let token = payer.spend(&seller.url, UNIT, 2_500).await.expect("pay");
+
+    let (parts, left) = wallet.split(&token, 1_000).await.expect("split");
+    let mut worth = Vec::new();
+    for part in &parts {
+        worth.push(payer.deposit(part).await.expect("a good part").amount);
+    }
+    assert_eq!(worth, vec![1_000, 1_000, 500]);
+    assert_eq!(left, 0, "a mint without fees leaves nothing over");
+    assert_eq!(wallet.balance_of(&seller.url, UNIT).await, 500);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_mint_that_does_not_auto_accept_issues_nothing() {
     let seller = seller(false, 1 << 30).await;
     let dir = TempDir::new();
@@ -297,18 +319,78 @@ async fn funding_is_served_and_a_flood_past_the_issue_limit_is_refused() {
     assert_eq!(flooder.balance_of(&seller.url, UNIT).await, 0);
 }
 
-/// A sale on the market: the buyer pays with one mint's tokens, and what it
-/// bought is issued at the seller's mint through its private listener, against
-/// the buyer's own blinded outputs.
+/// A market selling this node's vouchers for another mint's money, with its
+/// mint and the wallet its takings go into.
 ///
 /// The money here is another auto-accepting byte mint, because what the market
 /// checks is the price and the payment clearing — not what the money is — and
-/// that keeps the test to mints this crate runs.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_sale_is_paid_into_the_wallet_and_issued_at_the_private_listener() {
-    use cashu::amount::{FeeAndAmounts, SplitTarget};
-    use cashu::nuts::{CurrencyUnit, PreMintSecrets};
+/// that keeps the tests to mints this crate runs.
+struct Shop {
+    /// Where the market answers.
+    market: SocketAddr,
+    /// The active keyset of the mint whose vouchers are sold, and its keys.
+    id: cashu::nuts::Id,
+    keys: cashu::nuts::Keys,
+    stats: Arc<mint::Stats>,
+    /// Where the market puts what it takes.
+    takings: Wallet,
+    /// The mint the money comes from.
+    money: Seller,
+    _dirs: (TempDir, TempDir),
+}
 
+impl Shop {
+    /// Blinded outputs for `amount` of our vouchers.
+    fn outputs(&self, amount: u64) -> cashu::nuts::PreMintSecrets {
+        use cashu::amount::{FeeAndAmounts, SplitTarget};
+        let denominations: FeeAndAmounts =
+            (0, self.keys.keys().keys().map(|a| u64::from(*a)).collect()).into();
+        cashu::nuts::PreMintSecrets::random(
+            self.id,
+            cashu::Amount::from(amount),
+            &SplitTarget::None,
+            &denominations,
+        )
+        .expect("blind")
+    }
+
+    /// Our keyset as `market::buy` takes it.
+    fn keyset_info(&self) -> String {
+        serde_json::json!({
+            "keysetId": self.id.to_string(),
+            "unit": UNIT,
+            "keys": self.keys,
+            "inputFeePpk": 0,
+        })
+        .to_string()
+    }
+
+    /// Ask the market to sign `outputs` for `payment`.
+    async fn swap(
+        &self,
+        payment: &str,
+        outputs: &cashu::nuts::PreMintSecrets,
+    ) -> reqwest::Response {
+        reqwest::Client::new()
+            .post(format!(
+                "http://{}{}",
+                self.market,
+                tollgate_net::market::SWAP_PATH
+            ))
+            .json(&serde_json::json!({
+                "token": payment,
+                "outputs": outputs.blinded_messages(),
+            }))
+            .send()
+            .await
+            .expect("reach the market")
+    }
+}
+
+/// Serve a market at two of our bytes for each byte of the money. With
+/// `issuing` false, the market's issuer points at a port nobody serves, so
+/// every sale fails after the payment is taken.
+async fn shop(issuing: bool, takings_seed: u8) -> Shop {
     let money = seller(true, 1 << 30).await;
 
     // The seller's mint: gives nothing away in public, issues on its private
@@ -317,7 +399,7 @@ async fn a_sale_is_paid_into_the_wallet_and_issued_at_the_private_listener() {
         let probe = TcpListener::bind("127.0.0.1:0").expect("find a free port");
         probe.local_addr().expect("its address")
     };
-    let (public, private, market) = (free(), free(), free());
+    let (public, private, market, dead) = (free(), free(), free(), free());
     let dir = TempDir::new();
     let ours = Arc::new(
         mint::build(&MintConfig {
@@ -325,7 +407,9 @@ async fn a_sale_is_paid_into_the_wallet_and_issued_at_the_private_listener() {
             unit: UNIT.into(),
             seed: vec![11; 32],
             file: dir.path().join("mint.sqlite"),
-            max_amount: 1 << 30,
+            // Lower than the market's own ceiling: the mint's is the one a
+            // sale has to fit.
+            max_amount: 1 << 20,
         })
         .await
         .expect("build the seller's mint"),
@@ -343,16 +427,16 @@ async fn a_sale_is_paid_into_the_wallet_and_issued_at_the_private_listener() {
         std::future::pending(),
     ));
 
-    // Two of our bytes for each byte of the money.
     let takings_dir = TempDir::new();
-    let takings = buyer_wallet(&takings_dir, 8).await;
+    let takings = buyer_wallet(&takings_dir, takings_seed).await;
     let prices = tollgate_net::market::Prices::new([tollgate_net::market::Accepted {
         mint: money.url.clone(),
         unit: UNIT.into(),
         bytes_per_unit: 2,
     }]);
+    let issuer = if issuing { private } else { dead };
     let router = tollgate_net::market::router(
-        tollgate_net::market::Issuer::new(format!("http://{private}"), UNIT),
+        tollgate_net::market::Issuer::new(format!("http://{issuer}"), UNIT),
         UNIT.into(),
         format!("http://{public}"),
         prices,
@@ -370,6 +454,33 @@ async fn a_sale_is_paid_into_the_wallet_and_issued_at_the_private_listener() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
+    let unit = cashu::nuts::CurrencyUnit::Custom(UNIT.into());
+    let id = ours.get_active_keysets()[&unit];
+    let keys = ours
+        .keyset_pubkeys(&id)
+        .expect("our keys")
+        .keysets
+        .remove(0)
+        .keys;
+    Shop {
+        market,
+        id,
+        keys,
+        stats,
+        takings,
+        money,
+        _dirs: (dir, takings_dir),
+    }
+}
+
+/// A sale on the market: the buyer pays with one mint's tokens, and what it
+/// bought is issued at the seller's mint through its private listener, against
+/// the buyer's own blinded outputs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sale_is_paid_into_the_wallet_and_issued_at_the_private_listener() {
+    let shop = shop(true, 8).await;
+    let (market, money) = (shop.market, &shop.money);
+
     // The buyer holds 1000 of the money, and blinds outputs for 2000 of ours.
     let buyer_dir = TempDir::new();
     let buyer = buyer_wallet(&buyer_dir, 9).await;
@@ -379,36 +490,10 @@ async fn a_sale_is_paid_into_the_wallet_and_issued_at_the_private_listener() {
         .expect("get money");
     let payment = buyer.spend(&money.url, UNIT, 1_000).await.expect("pay");
 
-    let unit = CurrencyUnit::Custom(UNIT.into());
-    let id = ours.get_active_keysets()[&unit];
-    let keys = ours
-        .keyset_pubkeys(&id)
-        .expect("our keys")
-        .keysets
-        .remove(0)
-        .keys;
-    let denominations: FeeAndAmounts =
-        (0, keys.keys().keys().map(|a| u64::from(*a)).collect()).into();
-    let outputs = PreMintSecrets::random(
-        id,
-        cashu::Amount::from(2_000u64),
-        &SplitTarget::None,
-        &denominations,
-    )
-    .expect("blind");
-
-    let response: serde_json::Value = reqwest::Client::new()
-        .post(format!(
-            "http://{market}{}",
-            tollgate_net::market::SWAP_PATH
-        ))
-        .json(&serde_json::json!({
-            "token": payment,
-            "outputs": outputs.blinded_messages(),
-        }))
-        .send()
+    let outputs = shop.outputs(2_000);
+    let response: serde_json::Value = shop
+        .swap(&payment, &outputs)
         .await
-        .expect("reach the market")
         .error_for_status()
         .expect("the sale goes through")
         .json()
@@ -417,19 +502,127 @@ async fn a_sale_is_paid_into_the_wallet_and_issued_at_the_private_listener() {
 
     let signatures: Vec<cashu::nuts::BlindSignature> =
         serde_json::from_value(response["signatures"].clone()).expect("signatures");
-    let proofs = cashu::dhke::construct_proofs(signatures, outputs.rs(), outputs.secrets(), &keys)
-        .expect("unblind");
+    let proofs =
+        cashu::dhke::construct_proofs(signatures, outputs.rs(), outputs.secrets(), &shop.keys)
+            .expect("unblind");
     let bought: u64 = proofs.iter().map(|p| u64::from(p.amount)).sum();
 
     assert_eq!(bought, 2_000, "what was paid for, at the price");
     assert_eq!(
-        takings.balance_of(&money.url, UNIT).await,
+        shop.takings.balance_of(&money.url, UNIT).await,
         1_000,
         "the payment is in the seller's wallet"
     );
     assert_eq!(
-        stats.private_quotes.load(Ordering::Relaxed),
+        shop.stats.private_quotes.load(Ordering::Relaxed),
         1,
         "issued through the private listener, once"
     );
+
+    // The market publishes the mint's ceiling, the lower of the two.
+    let info = tokio::task::spawn_blocking(move || {
+        tollgate_net::market::info_of(&format!("http://{market}"))
+    })
+    .await
+    .expect("join")
+    .expect("info");
+    assert_eq!(info.max_amount, Some(1 << 20));
+
+    // A sale over the mint's ceiling is refused before the payment is taken.
+    let big = (1u64 << 20) + 2;
+    buyer
+        .issue(&money.url, UNIT, big / 2)
+        .await
+        .expect("get money");
+    let payment = buyer.spend(&money.url, UNIT, big / 2).await.expect("pay");
+    let refused = shop.swap(&payment, &shop.outputs(big)).await;
+    assert_eq!(refused.status(), 400);
+    assert!(
+        refused
+            .text()
+            .await
+            .unwrap_or_default()
+            .contains("more capacity"),
+        "refused for its size"
+    );
+    buyer
+        .deposit(&payment)
+        .await
+        .expect("the refused payment was never taken");
+}
+
+/// A sale whose payment cleared and whose vouchers could not be issued: the
+/// market hands the payment back as a refund, less the mint's fee for making
+/// it, and keeps none of it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_payment_taken_and_not_sold_against_is_refunded() {
+    let shop = shop(false, 10).await;
+    let money = &shop.money;
+
+    // Money of the same paper already in the till, which the refund must
+    // not be paid out of.
+    shop.takings
+        .issue(&money.url, UNIT, 300)
+        .await
+        .expect("takings from earlier");
+
+    let buyer_dir = TempDir::new();
+    let buyer = buyer_wallet(&buyer_dir, 11).await;
+    buyer
+        .issue(&money.url, UNIT, 2_000)
+        .await
+        .expect("get money");
+
+    // Over HTTP: 502, and the refund beside the reason.
+    let payment = buyer.spend(&money.url, UNIT, 1_000).await.expect("pay");
+    let held = 1_000u64;
+    let response = shop.swap(&payment, &shop.outputs(2_000)).await;
+    assert_eq!(response.status(), 502);
+    let body: serde_json::Value = response.json().await.expect("a JSON refusal");
+    assert!(body["error"].as_str().is_some(), "with a reason: {body}");
+    let refund = body["refund"].as_str().expect("a refund").to_owned();
+
+    // This money mint takes no input fee, so the fee for making the refund
+    // is nothing and it is worth all of what cleared.
+    let fee = 0;
+    let refunded = buyer.deposit(&refund).await.expect("the refund is good");
+    assert_eq!(
+        refunded.amount,
+        held - fee,
+        "all of the payment, less the fee"
+    );
+    assert_eq!(
+        shop.takings.balance_of(&money.url, UNIT).await,
+        300,
+        "the market kept nothing of the payment, and paid out nothing else"
+    );
+
+    // Through `market::buy`: an error that is the refund, not a string with
+    // the token in it.
+    let payment = buyer.spend(&money.url, UNIT, 1_000).await.expect("pay");
+    let (url, info) = (format!("http://{}", shop.market), shop.keyset_info());
+    let failed = tokio::task::spawn_blocking(move || {
+        tollgate_net::market::buy(&url, 2_000, UNIT, &info, &payment)
+    })
+    .await
+    .expect("join")
+    .expect_err("nothing could be issued");
+    let shown = format!("{failed:#} {failed:?}");
+    let refunded = failed
+        .downcast::<tollgate_net::market::Refunded>()
+        .expect("the error is the refund");
+    assert!(
+        !shown.contains(&refunded.refund),
+        "the refund stays out of the message: {shown}"
+    );
+    assert_eq!(
+        buyer
+            .deposit(&refunded.refund)
+            .await
+            .expect("the refund is good")
+            .amount,
+        held - fee
+    );
+    assert_eq!(buyer.balance_of(&money.url, UNIT).await, 2_000);
+    assert_eq!(shop.takings.balance_of(&money.url, UNIT).await, 300);
 }
