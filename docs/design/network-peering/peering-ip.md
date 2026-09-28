@@ -215,7 +215,46 @@ table inet tollgate {
 
 **Metering an upstream — per next hop and MAC.** When the peer is one we *buy* from — it forwards our traffic onward — the forwarded packets carry the far endpoints' IPs, **not** the upstream's, so per-IP matching cannot attribute them. What identifies "this arrived from that upstream" is the **link address**: `tollgate-net` resolves the upstream's IP to its MAC (the neighbour table) and counts received bytes by it in `up_rx`. What identifies "we sent this via that upstream" is the **route's next hop**, which the forward hook knows: its IP goes in `up_tx`, and for a destination on the link the next hop is the destination, so traffic addressed to the upstream itself is covered too and no per-IP element is kept. This is what keeps the multi-homed case correct — several upstreams reachable over one shared L2 segment are still metered independently, because each has a distinct MAC and is a distinct next hop.
 
-A peer is counted as an upstream exactly when some route (any table, including every hop of a multipath route) uses it as a gateway; everything else is counted per IP. Routes and the neighbour table are re-read every few seconds, and at once when a peer registers, so a late ARP entry or an operator's reroute moves the peer. Until its MAC is known, an upstream's received side stays on its IP. IPv6 peers stay per IP.
+A peer is counted as an upstream exactly when some route (any table, including every hop of a multipath route) uses it as a gateway; everything else is counted per IP. Routes and the neighbour table are re-read every few seconds, and at once when a peer registers, so a late ARP entry or an operator's reroute moves the peer. Until its MAC is known, an upstream's received side stays on its IP. A peer that registered by an IPv6 address stays per IP.
+
+### A Customer's IPv6
+
+A peer is registered by the IPv4 address its session comes from. A customer on the LAN, though, is a *device*, and a dual-stack device sends much of its traffic over IPv6, from addresses it chooses itself — a stable one and one or more privacy addresses per prefix, the latter replaced daily. Gated, shaped and counted by the IPv4 address alone, all of that would be forwarded free: an unpaid device would route around the gate, and a paying one would be neither shaped nor metered on half its traffic.
+
+So a customer that is **on the link** is tied to its **MAC**, and through the MAC to its IPv6 addresses — and its IPv6 is charged to the same grant, the same class and the same two counters as its IPv4. The adapter learns all of it from the kernel on the refresh that already tells customers from upstreams; **the host registers the IPv4 address as before and no new interface is needed**:
+
+1. The MAC is the IPv4 neighbour entry of the peer's registered address. No entry — a peer that is not on the link — means no link, and nothing below applies. An upstream never gets one: its MAC is the source of everything it forwards to us.
+2. The IPv6 addresses are the IPv6 neighbour entries with that MAC, global and unique-local only (link-local is never forwarded), at most 16 per peer so a device inventing addresses cannot grow the sets without bound.
+3. An address stays the peer's once seen, until another MAC claims it: an idle privacy address whose neighbour entry was collected is not thereby left ungated. A different MAC behind the IPv4 address (a new device on a reused lease) starts afresh.
+
+```
+table inet tollgate {
+  set known_mac   { type ether_addr; }   # customers' MACs
+  set allowed_mac { type ether_addr; }   #   … forwarded for (follows `allowed`)
+  set known6      { type ipv6_addr; }    # customers' IPv6 addresses
+  set allowed6    { type ipv6_addr; }    #   … forwarded for
+  map down6_tx    { type ipv6_addr  : counter; }   # delivered, by destination IPv6
+  map down6_rx    { type ether_addr : counter; }   # received, by source MAC
+  map mark6       { type ipv6_addr  : mark; }      # its tc class
+  chain forward {
+    meta nfproto ipv6 ether saddr @known_mac ether saddr != @allowed_mac drop
+    ip6 daddr @known6 ip6 daddr != @allowed6 drop
+    counter name ip6 daddr map @down6_tx
+    meta nfproto ipv6 counter name ether saddr map @down6_rx
+    meta mark set ip6 daddr map @mark6
+  }
+}
+# and the peer's class selected for IPv6 too (a tc filter is per protocol):
+tc filter replace dev br-lan parent 1: protocol ipv6 prio 2 handle 0x70110002 fw flowid 1:2
+```
+
+- **Gate.** Outbound by source MAC — the one key every address of the device shares, including one not yet in the neighbour table — and inbound by destination address, so a flow opened while paid does not keep delivering after the grant lapses. Both `allowed` sets follow the IPv4 `allowed` set exactly: whatever `AccessLevel::carried` says for the peer, it says for all its addresses.
+- **Shape.** What is forwarded to its IPv6 addresses carries its class's mark. Only the download is shaped, as for IPv4.
+- **Count.** Delivered by destination IPv6 into the peer's `delivered` counter; received by source MAC into its `received` counter. The MAC rule is limited to IPv6, since the peer's IPv4 is counted by address already — counting it by MAC too would count it twice.
+
+The MAC is what ties the addresses together, so the caveat of [MAC spoofing on IP](#mac-spoofing-on-ip) applies: a host that forges a paying customer's MAC on the same segment is forwarded over IPv6 on that customer's grant. That is the same bound as taking over its IPv4 address — service stolen, not funds — and the same remedies apply.
+
+A host that speaks for devices, rather than being one (a captive portal buying one session per phone, from the phone's IPv4 address), gets this for free: the neighbour entries are the phone's, so the phone's IPv6 is charged to the session bought for it.
 
 These counts are the node's own: counters are **not exchanged** and are not an input to payment ([tollgate-metering.md](../core/tollgate-metering.md)), so there is no figure to reconcile with the upstream and no drift to arbitrate. What they answer is the payer's own question — delivered against purchased — from local numbers alone.
 
@@ -259,6 +298,7 @@ For authenticated deployments, raw TCP runs inside an encrypted tunnel (WireGuar
 | Decision | Resolution | Rationale |
 |----------|-----------|-----------|
 | Authentication | Unauthenticated by default | Open access is the primary use case; payment is the gatekeeper |
+| Customer IPv6 | Tied to the customer by its MAC, read from the neighbour tables; gated, shaped and counted with its IPv4 | A device's IPv6 addresses are its own choice and change daily; the MAC is the one key they share, and the kernel already knows it |
 | Access control | Firewall rules (nftables/iptables), per peer by IP | Standard IP mechanism, and the forwarding decision is where it belongs |
 | Rate enforcement | A `tc` class per peer, rate replaced as grants arrive | A grant buys a rate, which a binary gate cannot express. Burst stays under a second because unused capacity is not banked |
 | Metering counters | nftables accounting (default) or interface stats | Per-peer granularity at the kernel level |
