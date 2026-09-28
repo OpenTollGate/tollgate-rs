@@ -43,10 +43,10 @@
   <text x="152" y="118" text-anchor="middle" class="mlabel" fill="#80c0e0">Spilman Channel</text>
   <text x="152" y="133" text-anchor="middle" class="mdesc">lifecycle, rollover, grants</text>
 
-  <!-- Product Catalog & Pricing -->
+  <!-- Voucher Catalog -->
   <rect x="258" y="95" width="185" height="55" rx="5" class="callout" stroke="#50c050" stroke-width="1.5"/>
-  <text x="350" y="118" text-anchor="middle" class="mlabel" fill="#80e080">Voucher Mint</text>
-  <text x="350" y="133" text-anchor="middle" class="mdesc">issue &amp; redeem</text>
+  <text x="350" y="118" text-anchor="middle" class="mlabel" fill="#80e080">Voucher Catalog</text>
+  <text x="350" y="133" text-anchor="middle" class="mdesc">accepted mints</text>
 
   <!-- Access Control -->
   <rect x="456" y="95" width="185" height="55" rx="5" class="callout" stroke="#c05050" stroke-width="1.5"/>

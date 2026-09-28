@@ -23,12 +23,18 @@ What *does* stay in the payment protocol is the set of mints a node accepts
 as payment, with a settlement ratio for each — a peer has to know what it can
 pay with before it can pay.
 
+**The separation is also a process boundary.** On a node, the market side is
+`merchantd`: it prices, sells this node's vouchers, buys its upstreams', and
+holds all of the node's money. It issues through standard NUT-04 on a
+private listener of the node's mint, `mintd`, and the protocol daemon `tollgated` holds nothing of
+value at all ([tollgate-daemons.md](../core/tollgate-daemons.md)).
+
 ## Documents
 
 | Document | Description |
 | -------- | ----------- |
 | [market-protocol.md](market-protocol.md) | Separate endpoints and wire format for buying and swapping — and why they are kept out of the payment protocol |
-| [voucher-acquisition.md](voucher-acquisition.md) | How a peer comes to hold vouchers: Lightning mint quotes, direct purchase, local swaps, cross-mint swaps |
+| [voucher-acquisition.md](voucher-acquisition.md) | How a peer comes to hold vouchers: direct purchase, local swaps (Lightning goes through an accepted mint), cross-mint swaps |
 | [voucher-price-signal.md](voucher-price-signal.md) | Selling price against face value as a public measure of expected delivery; liquidity and market making |
 | [issuer-risk.md](issuer-risk.md) | Overissuance, selling without redeeming, redemption congestion, operator shutdown |
 
@@ -41,6 +47,7 @@ pay with before it can pay.
 | Which mints does a node accept as payment? | The Offer message, [tollgate-protocol.md](../core/tollgate-protocol.md) |
 | What does a voucher cost in sats? | Here |
 | How do I buy or swap one? | [market-protocol.md](market-protocol.md) |
+| Which process sells, and how does it issue? | [tollgate-daemons.md](../core/tollgate-daemons.md) — `merchantd`, through NUT-04 on `mintd`'s private listener |
 | How are payments batched? | [tollgate-payment-channels.md](../core/tollgate-payment-channels.md) |
 
 The core protocol is deliberately ignorant of everything in this directory.

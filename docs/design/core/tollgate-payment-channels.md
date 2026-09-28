@@ -84,6 +84,8 @@ Both peers can reach a mint. They exchange Accept messages containing Spilman fu
 - A creates and funds the A→B channel (A pays B for what B delivered to A)
 - B creates and funds the B→A channel (B pays A for what A delivered to B)
 
+The sender's `tollgated` holds no vouchers, so it first gets them from its `merchantd`: `fund(mint, unit, amount)` returns vouchers of the chosen mint, paid from what `merchantd` holds or acquired on the spot ([tollgate-daemons.md](tollgate-daemons.md#funding-upstream)). They are locked into the channel as they arrive.
+
 The funding process follows the Cashu Spilman protocol:
 1. Sender creates a 2-of-2 multisig token: `P2PK: (Sender AND Receiver) OR (Sender after expiry)`
 2. Sender derives the channel secret via ECDH with the receiver's pubkey
@@ -135,8 +137,10 @@ Both the old (draining) and new channel are active simultaneously during the ove
 A channel is being closed — either cooperatively (ChannelClose/CloseAck) or because the channel is fully drained after rollover. Only the **receiver** submits the latest signed balance update to the mint.
 
 Settlement produces two sets of proofs (Stage 1 → Stage 2 in Spilman terminology):
-- Receiver's earned balance (receiver can spend)
+- Receiver's earned balance — fresh proofs only the receiver can spend
 - Sender's remaining change (sender can reclaim)
+
+Neither side's `tollgated` keeps what it gets ([tollgate-daemons.md](tollgate-daemons.md#tollgated)). The receiver **burns** its balance at its own `mintd` if the channel was funded in its own vouchers — the resource has been delivered. If it was funded in another mint's, the receiver **keeps** it (deposits it with `merchantd`) or **burns** it at that mint, as configured for that mint. The sender's change is upstream paper of value, but the receiver has seen it: the change outputs are derived from the channel secret both sides share, so the receiver could re-derive and spend them. The sender therefore **swaps its change at that mint for fresh proofs** first — which also unlinks it from the channel — and then reuses them to fund the next channel in the same mint, or deposits them with `merchantd`. A refund reclaimed after expiry is handled the same way.
 
 ### Closed
 
@@ -249,8 +253,8 @@ If mint connectivity is lost during rollover:
 |-----------|-------------|-------|
 | Grants (signing and verifying) | No | Signed between peers, no mint involvement |
 | Metering | No | Local computation, never exchanged |
-| Channel funding (open) | **Yes** | Must create 2-of-2 multisig token |
-| Channel settlement (close) | **Yes** | Receiver must submit swap to mint |
+| Channel funding (open) | **Yes** | Must create 2-of-2 multisig token, from vouchers `merchantd` supplies |
+| Channel settlement (close) | **Yes** | Receiver must submit swap to mint, then burns or deposits its share |
 | Channel rollover (new) | **Yes** | New channel needs funding |
 | Keyset refresh | **Yes** | Fetch active keysets |
 
@@ -292,8 +296,10 @@ This requires a protocol message (proposed `ChannelSync`) that the online peer s
 
 The online peer stays silent about the old channels. The rebooted peer falls back to a fresh session with new channels.
 
-- **Outgoing channel** (rebooted peer was sender): the online peer holds the rebooted peer's last signed TopUp and can settle with the mint. The rebooted peer reclaims any remainder via Spilman's refund timelock after expiry. No loss beyond what was legitimately owed.
-- **Incoming channel** (rebooted peer was receiver): the rebooted peer lost the only proof of earnings. The online peer waits for expiry and reclaims the full channel via the refund path. **The rebooted peer loses all earned income on that channel.**
+`tollgated` keeps **channel backups on disk** — for each live channel, what it needs to settle or reclaim it: the funding, the keys, and the latest signed update. After a reboot it recovers from them where it can:
+
+- **Outgoing channel** (rebooted peer was sender): the online peer holds the rebooted peer's last signed TopUp and can settle with the mint. The rebooted peer reclaims any remainder via Spilman's refund timelock after expiry, using its backup, then swaps it and reuses or deposits it like change. No loss beyond what was legitimately owed.
+- **Incoming channel** (rebooted peer was receiver): the backup holds the latest signed update it received, so it can still settle before expiry. What it loses is only what arrived after the last backup was written. **Without a backup, the rebooted peer loses all earned income on that channel**: the online peer waits for expiry and reclaims the full channel via the refund path.
 
 Exposure is bounded by channel capacity (the "start small, grow with relationship" model limits new-peer exposure), time since last mint settlement, and the channel TTL (1 hour default). Worst case: one channel's worth of earned income.
 
@@ -351,7 +357,7 @@ Factors:
 - **Estimated usage**: Based on expected consumption over the session
 - **Expected session duration**: Short for mobile peers, longer for infrastructure
 - **Operator configuration**: Minimum and maximum channel capacity settings
-- **Available balance**: Can't fund more than the wallet holds
+- **Available balance**: Can't fund more than `merchantd` will supply — the protocol daemon holds no vouchers of its own ([tollgate-daemons.md](tollgate-daemons.md))
 
 ### Capacity Growth
 
@@ -376,10 +382,12 @@ The new size is computed from the capacity of the channel being replaced, so gro
 
 `tollgate-core` does no Cashu operations and no I/O: it decides when a channel should be funded, rolled over or settled, and emits that as an action. The host carries the action out through a `ChannelBackend`, which it owns (`tollgate-net`). A Spilman backend is one implementation; core never learns which one it is talking to.
 
+In `tollgated` the backend has no wallet ([tollgate-daemons.md](tollgate-daemons.md)). `fund` gets its vouchers from `merchantd`; `settle` burns or deposits what settlement returns. Nothing of value stays behind in the backend.
+
 ```rust
 pub trait ChannelBackend: Send + Sync {
     /// Fund a channel to pay `peer` on, against `mint_url` — one of the mints
-    /// the peer listed in its Offer.
+    /// the peer listed in its Offer. The vouchers come from `merchantd`.
     fn fund(&self, peer: PubKey, mint_url: &str, capacity: u64) -> Result<FundedChannel>;
 
     /// Check funding a peer sent us and return the channel it opens.
@@ -412,7 +420,9 @@ pub trait ChannelBackend: Send + Sync {
     ) -> Result<()>;
 
     /// Settle a channel: submit the latest signed state to the mint the
-    /// channel was funded in, and reclaim the change.
+    /// channel was funded in. Our share is burned if that mint is our own
+    /// `mintd`, otherwise kept (deposited with `merchantd`) or burned at that
+    /// mint, per mint. Change on a channel we funded goes to `merchantd`.
     fn settle(&self, channel_id: ChannelId) -> Result<()>;
 }
 
@@ -452,7 +462,7 @@ What a channel update commits to is the channel scheme's business, which is why 
 
 ### Funding Failure
 
-If channel funding fails (mint unreachable, insufficient balance, keyset error):
+If channel funding fails (mint unreachable, `merchantd` cannot supply the vouchers, keyset error):
 - Retry on next mint connectivity check
 
 ### Settlement Failure
@@ -510,4 +520,7 @@ A payer that receives less than it bought has no protocol recourse: the grant wa
 | Channel TTL | 1 hour default, configurable | Balance between overhead and capital lockup |
 | Safety margin | max(60s, 2×max_window_ms) before expiry — triggers rollover | Create new channel, settle old before expiry |
 | Settlement | Only receiver submits to mint | Receiver holds the signed proof |
+| Funding source | `tollgated` asks `merchantd` (`fund`) | The protocol daemon holds nothing of value |
+| After settlement | Own-mint share burned at `mintd`; another mint's kept (deposited with `merchantd`) or burned, per mint; funder's change and reclaimed refunds swapped for fresh proofs, then reused for the next channel in that mint or deposited | Delivered claims are cancelled; value lives only in `merchantd` ([tollgate-daemons.md](tollgate-daemons.md)) |
+| Channel backups | `tollgated` persists each live channel's funding, keys and latest signed update | A reboot costs at most what arrived since the last backup, instead of a whole channel's earnings |
 | Offline operation | Grants continue; funding/settlement queued | Mint only needed for channel lifecycle transitions |

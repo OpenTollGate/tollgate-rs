@@ -17,6 +17,14 @@ rather than by proof.
 
 An issuer can mint more vouchers than its capacity can honor.
 
+Nothing in the mint stops it. `mintd` has **no issuance ceiling**: how much
+to issue is `merchantd`'s decision, and whoever can reach `mintd`'s private
+listener can print without limit
+([tollgate-daemons.md](../core/tollgate-daemons.md#two-listeners-one-api)).
+Auto-accept issues too, bounded only by its rate limit. Every issue is a
+quote `mintd` records, so an operator can see what was printed — nobody
+else can.
+
 **What limits it:** everything the issuer gives away and everything it earns
 use the same vouchers. A node cannot inflate its issuance without diluting
 every outstanding claim, including the ones it sold for real money and the ones
@@ -62,7 +70,10 @@ genuine default.
 
 **Unresolved.** Vouchers need a time element — an expiry, a validity window,
 or an explicit redemption queue — and none is specified. This interacts with
-whether the issuer can bound what it has promised at all.
+whether the issuer can bound what it has promised at all. It can at least
+know it: `tollgated` burns this node's own vouchers once delivered, so what
+`mintd` has outstanding is what the node still owes
+([tollgate-daemons.md](../core/tollgate-daemons.md#burn)).
 
 ---
 
@@ -90,7 +101,7 @@ party holds at once.**
 | A peer buying service | One grant's worth | The payer chooses the window, so it chooses this bound directly |
 | A peer that bought in bulk | The whole bag | Forced by expensive cross-mint swaps — see [voucher-acquisition.md](voucher-acquisition.md) |
 | A market maker | Inventory across many issuers | The business that makes the price signal possible is also the one carrying this risk |
-| A node accepting foreign mints | However much of that issuer's paper it holds | Directly controlled by which mints it accepts at all |
+| A node accepting foreign mints | However much of that issuer's paper its `merchantd` holds | Directly controlled by which mints it accepts at all — in `tollgated` as payment, where `burn` holds nothing, and in `merchantd`'s `accepts` list |
 
 The last row is the good case: accepting a mint is a binary choice a node
 makes deliberately, and it can stop at any session boundary.

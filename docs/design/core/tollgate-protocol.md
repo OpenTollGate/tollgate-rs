@@ -70,11 +70,13 @@ separation is structural rather than a convention:
 - **No TollGate message buys, sells or swaps a voucher.** Acquiring vouchers
   happens before a session and outside it.
 - **Market operations use their own endpoints and their own protocol** — see
-  [market-protocol.md](../market/market-protocol.md). They may be served by a
-  different process, a different host, or a third party entirely.
-- **A node that offers no market services is fully functional.** It sells its
-  own vouchers through its Cashu mint, or does not sell them at all, and
-  peers arrive holding what they need.
+  [market-protocol.md](../market/market-protocol.md). On a node they are
+  served by `merchantd`, not the daemon that speaks this protocol
+  ([tollgate-daemons.md](tollgate-daemons.md)); they may equally be served by
+  a different host or a third party entirely.
+- **A node that offers no market services is fully functional as a
+  provider.** Its mint gives its vouchers away (auto-accept) or issues none to
+  the public, and peers arrive holding what they need.
 
 The Offer carries no price at all. It names which mints this node will take
 payment in, and one unsigned multiplier saying how much a unit carried

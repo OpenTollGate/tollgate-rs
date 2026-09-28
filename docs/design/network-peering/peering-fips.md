@@ -11,7 +11,7 @@ FIPS provides everything TollGate needs from a network layer:
 - **Per-peer metrics**: MMP provides SRTT, loss, ETX, goodput, jitter per link
 - **Session layer**: FSP provides port-based service dispatch for TollGate messages
 
-`tollgate-net` and the FIPS daemon are independent binaries communicating over FIPS's control socket. FIPS exposes generic per-peer capabilities (forwarding policy, lifecycle events, livestreamed rx/tx counters, MMP metrics); `tollgate-net` consumes them.
+`tollgated` (built on `tollgate-net`) and the FIPS daemon are independent binaries communicating over FIPS's control socket. FIPS exposes generic per-peer capabilities (forwarding policy, lifecycle events, livestreamed rx/tx counters, MMP metrics); `tollgate-net` consumes them.
 
 Per-peer counters are pushed as a livestream subscription, so `tollgate-net` always has a fresh value to draw each peer's grant down against. Socket overhead is negligible.
 
@@ -222,9 +222,11 @@ What the metrics remain good for:
   to let a peer draw them against a grant
   ([tollgate-vouchers.md](../core/tollgate-vouchers.md)).
 - **Deciding what to sell vouchers for.** An operator watching its own links
-  degrade may choose to issue less or price higher on the market. That is a
-  human or policy decision outside the protocol, not a formula the
-  counterparty can manipulate.
+  degrade may choose to issue less or price higher on the market. That is
+  `merchantd`'s decision ([tollgate-daemons.md](../core/tollgate-daemons.md)),
+  made by a human or a policy outside the protocol, not a formula the
+  counterparty can manipulate. For now that is the operator, reading the
+  metrics and setting prices by hand; `merchantd` does not see them.
 
 ---
 
@@ -253,7 +255,7 @@ The following FIPS modifications are required for TollGate integration. Full det
 
 | Aspect | FIPS | IP |
 |--------|------|-----|
-| Integration | `tollgate-net` and `fips` are separate binaries; communicate over the FIPS control socket | `tollgate-net` standalone binary; uses kernel firewall + accounting |
+| Integration | `tollgated` and `fips` are separate binaries; communicate over the FIPS control socket | `tollgated` alone; uses kernel firewall + accounting |
 | Forwarding policy | FIPS per-peer `local_only`/`full` (control socket) | nftables/iptables rules |
 | Bloom filters | Controlled by `tollgate-net` (control socket) | N/A |
 | Metering counters | Livestreamed by FIPS per-peer (control socket) | Firewall accounting |
@@ -270,7 +272,7 @@ The following FIPS modifications are required for TollGate integration. Full det
 
 | Decision | Resolution | Rationale |
 |----------|-----------|-----------|
-| Integration model | Separate binaries; `tollgate-net` talks to FIPS over the control socket | FIPS exposes generic capabilities; independent release cycles |
+| Integration model | Separate binaries; `tollgated` talks to FIPS over the control socket | FIPS exposes generic capabilities; independent release cycles |
 | Counter delivery | FIPS livestreams per-peer rx/tx over the control socket | `tollgate-net` always has a fresh value to draw each grant down against, without polling |
 | Forwarding policy | Per-peer `local_only` or `full`, enforced by FIPS | Simple data-plane policy, not a control-plane hook |
 | Default new-peer policy | `local_only` | Closes race window between FIPS auth and TollGate detection |

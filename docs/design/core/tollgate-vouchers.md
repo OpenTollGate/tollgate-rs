@@ -286,6 +286,12 @@ one accepted mint should reach for the earliest, and a node that lists only
 one mint has said everything it needs to. Its own mint has no special place —
 the relay above would rather be paid in the vouchers it owes upstream.
 
+What happens to another mint's vouchers after settlement is set per mint in
+`tollgated`: **keep** them, swapped at their mint and deposited with
+`merchantd`, or **burn** them at their mint where they are worth nothing to
+this node ([tollgate-daemons.md](tollgate-daemons.md#other-mints-keep-or-burn)).
+The node's own vouchers are always burned once delivered.
+
 **Accept or refuse is binary — there is no haircut.** What an issuer's paper
 is worth is expressed in what you pay for it on the market, not in a discount
 applied at settlement. Taking a mint on means taking its credit, so the
@@ -296,7 +302,10 @@ decision to accept it at all is where an operator weighs issuer risk
 
 **Relays stop holding a currency position.** A relay that buys upstream
 transit from A can accept A-vouchers from its downstream customers and spend
-them upstream unchanged. No swap, no spread, no rebalancing. This was listed
+them upstream. Settling the channel swaps them at A, `merchantd` keeps the
+proceeds, and they come back to `tollgated` the next time it funds a channel
+to A ([tollgate-daemons.md](tollgate-daemons.md)). No market swap, no spread,
+no rebalancing. This was listed
 below as a real cost of the design; multi-mint acceptance removes most of it,
 because the vouchers a relay wants to receive are exactly the ones it needs
 to pay with.
@@ -320,17 +329,22 @@ own vouchers**:
 
 | Property | Own vouchers | Foreign vouchers |
 |---|---|---|
-| Settlement cost | Free — cancels a claim | Must be redeemed somewhere else |
-| Double-spend check | Local database lookup | Requires reaching that mint |
+| Settlement cost | Free — burned at `mintd`, which cancels a claim | Settled at that mint, then kept or burned there |
+| Double-spend check | Lookup at `mintd`, on the same machine | Requires reaching that mint |
 | Payment liveness | Equals service liveness | Depends on that mint being reachable |
 
-A foreign mint that is also a directly connected peer is one hop away, so
-the accepted set should lean toward neighbors and toward mints the node
-already buys from. Accepting a distant hub buys flexibility at the price of
-needing connectivity to verify.
+**The accepted set is exactly what the operator lists** — any mint, a
+neighbor's or not. Nothing about where a mint sits in the network puts it on
+the list or keeps it off. Each one listed costs two things:
 
-Accepting a mint also means taking its issuer's credit risk, bounded by how
-many of its vouchers the node holds at once.
+- **Reachability**, always: the node verifies funding and settles at that
+  mint, so it must be reachable before a channel funded in it expires.
+- **Credit**, only for a mint set to `keep`: the node holds that issuer's
+  paper — in `merchantd` — until it is spent or redeemed. A mint set to `burn`
+  holds nothing, so its issuer's credit does not matter; accepting it is free
+  service, rationed by how much of that issuer's paper the peer can get.
+
+Unsettled channels carry both, for any foreign mint, until they settle.
 
 ---
 
@@ -350,7 +364,8 @@ of whoever is delivering**, one voucher per unit.
   1. Node B issues vouchers against its own capacity
   2. Client A acquires B-vouchers — on a market, or directly from B
   3. A spends B-vouchers with B
-  4. B redeems: cancels its own claim, delivers the service
+  4. B delivers the service, settles, and burns the vouchers at its
+     own mintd: the claim is honored, so it is cancelled
 
   Redemption costs B nothing but the service it already sells.
 ```
@@ -371,7 +386,8 @@ this document only needs the direct route.
 ## What Improves
 
 **Settlement is free for the provider.** A node receiving its own vouchers
-is canceling its own claim. No mint round-trip, no trust in a foreign mint,
+is canceling its own claim: `tollgated` settles and burns at its own `mintd`,
+over a local socket. No foreign mint round-trip, no trust in a foreign mint,
 nobody to rely on. All the work moves to whoever acquires the vouchers, who
 can spread it over many payments.
 
@@ -382,8 +398,8 @@ at once.
 **Double-spend checking becomes local.** Today a provider must reach a
 third-party mint to confirm a token is unspent, and that network hop is
 Spilman's main justification. Under vouchers the provider decides on its own
-vouchers: a local database lookup, sub-millisecond, and it works during an
-outage.
+vouchers: a lookup in its own `mintd`'s database, on the same machine,
+sub-millisecond, and it works during an outage.
 
 **Payment works whenever service works.** Today a mint outage blocks
 funding, rollover, and settlement even though the link itself is fine
@@ -439,8 +455,9 @@ below), which keeps the protocol small but leaves the peer to solve it — via
 another link, a Lightning payment, or a node willing to swap sats locally.
 
 **Relays can end up holding two kinds of vouchers.** A relay paid in its own
-vouchers still needs upstream vouchers to pay onward, and rebalancing between
-the two is real work on an ESP32.
+vouchers burns them on delivery, and still needs upstream vouchers to pay
+onward — which `merchantd` has to buy with what its sales brought in.
+Keeping that conversion going is real work on an ESP32.
 
 Two things reduce this, and together they mostly remove it. Accepting the
 upstream's mint (see Accepted Mints above) lets the relay take downstream
@@ -502,9 +519,9 @@ keeping the issuer's database bounded.
 
 Two consequences:
 
-- The local spent-proof check needs an atomic check-and-set if the provider
-  runs as more than one process. Straightforward on a router, but it has to
-  be specified.
+- The spent-proof set needs an atomic check-and-set. It lives in `mintd` alone
+  ([tollgate-daemons.md](tollgate-daemons.md)), so that is one process's
+  database transaction — but it has to be specified.
 - Cryptographic effort belongs on the **exchange step**, where two parties
   who do not trust each other trade vouchers and neither one issued what the
   other is handing over. That is the only step with a real adversary, and
@@ -518,14 +535,20 @@ Two consequences:
 more than how it came to hold sats. It arrives holding vouchers for the node
 it wants service from, or it does not get service.
 
-The routes — Lightning mint quotes, direct purchase from the issuer, local
-swaps of sat tokens, cross-mint swaps — are covered in
+The routes — buying over Lightning or directly from the issuer's `merchantd`,
+local swaps of sat tokens, cross-mint swaps — are covered in
 [voucher-acquisition.md](../market/voucher-acquisition.md), along with why the
-protocol needs no mechanism for handing a peer its first vouchers.
+protocol needs no mechanism for handing a peer its first vouchers. The
+issuer's `mintd` takes no money; issuing is `merchantd`'s, or free where the
+mint auto-accepts ([tollgate-daemons.md](tollgate-daemons.md)).
 
-The one thing worth noting here: a peer can mint, swap and fund against its
-counterparty **over the peering link alone**, because the mint it needs is the
-peer it is already talking to. Mint reachability is never the obstacle.
+The one thing worth noting here: a peer can buy, swap and fund against its
+counterparty **over the peering link alone**, because the issuer it needs is
+the peer it is already talking to. Mint reachability is never the obstacle.
+
+Inside a node, acquiring is `merchantd`'s job. `tollgated` holds no vouchers:
+when it funds a channel it asks `merchantd` for the counterparty's
+([tollgate-daemons.md](tollgate-daemons.md#funding-upstream)).
 
 Paying per token for a whole session instead of opening channels still
 works, but the cost falls on the provider. Every grant's payment lands in
@@ -595,8 +618,9 @@ shaper rather than a separate mechanism.
 **No vouchers are issued for it.** The allowance is delivery the node gives
 away, not a payment it makes: nothing is minted, nothing changes hands, and
 nothing is drawn from a grant. Handing out free vouchers is a way of selling
-them, and so belongs to the market ([../market/README.md](../market/README.md)),
-not to the protocol.
+them, and so belongs to `merchantd` and the market
+([../market/README.md](../market/README.md)), or to `mintd`'s auto-accept
+([tollgate-daemons.md](tollgate-daemons.md#auto-accept)) — not to the protocol.
 
 ### Abuse
 
@@ -629,12 +653,12 @@ here is protocol-side.
 | Problem | Notes |
 |---|---|
 | Choosing a received multiplier | Every node has to decide, per peer, how much to surcharge what that peer pushes at it. New operator work with no obvious default beyond `0`. |
-| Relays holding two kinds of vouchers | A relay that does not accept its upstream's mint sits between two issuers and must keep rebalancing. Accepting it removes the problem; not every relay can. |
+| Relays holding two kinds of vouchers | A relay that does not accept its upstream's mint burns what it is paid and has `merchantd` buy the upstream's paper with its sales revenue, continuously. Accepting the upstream's mint with `keep` removes the problem; not every relay can. |
 | Minimum-flow abuse | N free identities draw N allowances of real bandwidth, and one machine can run all N over the same link. Needs an aggregate cap across unpaid peers plus a cost to holding an identity. |
 | Choosing a window | The payer trades responsiveness against forfeiture and message count, with no obvious default. A provider's `[min_window_ms, max_window_ms]` bounds it but does not choose it. |
 | Under-delivery has no public evidence | A payer measures delivered against purchased from its own counters and can act on it, but cannot show it to anyone else. A provider skimming a few percent from every peer stays invisible outside those peerings. Revisitable as a reporting path if it proves common. |
 | Admission control policy | A provider can refuse a grant that would oversubscribe, but nothing says how it should divide capacity between peers that all want more, or whether an existing grant may be honored at a reduced rate rather than run to its deadline. |
-| Atomic spent-proof check | The local double-spend check needs check-and-set if the provider runs as more than one process. Straightforward on a router, but unspecified. |
+| Atomic spent-proof check | The spent-proof set lives in `mintd` alone, so check-and-set is one process's transaction. Straightforward, but unspecified. |
 
 ---
 
@@ -654,14 +678,15 @@ here is protocol-side.
 | Rate within a grant | Fixed at `grant / window`, not banked | Otherwise a buyer that waited would be owed an unbounded burst just before the deadline |
 | Reaction latency | One message, no acknowledgment | Cumulative signed state makes TopUp idempotent, so fire-and-forget is safe and a payer can use a rate the moment it buys it |
 | Who pays | Each side pays for what it received, in the vouchers of whoever delivered it | Symmetric and unchanged. Both owe by default, so both fund a channel and buy their own grants |
-| Acquiring vouchers | Not a protocol concern — see the market documents | The direct route from the issuer is enough to operate, and checking a voucher takes one hop |
+| Acquiring vouchers | Not a protocol concern — see the market documents. Inside a node, `merchantd` acquires; `tollgated` asks it per funding | The direct route from the issuer is enough to operate, and checking a voucher takes one hop. The protocol daemon holds nothing of value |
 | Received multiplier | An unsigned surcharge per peer on what that peer pushes at us, applied as a consumption weight on its grant, default `0` | Net rate is `m − 1`, so `1` makes a peer's upload free, `2` charges it like a download, `k + 1` charges it `k` times. Unsigned, so a node can never pay a bonus on top of what it already owes for delivery |
 | Accepted mints | One ordered list, at least one entry, no prices | One unit of account network-wide makes any mint's vouchers usable. A relay accepting its upstream's mint can spend what it receives without converting |
 | Accepted-mint haircuts | None — accept or refuse | What an issuer's paper is worth belongs on the market, not in a settlement discount |
-| Foreign voucher cost | Gives up free settlement, local double-spend checks, and payment-liveness-equals-service-liveness | Those three properties hold only for own vouchers, so the accepted set should lean toward neighbors and upstreams |
+| After settlement | Own vouchers burned at `mintd`; another mint's kept (deposited with `merchantd`) or burned, set per mint | The claim on this node has been honored. Whether another issuer's paper is worth anything depends on the relationship — see [tollgate-daemons.md](tollgate-daemons.md) |
+| Foreign voucher cost | Gives up free settlement, local double-spend checks, and payment-liveness-equals-service-liveness | Those three properties hold only for own vouchers. The accepted set is the operator's explicit list, any mint; each costs reachability, and credit only if kept |
 | Market operations | Separate endpoints and protocol; never TollGate messages | Buying and swapping is not paying for delivery. A node offering neither is fully functional — see [market-protocol.md](../market/market-protocol.md) |
 | Minimum flow allowance | A floor on the shaping rate, not a stored quantity | It is what a peer falls back to when its grant expires, which is what keeps a link alive long enough to send the next TopUp. Being a rate, it cannot be accumulated |
-| Allowance vouchers | None — the allowance is delivery, not payment | Free vouchers are a market matter. As a rate it cannot be resold or accumulated, so there is nothing to lock |
+| Allowance vouchers | None — the allowance is delivery, not payment | Free vouchers are `merchantd`'s or `mintd` auto-accept's matter. As a rate it cannot be resold or accumulated, so there is nothing to lock |
 | Spilman channels | Kept, to bound the issuer's database rather than to prevent theft | The spent-proof set is ~700× larger without channels |
 | Cryptographic effort | Concentrate on the exchange step | The only step with a real adversary once the issuer redeems its own vouchers |
 | Trust model | Reputation and exposure limits, not cryptography | When the provider is the mint, the only party who can cheat is the one who would honor the refund. Accepted deliberately |
