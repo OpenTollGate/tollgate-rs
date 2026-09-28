@@ -510,14 +510,6 @@ impl MerchantClient {
             Response::Error { message } => Err(anyhow!("merchantd: {message}")),
         }
     }
-
-    /// Hand over something of value this node received and does not keep.
-    pub fn deposit(&self, token: &str) -> Result<()> {
-        self.call(&Request::Deposit {
-            token: token.to_owned(),
-        })
-        .map(|_| ())
-    }
 }
 
 impl crate::channel::Funding for MerchantClient {
@@ -531,6 +523,13 @@ impl crate::channel::Funding for MerchantClient {
             .as_str()
             .map(str::to_owned)
             .ok_or_else(|| anyhow!("merchantd funded nothing: {data}"))
+    }
+
+    fn deposit(&self, token: &str) -> Result<()> {
+        self.call(&Request::Deposit {
+            token: token.to_owned(),
+        })
+        .map(|_| ())
     }
 }
 

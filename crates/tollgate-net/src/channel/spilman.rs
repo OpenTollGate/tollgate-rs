@@ -28,7 +28,7 @@
 //!
 //! [`tollgate-vouchers.md`]: https://github.com/OpenTollGate/tollgate-rs/blob/master/docs/design/core/tollgate-vouchers.md
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -44,11 +44,12 @@ use cdk_spilman::{
     SpilmanKeysetRefresher, SpilmanMintClient, extract_nut00_error_code,
 };
 use tollgate_protocol::{ChannelId, PubKey, Signature};
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use super::{CannotSettle, ChannelBackend, FundedChannel, MintNotAccepted, VerifiedChannel};
 
 mod funding;
+mod proceeds;
 
 use funding::Funding;
 
@@ -99,10 +100,15 @@ pub struct SpilmanConfig {
     /// Mints we will take payment in, from the Offer. A channel funded against
     /// anything else is refused.
     pub accepted_mints: Vec<String>,
+    /// Accepted mints whose vouchers are burned once a channel funded in them
+    /// settles, rather than deposited with [`Self::funding`]. This node's own
+    /// always is, listed or not.
+    pub burned_mints: Vec<String>,
     /// Secret key this node signs channel state with, hex-encoded.
     pub secret_key_hex: String,
-    /// Where the vouchers that fund a channel come from: `merchantd`, on a
-    /// node. This backend holds none of its own.
+    /// Where the vouchers that fund a channel come from, and where what a
+    /// settlement brings in goes: `merchantd`, on a node. This backend holds
+    /// none of its own.
     pub funding: std::sync::Arc<dyn super::Funding>,
     /// How long a channel we fund stays ours alone to spend, in seconds. Past
     /// it, the refund path opens and we can reclaim what the peer has not
@@ -133,6 +139,9 @@ pub struct SpilmanChannels {
     /// The latest refund expiry given to a channel we funded; see
     /// [`unique_expiry`].
     last_expiry: AtomicU64,
+    /// Settled channels whose proceeds or change have been burned or handed
+    /// over, so a settlement retried after that does not try it twice.
+    disposed: Mutex<HashSet<String>>,
 }
 
 impl std::fmt::Debug for SpilmanChannels {
@@ -207,6 +216,7 @@ impl SpilmanChannels {
             server: SpilmanBridge::new(host),
             remote,
             last_expiry: AtomicU64::new(0),
+            disposed: Mutex::default(),
         })
     }
 
@@ -516,16 +526,35 @@ impl ChannelBackend for SpilmanChannels {
 
     fn settle(&self, channel_id: ChannelId) -> Result<()> {
         let id = channel_id_to_hex(channel_id);
-        // The node retries settlements, so one that already went through has
-        // to read as done rather than as a failure to retry.
-        if self.server.host().get_channel_state(&id) == ChannelState::Closed {
-            return Ok(());
+        // One we funded is settled by its receiver; ours is to take back the
+        // change once it has.
+        if self.server.host().get_funding_data(&id).is_none()
+            && let Some(funding) = self
+                .client
+                .lock()
+                .expect("not poisoned")
+                .get_channel_funding(&id)
+        {
+            return self.reclaim_change(&id, &funding);
         }
         // No funding recorded for the channel is refused the same way every
         // time, so it is not worth retrying.
         let mint = self
             .funding_mint(&id)
             .map_err(|e| CannotSettle(format!("{id}: {e:#}")))?;
+        // The node retries settlements, so one that already went through has
+        // to read as done rather than as a failure to retry — but what it paid
+        // may still be waiting to be disposed of.
+        if self.server.host().get_channel_state(&id) != ChannelState::Closed {
+            self.close(&id, &mint)?;
+        }
+        self.dispose(&id, &mint)
+    }
+}
+
+impl SpilmanChannels {
+    /// Close a channel a peer funded, at the mint it was funded in.
+    fn close(&self, id: &str, mint: &str) -> Result<()> {
         // The swap goes to the mint that issued the funding. The bridge passes
         // that mint's URL through to each call, so the networking only has to
         // be the right kind.
@@ -533,14 +562,14 @@ impl ChannelBackend for SpilmanChannels {
             http: &self.remote,
             host: self.server.host(),
             runtime: self.runtime.clone(),
-            local: match settlement_for(&self.config.mint_url, &mint) {
+            local: match settlement_for(&self.config.mint_url, mint) {
                 Settlement::Ours => Some(self.config.mint_local.as_str()),
                 Settlement::Remote => None,
             },
         };
         let closed = self
             .server
-            .execute_unilateral_close(&id, &networking, &networking);
+            .execute_unilateral_close(id, &networking, &networking);
         match closed {
             Ok(_) | Err(CloseError::AlreadyClosed { .. }) => Ok(()),
             Err(e) if close_error_is_permanent(&e) => {
@@ -548,6 +577,106 @@ impl ChannelBackend for SpilmanChannels {
             }
             Err(e) => Err(anyhow!("settle {id} in {mint}: {e:?}")),
         }
+    }
+
+    /// Get rid of what a closed channel paid us: burn it at its mint, or hand
+    /// it to [`SpilmanConfig::funding`] to keep.
+    ///
+    /// The close already swapped the payer's proofs for ones only we can
+    /// spend, so they leave here as proofs the payer has never held.
+    fn dispose(&self, id: &str, mint: &str) -> Result<()> {
+        if self.disposed.lock().expect("not poisoned").contains(id) {
+            return Ok(());
+        }
+        let closed = self
+            .server
+            .host()
+            .get_closed_data(id)
+            .ok_or_else(|| anyhow!("{id} is closed with no record of what it paid"))?;
+        let proofs: cashu::nuts::Proofs = serde_json::from_str(&closed.receiver_proofs_json)
+            .with_context(|| format!("read what {id} paid"))?;
+        let unit = crate::mint::currency_unit(&self.config.unit);
+        let amount = closed.receiver_sum;
+
+        let ours = settlement_for(&self.config.mint_url, mint) == Settlement::Ours;
+        let burned = ours
+            || self
+                .config
+                .burned_mints
+                .iter()
+                .any(|m| settlement_for(m, mint) == Settlement::Ours);
+        if proofs.is_empty() {
+            debug!(channel = id, %mint, "the channel paid nothing");
+        } else if burned {
+            // Our own vouchers are burned where tollgated reaches mintd.
+            let at = if ours {
+                self.config.mint_local.as_str()
+            } else {
+                mint
+            };
+            let handle = self.runtime.clone();
+            let gone =
+                tokio::task::block_in_place(|| handle.block_on(proceeds::burn(at, &unit, proofs)))?;
+            if gone {
+                info!(channel = id, %mint, amount, "burned what a channel paid");
+            } else {
+                warn!(channel = id, %mint, amount, "the mint cannot burn; dropped what a channel paid");
+            }
+        } else {
+            let token = proceeds::token(mint, &unit, proofs)?;
+            self.config
+                .funding
+                .deposit(&token)
+                .with_context(|| format!("deposit what {id} paid"))?;
+            info!(channel = id, %mint, amount, "deposited what a channel paid");
+        }
+        self.disposed
+            .lock()
+            .expect("not poisoned")
+            .insert(id.to_owned());
+        Ok(())
+    }
+
+    /// Take back the change from a channel we funded, once its receiver has
+    /// closed it, and hand it to [`SpilmanConfig::funding`].
+    ///
+    /// The receiver can re-derive the change outputs from the secret the
+    /// channel shares, so depositing them — a swap at their mint — is what
+    /// makes them ours alone.
+    fn reclaim_change(&self, id: &str, funding: &cdk_spilman::ClientChannelFunding) -> Result<()> {
+        if self.disposed.lock().expect("not poisoned").contains(id) {
+            return Ok(());
+        }
+        let mint = funding.mint_url.as_str();
+        let at = match settlement_for(&self.config.mint_url, mint) {
+            Settlement::Ours => self.config.mint_local.as_str(),
+            Settlement::Remote => mint,
+        };
+        let ours = cashu::nuts::SecretKey::from_hex(&self.config.secret_key_hex)
+            .map_err(|e| anyhow!("bad secret: {e}"))?;
+        let handle = self.runtime.clone();
+        let change = tokio::task::block_in_place(|| {
+            handle.block_on(proceeds::reclaim_change(at, funding, ours))
+        })?
+        .ok_or_else(|| anyhow!("{id} is not closed yet; its change is still locked in it"))?;
+
+        if change.is_empty() {
+            debug!(channel = id, %mint, "the channel left no change");
+        } else {
+            let amount: u64 = change.iter().map(|p| u64::from(p.amount)).sum();
+            let unit = crate::mint::currency_unit(&self.config.unit);
+            let token = proceeds::token(mint, &unit, change)?;
+            self.config
+                .funding
+                .deposit(&token)
+                .with_context(|| format!("deposit the change from {id}"))?;
+            info!(channel = id, %mint, amount, "deposited a channel's change");
+        }
+        self.disposed
+            .lock()
+            .expect("not poisoned")
+            .insert(id.to_owned());
+        Ok(())
     }
 }
 
@@ -764,22 +893,41 @@ mod tests {
             accepted_mints: Vec<String>,
             secret: [u8; 32],
         ) -> (SpilmanChannels, Dir) {
+            let (backend, _, dir) =
+                backend_with(mint_url, accepted_mints, Vec::new(), secret).await;
+            (backend, dir)
+        }
+
+        /// [`backend`], burning what `burned_mints` pay, and with the wallet
+        /// it funds from and deposits into.
+        pub(super) async fn backend_with(
+            mint_url: &str,
+            accepted_mints: Vec<String>,
+            burned_mints: Vec<String>,
+            secret: [u8; 32],
+        ) -> (SpilmanChannels, crate::wallet::Wallet, Dir) {
             let dir = Dir::new();
-            let wallet =
-                crate::wallet::Wallet::open(dir.path().join("wallet.sqlite"), [7; 64], "byte")
-                    .await
-                    .expect("open a wallet");
+            // A seed of each side's own: two wallets deriving the same outputs
+            // at one mint would collide.
+            let wallet = crate::wallet::Wallet::open(
+                dir.path().join("wallet.sqlite"),
+                [secret[0]; 64],
+                "byte",
+            )
+            .await
+            .expect("open a wallet");
             let backend = SpilmanChannels::new(SpilmanConfig {
                 mint_url: mint_url.into(),
                 mint_local: mint_url.into(),
                 unit: "byte".into(),
                 accepted_mints,
+                burned_mints,
                 secret_key_hex: hex::encode(secret),
-                funding: std::sync::Arc::new(crate::wallet::WalletFunding::new(wallet)),
+                funding: std::sync::Arc::new(crate::wallet::WalletFunding::new(wallet.clone())),
                 ttl_seconds: 3_600,
             })
             .expect("build the backend");
-            (backend, dir)
+            (backend, wallet, dir)
         }
 
         /// The active byte keyset of the mint at `mint_url`, as `payer` reads
@@ -1025,7 +1173,12 @@ mod tests {
     /// Real settlement, end to end: two byte mints on loopback ports, a payee
     /// running one and accepting both, and a payer funding a channel in each.
     mod settled {
-        use super::live::{PAYEE, PAYER, backend, keyset_info, pubkey, serve_mint, vouchers};
+        use cashu::nuts::nut00::ProofsMethods;
+        use cashu::nuts::{CheckStateRequest, State};
+
+        use super::live::{
+            PAYEE, PAYER, backend, backend_with, keyset_info, pubkey, serve_mint, vouchers,
+        };
         use super::*;
 
         const CAPACITY: u64 = 1 << 20;
@@ -1054,30 +1207,84 @@ mod tests {
                 .sign_update(verified.channel_id, balance)
                 .expect("sign");
             assert!(payee.verify_update(pubkey(PAYER), verified.channel_id, balance, signature));
+            payee
+                .record_update(pubkey(PAYER), verified.channel_id, balance, signature)
+                .expect("record");
             verified.channel_id
+        }
+
+        /// Whether every proof `payee` was paid on `channel_id` is spent at
+        /// `mint`.
+        fn paid_out_and_spent(payee: &SpilmanChannels, mint: &Mint, channel_id: ChannelId) -> bool {
+            let closed = payee
+                .server
+                .host()
+                .get_closed_data(&channel_id_to_hex(channel_id))
+                .expect("closed");
+            let proofs: cashu::nuts::Proofs =
+                serde_json::from_str(&closed.receiver_proofs_json).expect("proofs");
+            assert_eq!(proofs.total_amount().expect("sum"), 1000.into());
+            let states = tokio::runtime::Handle::current()
+                .block_on(mint.check_state(&CheckStateRequest {
+                    ys: proofs.ys().expect("ys"),
+                }))
+                .expect("check");
+            states.states.iter().all(|s| s.state == State::Spent)
+        }
+
+        fn held(wallet: &crate::wallet::Wallet, mint: &str) -> u64 {
+            tokio::runtime::Handle::current().block_on(wallet.balance_of(mint, "byte"))
         }
 
         #[tokio::test(flavor = "multi_thread")]
         async fn a_channel_settles_in_the_mint_it_was_funded_in() {
             let (ours, ours_url, _ours_dir) = serve_mint(7).await;
             let (theirs, theirs_url, _theirs_dir) = serve_mint(8).await;
-            let accepted = vec![ours_url.clone(), theirs_url.clone()];
-            let (payer, _payer_wallet) = backend(&theirs_url, accepted.clone(), PAYER).await;
-            let (payee, _payee_wallet) = backend(&ours_url, accepted, PAYEE).await;
+            let (neighbour, neighbour_url, _neighbour_dir) = serve_mint(9).await;
+            let accepted = vec![ours_url.clone(), theirs_url.clone(), neighbour_url.clone()];
+            let (payer, payer_wallet, _payer_dir) =
+                backend_with(&theirs_url, accepted.clone(), Vec::new(), PAYER).await;
+            let (payee, payee_wallet, _payee_dir) =
+                backend_with(&ours_url, accepted, vec![neighbour_url.clone()], PAYEE).await;
 
             // Every backend call blocks, as it does when the node drives it.
             tokio::task::spawn_blocking(move || {
-                // Funded in another mint: only that mint can swap the proofs.
+                // Funded in another mint: only that mint can swap the proofs,
+                // and what it paid is kept.
                 let elsewhere = pay_over_channel(&payer, &payee, &theirs, &theirs_url, 1000);
+
+                // The funder's change is still in the channel until the
+                // receiver closes it, and asking for it is worth retrying.
+                let early = payer.settle(elsewhere).expect_err("not closed yet");
+                assert!(early.downcast_ref::<CannotSettle>().is_none());
+
                 payee
                     .settle(elsewhere)
                     .expect("settle a channel funded in another mint");
+                assert_eq!(held(&payee_wallet, &theirs_url), 1000, "kept");
+                assert!(paid_out_and_spent(&payee, &theirs, elsewhere), "swapped");
 
-                // Funded in our own: settled in process, as before.
+                payer.settle(elsewhere).expect("take back the change");
+                assert_eq!(held(&payer_wallet, &theirs_url), CAPACITY - 1000);
+                // Settling again hands nothing over twice.
+                payee.settle(elsewhere).expect("settled already");
+                payer.settle(elsewhere).expect("reclaimed already");
+                assert_eq!(held(&payee_wallet, &theirs_url), 1000);
+                assert_eq!(held(&payer_wallet, &theirs_url), CAPACITY - 1000);
+
+                // Funded in our own: settled at mintd, and burned there.
                 let at_home = pay_over_channel(&payer, &payee, &ours, &ours_url, 1000);
                 payee
                     .settle(at_home)
                     .expect("settle a channel funded in our mint");
+                assert_eq!(held(&payee_wallet, &ours_url), 0, "our own is never kept");
+                assert!(paid_out_and_spent(&payee, &ours, at_home), "burned");
+
+                // Funded in a mint set to burn: burned at that mint.
+                let courtesy = pay_over_channel(&payer, &payee, &neighbour, &neighbour_url, 1000);
+                payee.settle(courtesy).expect("settle and burn");
+                assert_eq!(held(&payee_wallet, &neighbour_url), 0, "burned, not kept");
+                assert!(paid_out_and_spent(&payee, &neighbour, courtesy), "burned");
             })
             .await
             .expect("settling");

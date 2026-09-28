@@ -27,6 +27,11 @@
 //!   the public listener serves, so it cannot be used to make the mint sign and
 //!   store without end.
 //!
+//! Both listeners also take one melt method, [`BURN`], which pays nothing
+//! out: the proofs are marked spent and that is all. It is how `tollgated`
+//! cancels vouchers whose resource has been delivered, and it needs no
+//! credential, since whoever burns vouchers only destroys their own.
+//!
 //! What is privileged is the address, not the call. There is no Lightning
 //! behind a quote and nothing to pay. Bolt11 is denominated in msat and this
 //! keyset in bytes, so a real invoice would have to invent an exchange rate;
@@ -71,7 +76,20 @@ use cdk_common::payment::{
     MakePaymentResponse, MintPayment, OutgoingPaymentOptions, PaymentIdentifier,
     PaymentQuoteResponse, SettingsResponse, WaitPaymentResponse,
 };
+use cdk_common::{MeltQuoteState, QuoteId};
 use futures::Stream;
+
+/// The NUT-05 melt method that pays nothing out.
+///
+/// A melt quote on it names the amount to burn as its `request`, in the
+/// quote's unit, the way a Bolt11 invoice names what it pays; the melt then
+/// marks the inputs spent and settles by doing nothing else.
+pub const BURN: &str = "burn";
+
+/// The burn method as cdk names payment methods.
+pub fn burn_method() -> PaymentMethod {
+    PaymentMethod::Custom(BURN.into())
+}
 
 /// How this node's mint is set up.
 #[derive(Debug, Clone)]
@@ -274,12 +292,32 @@ pub async fn build(config: &MintConfig) -> Result<Mint> {
         .await
         .map_err(|e| anyhow!("accept mint quotes in {unit}: {e}"))?;
 
-    // Adding a Bolt11 processor advertises melting too, and there is nothing
-    // to melt into: redeeming a voucher is being served, not being paid out.
-    // Advertising it would only send wallets to an endpoint that refuses them.
+    // Burning is a melt: the one way to have a mint mark proofs spent without
+    // signing anything in their place.
+    builder
+        .add_payment_processor(
+            unit.clone(),
+            burn_method(),
+            MintMeltLimits::new(1, u64::MAX),
+            Arc::new(Burn { unit: unit.clone() }),
+        )
+        .await
+        .map_err(|e| anyhow!("burn {unit}: {e}"))?;
+
+    // cdk advertises every method it is given for both minting and melting.
+    // Neither crosses over: there is nothing to melt into by Bolt11 —
+    // redeeming a voucher is being served, not being paid out — and nothing to
+    // mint by burning. Advertising either would only send wallets to an
+    // endpoint that refuses them.
     let mut info = builder.current_mint_info();
-    info.nuts.nut05.methods.clear();
-    info.nuts.nut05.disabled = true;
+    info.nuts
+        .nut04
+        .methods
+        .retain(|m| m.method != burn_method());
+    info.nuts
+        .nut05
+        .methods
+        .retain(|m| m.method == burn_method());
     builder = builder.with_mint_info(info);
 
     let mint = builder
@@ -511,13 +549,157 @@ impl MintPayment for PaidOnCreation {
     }
 }
 
+/// A payment processor for the [`BURN`] melt method: it pays nothing.
+///
+/// The amount burned is the quote's `request`, and the payment's id carries
+/// it as a mint quote's does, so nothing is kept here and a burn the mint was
+/// in the middle of when it stopped reads as done when it comes back.
+#[derive(Debug)]
+struct Burn {
+    unit: CurrencyUnit,
+}
+
+fn burn_id(quote: &QuoteId, amount: u64) -> PaymentIdentifier {
+    PaymentIdentifier::CustomId(format!("burn-{quote}-{amount}"))
+}
+
+fn burnt_amount(id: &PaymentIdentifier) -> Option<u64> {
+    match id {
+        PaymentIdentifier::CustomId(s) => s.strip_prefix("burn-")?.rsplit_once('-')?.1.parse().ok(),
+        _ => None,
+    }
+}
+
+impl Burn {
+    /// What a burn asks to destroy: its `request`, which the optional amount,
+    /// if given, has to agree with.
+    fn amount(
+        &self,
+        options: &payment::CustomOutgoingPaymentOptions,
+    ) -> Result<u64, payment::Error> {
+        let amount: u64 =
+            options.request.trim().parse().map_err(|_| {
+                payment::Error::Custom("a burn's request is the amount to burn".into())
+            })?;
+        if let Some(asked) = &options.amount
+            && (asked.unit() != &self.unit || asked.value() != amount)
+        {
+            return Err(payment::Error::Custom(
+                "a burn's amount has to match its request".into(),
+            ));
+        }
+        Ok(amount)
+    }
+}
+
+#[async_trait]
+impl MintPayment for Burn {
+    type Err = payment::Error;
+
+    async fn get_settings(&self) -> Result<SettingsResponse, Self::Err> {
+        Ok(SettingsResponse {
+            unit: self.unit.to_string(),
+            bolt11: None,
+            bolt12: None,
+            onchain: None,
+            custom: [(BURN.to_string(), "{}".to_string())].into(),
+        })
+    }
+
+    async fn create_incoming_payment_request(
+        &self,
+        _options: IncomingPaymentOptions,
+    ) -> Result<CreateIncomingPaymentResponse, Self::Err> {
+        Err(payment::Error::UnsupportedPaymentOption)
+    }
+
+    async fn check_incoming_payment_status(
+        &self,
+        _payment_identifier: &PaymentIdentifier,
+    ) -> Result<Vec<WaitPaymentResponse>, Self::Err> {
+        Ok(Vec::new())
+    }
+
+    async fn wait_payment_event(
+        &self,
+    ) -> Result<Pin<Box<dyn Stream<Item = Event> + Send>>, Self::Err> {
+        Ok(Box::pin(futures::stream::pending()))
+    }
+
+    fn is_payment_event_stream_active(&self) -> bool {
+        false
+    }
+
+    fn cancel_payment_event_stream(&self) {}
+
+    async fn get_payment_quote(
+        &self,
+        unit: &CurrencyUnit,
+        options: OutgoingPaymentOptions,
+    ) -> Result<PaymentQuoteResponse, Self::Err> {
+        let OutgoingPaymentOptions::Custom(options) = options else {
+            return Err(payment::Error::UnsupportedPaymentOption);
+        };
+        if unit != &self.unit {
+            return Err(payment::Error::UnsupportedUnit);
+        }
+        let amount = self.amount(&options)?;
+        Ok(PaymentQuoteResponse {
+            request_lookup_id: Some(burn_id(&options.quote_id, amount)),
+            amount: Amount::new(amount, self.unit.clone()),
+            // Nothing is paid out, so nothing is paid for it.
+            fee: Amount::new(0, self.unit.clone()),
+            state: MeltQuoteState::Unpaid,
+            extra_json: None,
+            estimated_blocks: None,
+            fee_options: None,
+        })
+    }
+
+    async fn make_payment(
+        &self,
+        unit: &CurrencyUnit,
+        options: OutgoingPaymentOptions,
+    ) -> Result<MakePaymentResponse, Self::Err> {
+        let OutgoingPaymentOptions::Custom(options) = options else {
+            return Err(payment::Error::UnsupportedPaymentOption);
+        };
+        if unit != &self.unit {
+            return Err(payment::Error::UnsupportedUnit);
+        }
+        // Done as soon as it is asked: the mint marks the inputs spent when
+        // this returns, and that is the whole of a burn.
+        let amount = self.amount(&options)?;
+        Ok(MakePaymentResponse {
+            payment_lookup_id: burn_id(&options.quote_id, amount),
+            payment_proof: None,
+            status: MeltQuoteState::Paid,
+            total_spent: Amount::new(amount, self.unit.clone()),
+        })
+    }
+
+    async fn check_outgoing_payment(
+        &self,
+        payment_identifier: &PaymentIdentifier,
+    ) -> Result<MakePaymentResponse, Self::Err> {
+        let amount =
+            burnt_amount(payment_identifier).ok_or(payment::Error::UnsupportedPaymentOption)?;
+        Ok(MakePaymentResponse {
+            payment_lookup_id: payment_identifier.clone(),
+            payment_proof: None,
+            status: MeltQuoteState::Paid,
+            total_spent: Amount::new(amount, self.unit.clone()),
+        })
+    }
+}
+
 /// Serve the mint on both listeners until `shutdown` resolves.
 ///
-/// cdk serves the NUT-04 routes only for the methods it is told about. The
-/// private listener is told about the quote method, so `merchantd` can have
-/// quotes paid there; the public one only when auto-accept is on, and then
-/// behind the [`IssueLimit`]. Everything else — keys, swap, state check — is
-/// the same on both.
+/// cdk serves the NUT-04 and NUT-05 routes together, for any method, once it
+/// is told about one. Both listeners are, so both take burns; the public one
+/// refuses everything under `/v1/mint/` unless auto-accept is on, and then
+/// rations it by the [`IssueLimit`]. Everything else — keys, swap, melt,
+/// state check — is the same on both.
 pub async fn serve(
     mint: Arc<Mint>,
     listeners: Listeners,
@@ -580,6 +762,7 @@ async fn routers(
         .methods
         .iter()
         .map(|m| m.method.to_string())
+        .chain(info.nuts.nut05.methods.iter().map(|m| m.method.to_string()))
         .collect();
     methods.sort();
     methods.dedup();
@@ -592,12 +775,12 @@ async fn routers(
                 stats: Arc::clone(&stats),
                 limits: None,
                 private: true,
+                issues: true,
             },
             count_quotes,
         ));
 
-    let public_methods = if auto_accept { methods } else { Vec::new() };
-    let public = cdk_axum::create_mint_router(Arc::clone(&mint), public_methods)
+    let public = cdk_axum::create_mint_router(Arc::clone(&mint), methods)
         .await
         .context("build the public mint router")?
         .layer(axum::middleware::from_fn_with_state(
@@ -608,25 +791,32 @@ async fn routers(
                     Instant::now(),
                 )))),
                 private: false,
+                issues: auto_accept,
             },
             count_quotes,
         ));
     Ok((public, private))
 }
 
-/// What a listener counts, and whether it rations quotes.
+/// What a listener counts, whether it rations quotes, and whether it issues
+/// at all.
 #[derive(Clone)]
 struct Counting {
     stats: Arc<Stats>,
     limits: Option<Arc<Mutex<Limits>>>,
     private: bool,
+    issues: bool,
 }
 
 /// Count every mint quote asked for, and refuse one over the limit.
 ///
 /// Checked when a quote is asked for: that is where the work starts, and a
-/// quote refused here never reaches the database.
+/// quote refused here never reaches the database. A listener that does not
+/// issue has no NUT-04 routes at all.
 async fn count_quotes(State(counting): State<Counting>, req: Request, next: Next) -> Response {
+    if !counting.issues && req.uri().path().starts_with("/v1/mint/") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let is_quote =
         req.method() == axum::http::Method::POST && req.uri().path().starts_with("/v1/mint/quote/");
     if !is_quote {
@@ -943,6 +1133,121 @@ mod tests {
         assert!(ask_for_a_quote(&private).await.is_success());
         assert!(ask_for_a_quote(&private).await.is_success());
         assert_eq!(stats.refused_quotes.load(Ordering::Relaxed), 1);
+    }
+
+    /// POST `body` to `path` on `router`, returning the status and the JSON.
+    async fn post(
+        router: &Router,
+        path: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::post(path)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .expect("a request"),
+            )
+            .await
+            .expect("a response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("a body");
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn burning_is_a_melt_that_only_marks_the_vouchers_spent() {
+        let dir = Dir::new();
+        let mint = Arc::new(build(&byte_mint(&dir)).await.expect("build the mint"));
+
+        // Advertised as a melt and only as one, beside minting by Bolt11 and
+        // only by it.
+        let info = mint.mint_info().await.expect("info");
+        let byte = CurrencyUnit::Custom("byte".into());
+        assert!(
+            info.nuts
+                .nut05
+                .get_settings(&byte, &burn_method())
+                .is_some()
+        );
+        assert!(!info.nuts.nut05.disabled);
+        assert_eq!(info.nuts.nut05.methods.len(), 1, "burning is the only melt");
+        assert!(
+            info.nuts
+                .nut04
+                .get_settings(&byte, &burn_method())
+                .is_none()
+        );
+        assert_eq!(info.nuts.nut04.methods.len(), 1, "nothing mints by burning");
+
+        // On the public listener, with auto-accept off and no credential.
+        let (public, _) = routers(
+            Arc::clone(&mint),
+            false,
+            IssueLimit::default(),
+            Arc::default(),
+        )
+        .await
+        .expect("routers");
+
+        let proofs = issue(&mint, 1024).await;
+        let (status, quote) = post(
+            &public,
+            "/v1/melt/quote/burn",
+            serde_json::json!({ "method": "burn", "request": "1024", "unit": "byte" }),
+        )
+        .await;
+        assert!(status.is_success(), "{status}: {quote}");
+        assert_eq!(quote["amount"], 1024);
+        assert_eq!(
+            quote["fee_reserve"].as_u64().unwrap_or(0),
+            0,
+            "burning is free"
+        );
+
+        let (status, melted) = post(
+            &public,
+            "/v1/melt/burn",
+            serde_json::json!({ "quote": quote["quote"], "inputs": proofs }),
+        )
+        .await;
+        assert!(status.is_success(), "{status}: {melted}");
+        assert_eq!(melted["state"], "PAID");
+
+        let err = redeem(&mint, proofs)
+            .await
+            .expect_err("a burned voucher must not redeem");
+        assert!(
+            matches!(err, cdk::Error::TokenAlreadySpent),
+            "expected the proofs to be spent, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_burn_whose_request_is_not_its_amount_is_refused() {
+        let dir = Dir::new();
+        let mint = Arc::new(build(&byte_mint(&dir)).await.expect("build the mint"));
+        let (public, _) = routers(mint, false, IssueLimit::default(), Arc::default())
+            .await
+            .expect("routers");
+        for body in [
+            serde_json::json!({ "method": "burn", "request": "lots", "unit": "byte" }),
+            serde_json::json!({ "method": "burn", "request": "10", "unit": "byte", "amount": 11 }),
+        ] {
+            let (status, _) = post(&public, "/v1/melt/quote/burn", body.clone()).await;
+            assert!(!status.is_success(), "{body} was quoted");
+        }
+    }
+
+    #[test]
+    fn a_burn_carries_its_amount_in_its_lookup_id() {
+        let quote = QuoteId::new();
+        assert_eq!(burnt_amount(&burn_id(&quote, 1024)), Some(1024));
+        assert_eq!(burnt_amount(&lookup_id(3, 1024)), None);
     }
 
     #[test]

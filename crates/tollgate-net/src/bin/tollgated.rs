@@ -90,9 +90,18 @@ async fn main() -> Result<()> {
     info!(url = %config.mint_url, local = %config.mint_local, "mint at");
 
     // What funds this node's channels: `merchantd`, which holds the money.
-    // This node holds none, and asks for exactly what each channel needs.
+    // This node holds none, and asks for exactly what each channel needs, and
+    // hands it whatever a settlement in a mint it keeps brings in.
     let merchant = file.merchant.socket_path();
     info!(merchant = %merchant.display(), "funding from");
+    // Not fatal: merchantd may simply start after this. A deposit that finds
+    // nobody there fails, and is retried with the settlement it came from.
+    if file.vouchers.keeps_any(&config.mint_url) && !merchant.exists() {
+        tracing::warn!(
+            merchant = %merchant.display(),
+            "an accepted mint is set to keep, and merchantd is not there to keep it in"
+        );
+    }
 
     // A byte source on the mesh. Off unless asked for: it is an instrument, and
     // an unauthenticated one, so a node that was never told to serve it should
@@ -122,6 +131,7 @@ async fn main() -> Result<()> {
             mint_local: config.mint_local.clone(),
             unit: config.policy.unit.clone(),
             accepted_mints: config.policy.accepted_mints.clone(),
+            burned_mints: file.vouchers.burned(),
             secret_key_hex: config.identity.secret_hex(),
             funding: Arc::new(tollgate_net::merchant::MerchantClient::new(merchant)),
             ttl_seconds: config.channel_ttl_seconds,

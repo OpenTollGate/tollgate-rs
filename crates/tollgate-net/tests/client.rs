@@ -101,6 +101,7 @@ async fn a_session_buys_the_rate_it_is_given_and_follows_a_change() {
             mint_local: config.mint_local.clone(),
             unit: config.policy.unit.clone(),
             accepted_mints: config.policy.accepted_mints.clone(),
+            burned_mints: Vec::new(),
             secret_key_hex: config.identity.secret_hex(),
             funding: Arc::new(WalletFunding::new(gateway_wallet)),
             ttl_seconds: config.channel_ttl_seconds,

@@ -40,6 +40,28 @@ pub use spilman::{SpilmanChannels, SpilmanConfig};
 pub trait Funding: Send + Sync + std::fmt::Debug {
     /// A token of exactly `amount` of `mint`'s paper, in `unit`.
     fn vouchers(&self, mint: &str, unit: &str, amount: u64) -> Result<String>;
+
+    /// Hand over a token of something of value a settlement brought in and
+    /// this node does not keep: the proceeds of a channel in a mint it keeps,
+    /// or the change from one it funded. Receiving it is a swap at its mint,
+    /// so what is held afterwards is proofs nobody else has seen.
+    fn deposit(&self, token: &str) -> Result<()>;
+}
+
+/// What becomes of another mint's vouchers once a channel funded in them has
+/// settled (`docs/design/core/tollgate-daemons.md`).
+///
+/// This node's own are always burned: the resource has been delivered, and
+/// the claim is cancelled rather than left outstanding.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Settle {
+    /// Deposit them with `merchantd`: they are worth something to this node.
+    #[default]
+    Keep,
+    /// Melt them at their mint with its burn method, or drop them where it
+    /// has none: accepting them was a courtesy.
+    Burn,
 }
 
 /// A channel we funded, ready to tell the peer about.
@@ -159,6 +181,10 @@ pub trait ChannelBackend: Send + Sync + std::fmt::Debug {
     ) -> Result<()>;
 
     /// Settle a channel: submit the latest signed state, reclaim the change.
+    ///
+    /// On a channel a peer funded that is the close, and then disposing of
+    /// what it paid us: burned, or kept, as [`Settle`] says for its mint. On
+    /// one we funded it is taking back the change once the peer has closed.
     ///
     /// The node retries this until it succeeds, so it must be **idempotent**:
     /// settling a channel that has already settled returns `Ok` and moves
