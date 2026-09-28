@@ -1,5 +1,11 @@
 //! Selling this node's own vouchers, and buying a peer's.
 //!
+//! Served by `merchantd`, which holds the money: it takes payment, then has
+//! `mintd` issue what it sold through a mint quote on the mint's private
+//! listener, where quotes are paid on creation
+//! (`docs/design/core/tollgate-daemons.md`). The buyer's blinded outputs go
+//! straight to the mint, so `merchantd` never sees the secrets of what it sold.
+//!
 //! **Not part of the TollGate protocol.** No TollGate message buys, sells or
 //! swaps a voucher; acquiring them happens before a session and outside it. A
 //! node that offers no market at all still works — its peers simply have to
@@ -42,7 +48,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use cdk::mint::Mint;
 use cdk::nuts::{BlindSignature, BlindedMessage};
 use cdk_common::nuts::{KeySetInfo, Token};
 
@@ -120,6 +125,18 @@ impl Prices {
             .collect()
     }
 
+    /// Replace the whole list, as `merchantd` does when a rate or a price
+    /// changes.
+    pub fn replace(&self, table: Vec<Accepted>) {
+        let mut prices = self.0.write().expect("not poisoned");
+        prices.clear();
+        for entry in table {
+            if entry.bytes_per_unit > 0 {
+                prices.insert((normalise(&entry.mint), entry.unit), entry.bytes_per_unit);
+            }
+        }
+    }
+
     /// Whether this node is selling at all.
     pub fn is_selling(&self) -> bool {
         !self.0.read().expect("not poisoned").is_empty()
@@ -180,10 +197,81 @@ pub struct SwapResponse {
     pub signatures: Vec<BlindSignature>,
 }
 
+/// Where the market has what it sells issued: `mintd`'s private listener.
+#[derive(Debug, Clone)]
+pub struct Issuer {
+    /// The private listener's URL, e.g. `http://127.0.0.1:3337`.
+    pub url: String,
+    /// The unit this node's vouchers denominate in.
+    pub unit: String,
+    http: reqwest::Client,
+}
+
+impl Issuer {
+    /// Issue at `url`, in `unit`.
+    pub fn new(url: impl Into<String>, unit: impl Into<String>) -> Self {
+        Self {
+            url: url.into().trim_end_matches('/').to_owned(),
+            unit: unit.into(),
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("an HTTP client"),
+        }
+    }
+
+    /// Have `outputs` signed: a NUT-04 quote for their total, paid on
+    /// creation, then a mint against it.
+    ///
+    /// Two standard calls rather than one privileged one. If the second fails,
+    /// the paid quote is still there to mint against, and its id is in the
+    /// error.
+    pub async fn issue(&self, outputs: Vec<BlindedMessage>) -> Result<Vec<BlindSignature>> {
+        let amount: u64 = outputs
+            .iter()
+            .map(|o| u64::from(o.amount))
+            .fold(0, u64::saturating_add);
+        let quote: serde_json::Value = self
+            .http
+            .post(format!("{}/v1/mint/quote/bolt11", self.url))
+            .json(&serde_json::json!({ "amount": amount, "unit": self.unit }))
+            .send()
+            .await
+            .with_context(|| format!("reach the mint at {}", self.url))?
+            .error_for_status()
+            .context("ask the mint for a quote")?
+            .json()
+            .await
+            .context("read the mint's quote")?;
+        let quote = quote["quote"]
+            .as_str()
+            .ok_or_else(|| anyhow!("the mint's quote had no id: {quote}"))?
+            .to_owned();
+
+        #[derive(Deserialize)]
+        struct Minted {
+            signatures: Vec<BlindSignature>,
+        }
+        let minted: Minted = self
+            .http
+            .post(format!("{}/v1/mint/bolt11", self.url))
+            .json(&serde_json::json!({ "quote": quote, "outputs": outputs }))
+            .send()
+            .await
+            .with_context(|| format!("reach the mint at {} to mint quote {quote}", self.url))?
+            .error_for_status()
+            .with_context(|| format!("mint against quote {quote}"))?
+            .json()
+            .await
+            .with_context(|| format!("read the signatures for quote {quote}"))?;
+        Ok(minted.signatures)
+    }
+}
+
 /// The market's state.
 #[derive(Clone)]
 struct Market {
-    mint: Arc<Mint>,
+    issuer: Issuer,
     unit: String,
     mint_url: String,
     prices: Prices,
@@ -194,9 +282,9 @@ struct Market {
     max_amount: u64,
 }
 
-/// The market router, mounted alongside the mint.
+/// The market router.
 pub fn router(
-    mint: Arc<Mint>,
+    issuer: Issuer,
     unit: String,
     mint_url: String,
     prices: Prices,
@@ -207,7 +295,7 @@ pub fn router(
         .route(INFO_PATH, get(info))
         .route(SWAP_PATH, post(swap))
         .with_state(Market {
-            mint,
+            issuer,
             unit,
             mint_url,
             prices,
@@ -282,7 +370,7 @@ async fn swap(
         .await
         .map_err(|e| bad_request(format!("that payment did not clear: {e:#}")))?;
 
-    match market.mint.blind_sign(request.outputs).await {
+    match market.issuer.issue(request.outputs).await {
         Ok(signatures) => {
             info!(
                 paid,
@@ -301,7 +389,7 @@ async fn swap(
             warn!(
                 paid,
                 unit = %paid_unit,
-                error = %e,
+                error = %format!("{e:#}"),
                 "took payment and could not issue against it"
             );
             Err(bad_request(e.to_string()))

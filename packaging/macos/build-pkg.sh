@@ -63,12 +63,12 @@ echo "Building TollGate v${VERSION} for macOS ${ARCH}..."
 
 if [[ "${NO_BUILD}" -eq 0 ]]; then
     cargo_args=(build --release --manifest-path="${PROJECT_ROOT}/Cargo.toml"
-                --bin tollgated --bin tolltop --bin mintd --bin minttop)
+                --bin tollgated --bin tolltop --bin mintd --bin minttop --bin merchantd --bin merchanttop)
     [[ -n "${TARGET_TRIPLE}" ]] && cargo_args+=(--target "${TARGET_TRIPLE}")
     cargo "${cargo_args[@]}"
 fi
 
-for bin in tollgated tolltop mintd minttop; do
+for bin in tollgated tolltop mintd minttop merchantd merchanttop; do
     [[ -f "${BINARY_DIR}/${bin}" ]] || { echo "Missing binary: ${BINARY_DIR}/${bin}" >&2; exit 1; }
 done
 
@@ -82,7 +82,7 @@ mkdir -p "${STAGING_DIR}/usr/local/var/run"
 mkdir -p "${STAGING_DIR}/usr/local/var/lib/tollgate"
 mkdir -p "${STAGING_DIR}/Library/LaunchDaemons"
 
-for bin in tollgated tolltop mintd minttop; do
+for bin in tollgated tolltop mintd minttop merchantd merchanttop; do
     cp "${BINARY_DIR}/${bin}" "${STAGING_DIR}/usr/local/bin/"
     strip "${STAGING_DIR}/usr/local/bin/${bin}"
 done
@@ -91,8 +91,10 @@ done
 # there is nothing there: an upgrade must not overwrite the node's identity.
 cp "${SCRIPT_DIR}/tollgate.yaml" "${STAGING_DIR}/usr/local/etc/tollgate/tollgate.yaml.default"
 cp "${SCRIPT_DIR}/mint.yaml" "${STAGING_DIR}/usr/local/etc/tollgate/mint.yaml.default"
+cp "${SCRIPT_DIR}/merchant.yaml" "${STAGING_DIR}/usr/local/etc/tollgate/merchant.yaml.default"
 cp "${SCRIPT_DIR}/com.tollgate.daemon.plist" "${STAGING_DIR}/Library/LaunchDaemons/"
 cp "${SCRIPT_DIR}/com.tollgate.mint.plist" "${STAGING_DIR}/Library/LaunchDaemons/"
+cp "${SCRIPT_DIR}/com.tollgate.merchant.plist" "${STAGING_DIR}/Library/LaunchDaemons/"
 
 cat > "${SCRIPTS_DIR}/postinstall" <<'POSTINSTALL'
 #!/bin/sh
@@ -124,14 +126,17 @@ else
     log "kept the existing config"
 fi
 
-if [ ! -f "$CONFDIR/mint.yaml" ]; then
-    cp "$CONFDIR/mint.yaml.default" "$CONFDIR/mint.yaml"
-    chmod 600 "$CONFDIR/mint.yaml"
-    log "installed default mint config"
-fi
+for conf in mint merchant; do
+    if [ ! -f "$CONFDIR/$conf.yaml" ]; then
+        cp "$CONFDIR/$conf.yaml.default" "$CONFDIR/$conf.yaml"
+        chmod 600 "$CONFDIR/$conf.yaml"
+        log "installed default $conf config"
+    fi
+done
 
-# The mint first: tollgated settles at it, and retries until it answers.
-for svc in mint daemon; do
+# The mint and the merchant first: tollgated settles at one and is funded by
+# the other, and retries until they answer.
+for svc in mint merchant daemon; do
     launchctl bootout system "/Library/LaunchDaemons/com.tollgate.$svc.plist" 2>/dev/null || true
     launchctl bootstrap system "/Library/LaunchDaemons/com.tollgate.$svc.plist" 2>/dev/null || true
 done
@@ -147,6 +152,7 @@ cat > "${SCRIPTS_DIR}/preinstall" <<'PREINSTALL'
 # Stop the daemons before their binaries are replaced.
 launchctl bootout system /Library/LaunchDaemons/com.tollgate.daemon.plist 2>/dev/null || true
 launchctl bootout system /Library/LaunchDaemons/com.tollgate.mint.plist 2>/dev/null || true
+launchctl bootout system /Library/LaunchDaemons/com.tollgate.merchant.plist 2>/dev/null || true
 exit 0
 PREINSTALL
 chmod +x "${SCRIPTS_DIR}/preinstall"

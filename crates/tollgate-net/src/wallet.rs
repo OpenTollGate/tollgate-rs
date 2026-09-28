@@ -503,6 +503,53 @@ fn describe(token: &str) -> Result<(String, String, u64)> {
     Ok((normalise(&mint), unit, amount))
 }
 
+/// Funding channels from a wallet in this process.
+///
+/// What `merchantd` does when `tollgated` asks it for vouchers, and what a node
+/// running as one process does directly: spend what is held of that mint's
+/// paper, minting the shortfall first at a mint that gives it away.
+#[derive(Debug, Clone)]
+pub struct WalletFunding {
+    wallet: Wallet,
+    runtime: tokio::runtime::Handle,
+}
+
+impl WalletFunding {
+    /// Fund out of `wallet`. Must be made inside a Tokio runtime.
+    pub fn new(wallet: Wallet) -> Self {
+        Self {
+            wallet,
+            runtime: tokio::runtime::Handle::current(),
+        }
+    }
+}
+
+/// Spend `amount` of `mint`'s paper from `wallet`, minting the shortfall first.
+///
+/// Whatever is already held of that paper is spent first — a purchase that
+/// minted and then failed to open its channel leaves vouchers behind, and they
+/// are as good as new ones.
+pub async fn fund_from(wallet: &Wallet, mint: &str, unit: &str, amount: u64) -> Result<String> {
+    let held = wallet.balance_of(mint, unit).await;
+    let short = amount.saturating_sub(held);
+    if short > 0 {
+        tracing::debug!(amount, held, short, %mint, "minting vouchers");
+        wallet.issue(mint, unit, short).await?;
+    }
+    wallet
+        .spend(mint, unit, amount)
+        .await
+        .with_context(|| format!("take {amount} {unit} from {mint} out to fund"))
+}
+
+impl crate::channel::Funding for WalletFunding {
+    fn vouchers(&self, mint: &str, unit: &str, amount: u64) -> Result<String> {
+        let handle = self.runtime.clone();
+        let wallet = self.wallet.clone();
+        tokio::task::block_in_place(|| handle.block_on(fund_from(&wallet, mint, unit, amount)))
+    }
+}
+
 /// Where a node keeps its wallet unless told otherwise.
 ///
 /// Beside the state a service manager already owns, so the packages keep it

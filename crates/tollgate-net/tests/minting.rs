@@ -17,7 +17,7 @@ use tollgate_net::channel::{
     ChannelBackend, FundedChannel, SpilmanChannels, SpilmanConfig, VerifiedChannel,
 };
 use tollgate_net::mint::{self, IssueLimit, MintConfig};
-use tollgate_net::wallet::Wallet;
+use tollgate_net::wallet::{Wallet, WalletFunding};
 
 const UNIT: &str = "byte";
 
@@ -201,7 +201,7 @@ async fn fund_and_verify(
         unit: UNIT.into(),
         accepted_mints: vec!["http://127.0.0.1:1".into()],
         secret_key_hex: buyer_id.secret_hex(),
-        wallet: held,
+        funding: Arc::new(WalletFunding::new(held)),
         ttl_seconds: 3_600,
     })
     .expect("the buyer's channels");
@@ -212,7 +212,7 @@ async fn fund_and_verify(
         unit: UNIT.into(),
         accepted_mints: vec![seller.url.clone()],
         secret_key_hex: seller_id.secret_hex(),
-        wallet: buyer_wallet(&seller_dir, 5).await,
+        funding: Arc::new(WalletFunding::new(buyer_wallet(&seller_dir, 5).await)),
         ttl_seconds: 3_600,
     })
     .expect("the seller's channels");
@@ -293,4 +293,141 @@ async fn funding_is_served_and_a_flood_past_the_issue_limit_is_refused() {
         "refused when the quote was asked for: {refused}"
     );
     assert_eq!(flooder.balance_of(&seller.url, UNIT).await, 0);
+}
+
+/// A sale on the market: the buyer pays with one mint's tokens, and what it
+/// bought is issued at the seller's mint through its private listener, against
+/// the buyer's own blinded outputs.
+///
+/// The money here is another auto-accepting byte mint, because what the market
+/// checks is the price and the payment clearing — not what the money is — and
+/// that keeps the test to mints this crate runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sale_is_paid_into_the_wallet_and_issued_at_the_private_listener() {
+    use cashu::amount::{FeeAndAmounts, SplitTarget};
+    use cashu::nuts::{CurrencyUnit, PreMintSecrets};
+
+    let money = seller(true, 1 << 30).await;
+
+    // The seller's mint: gives nothing away in public, issues on its private
+    // listener for whoever sells.
+    let free = || -> SocketAddr {
+        let probe = TcpListener::bind("127.0.0.1:0").expect("find a free port");
+        probe.local_addr().expect("its address")
+    };
+    let (public, private, market) = (free(), free(), free());
+    let dir = TempDir::new();
+    let ours = Arc::new(
+        mint::build(&MintConfig {
+            url: format!("http://{public}"),
+            unit: UNIT.into(),
+            seed: vec![11; 32],
+            file: dir.path().join("mint.sqlite"),
+            max_amount: 1 << 30,
+        })
+        .await
+        .expect("build the seller's mint"),
+    );
+    let stats = Arc::new(mint::Stats::default());
+    tokio::spawn(mint::serve(
+        Arc::clone(&ours),
+        mint::Listeners {
+            public,
+            private,
+            auto_accept: false,
+            issue_limit: IssueLimit::default(),
+        },
+        Arc::clone(&stats),
+        std::future::pending(),
+    ));
+
+    // Two of our bytes for each byte of the money.
+    let takings_dir = TempDir::new();
+    let takings = buyer_wallet(&takings_dir, 8).await;
+    let prices = tollgate_net::market::Prices::new([tollgate_net::market::Accepted {
+        mint: money.url.clone(),
+        unit: UNIT.into(),
+        bytes_per_unit: 2,
+    }]);
+    let router = tollgate_net::market::router(
+        tollgate_net::market::Issuer::new(format!("http://{private}"), UNIT),
+        UNIT.into(),
+        format!("http://{public}"),
+        prices,
+        takings.clone(),
+        1 << 30,
+    );
+    let listener = tokio::net::TcpListener::bind(market)
+        .await
+        .expect("bind the market");
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(private).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // The buyer holds 1000 of the money, and blinds outputs for 2000 of ours.
+    let buyer_dir = TempDir::new();
+    let buyer = buyer_wallet(&buyer_dir, 9).await;
+    buyer
+        .issue(&money.url, UNIT, 1_000)
+        .await
+        .expect("get money");
+    let payment = buyer.spend(&money.url, UNIT, 1_000).await.expect("pay");
+
+    let unit = CurrencyUnit::Custom(UNIT.into());
+    let id = ours.get_active_keysets()[&unit];
+    let keys = ours
+        .keyset_pubkeys(&id)
+        .expect("our keys")
+        .keysets
+        .remove(0)
+        .keys;
+    let denominations: FeeAndAmounts =
+        (0, keys.keys().keys().map(|a| u64::from(*a)).collect()).into();
+    let outputs = PreMintSecrets::random(
+        id,
+        cashu::Amount::from(2_000u64),
+        &SplitTarget::None,
+        &denominations,
+    )
+    .expect("blind");
+
+    let response: serde_json::Value = reqwest::Client::new()
+        .post(format!(
+            "http://{market}{}",
+            tollgate_net::market::SWAP_PATH
+        ))
+        .json(&serde_json::json!({
+            "token": payment,
+            "outputs": outputs.blinded_messages(),
+        }))
+        .send()
+        .await
+        .expect("reach the market")
+        .error_for_status()
+        .expect("the sale goes through")
+        .json()
+        .await
+        .expect("signatures");
+
+    let signatures: Vec<cashu::nuts::BlindSignature> =
+        serde_json::from_value(response["signatures"].clone()).expect("signatures");
+    let proofs = cashu::dhke::construct_proofs(signatures, outputs.rs(), outputs.secrets(), &keys)
+        .expect("unblind");
+    let bought: u64 = proofs.iter().map(|p| u64::from(p.amount)).sum();
+
+    assert_eq!(bought, 2_000, "what was paid for, at the price");
+    assert_eq!(
+        takings.balance_of(&money.url, UNIT).await,
+        1_000,
+        "the payment is in the seller's wallet"
+    );
+    assert_eq!(
+        stats.private_quotes.load(Ordering::Relaxed),
+        1,
+        "issued through the private listener, once"
+    );
 }

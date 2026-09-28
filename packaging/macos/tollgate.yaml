@@ -27,22 +27,10 @@ access:
     enabled: true
     bytes_per_second: 4096
 
-market:
-  # What this node takes as payment, and what a unit of it buys. Nothing is
-  # sold until at least one issuer is listed.
-  #
-  # accept:
-  #   - mint: "https://mint.minibits.cash/Bitcoin"
-  #     unit: sat
-  #     bytes_per_unit: 1000000
-
-wallet:
-  # Where this node buys the money it pays its own upstream with, and where it
-  # keeps what it is paid. Top it up from `tolltop`, on the wallet tab.
-  mint: "https://mint.minibits.cash/Bitcoin"
-  unit: sat
-  # The balance is bearer tokens: this file *is* the money.
-  file: "/usr/local/var/lib/tollgate/wallet.sqlite"
+merchant:
+  # merchantd, configured in merchant.yaml beside this file: it holds the
+  # money and supplies the vouchers this node funds its channels with.
+  socket: "/usr/local/var/run/merchantd.sock"
 
 buying:
   # How much this node wants from every peer, in bytes per second, whether or

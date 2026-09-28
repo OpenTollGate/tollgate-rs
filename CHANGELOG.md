@@ -12,6 +12,20 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 ### Added
 
+- `merchantd`: the node's commercial side, reading `merchant.yaml`. It holds
+  the wallet — `tollgated` no longer holds any money or vouchers — and funds
+  `tollgated`'s channels over a local socket (`fund`), taking back anything of
+  value it hands over (`deposit`). It serves the market endpoints, pricing per
+  Mbit in `usd`, `eur` or `sat`, with a default price and an optional price per
+  accepted mint; a BTC rate is fetched from a fallback list of public APIs only
+  when a price and the payment are in different units, skipping zero answers
+  and keeping the last good rate when every source fails. What it sells is
+  issued at `mintd`'s private listener with the buyer's blinded outputs.
+  `merchanttop` shows and changes prices and tops the wallet up; `tolltop` is
+  peers only. `tollgate.yaml` loses its `market` and `wallet` sections and
+  gains `merchant.socket`. Not yet: `prefetch`, and buying from an upstream
+  that does not give its vouchers away.
+
 - `mintd`: the mint is its own daemon, reading `mint.yaml`, so `tollgated`
   holds none of its keys. It serves the standard Cashu API and nothing else,
   on a public listener for peers and wallets and a private one, on loopback,

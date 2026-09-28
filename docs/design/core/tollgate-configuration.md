@@ -211,15 +211,17 @@ it hands the proceeds of channels settled in mints it **keeps**
 
 ```yaml
 merchant:
-  socket: "/run/tollgate/merchantd.sock"   # local socket merchantd serves
+  socket: "/run/merchantd.sock"   # local socket merchantd serves
   prefetch: 0                              # next channel fundings held per paid upstream; 0 = fetch on demand
 ```
+
+Not implemented yet: `prefetch` — every funding is fetched on demand.
 
 ### Defaults
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `socket` | *(platform state dir)* | Where `merchantd` listens. Absent `merchantd`, this node cannot fund channels to paid upstreams |
+| `socket` | `merchantd.sock` in the temp directory | Where `merchantd` listens. Absent `merchantd`, this node cannot fund channels to paid upstreams |
 | `prefetch` | `0` | Fetch funding when a channel opens or rolls over. Counted per upstream peer, each sized to that peer's next channel capacity — upstreams differ in mint and capacity, so no single amount fits. Raise it only if measured round trips come near the rollover safety margin. Per-peer override in `peers` |
 
 ---
@@ -298,16 +300,15 @@ cannot sell or buy.
 
 ```yaml
 listen: "0.0.0.0:3340"                  # HTTP: the market endpoints
-socket: "/run/tollgate/merchantd.sock"  # fund / deposit, for tollgated only
-control: "/run/tollgate/merchantd-control.sock"   # prices and accepts at runtime
-
-market:
-  enabled: false                        # serve the market endpoints at all
-  path: "/tollgate/market/v1"           # prefix on `listen`, or an external URL to
-                                        #   delegate to a third-party market
+socket: "/run/merchantd.sock"           # fund / deposit, for tollgated only
+control: "/run/merchantd-control.sock"  # what merchanttop reads and changes
+market: true                            # serve the market endpoints at all
 
 mint:
-  private: "http://127.0.0.1:3337"      # where this node's vouchers are issued
+  url: "http://192.168.1.1:3338"        # this node's mint, as buyers reach it
+  private: "http://127.0.0.1:3337"      # where what is sold gets issued
+  unit: "byte"
+  max_amount: 17179869184               # the most one sale may be for
 
 price:                                  # default, for accepts entries without their own
   unit: "usd"                           # usd, eur or sat
@@ -333,10 +334,11 @@ accepts:                                # tokens we swap for our own vouchers
   - mint: "https://usd-mint.example.com"
     unit: "usd"                                  # no price: the default applies
 
-cross_mint_swap: false                  # trade one mint's vouchers for another's
-
 wallet:
-  file: "/var/lib/tollgate/merchant-wallet.sqlite"
+  file: "/etc/tollgate/wallet.sqlite"   # bearer tokens: the file *is* the money
+  seed_file: "/etc/tollgate/wallet.seed"   # its own secret, created on first start
+  mint: "https://mint.minibits.cash/Bitcoin"   # where it is topped up over Lightning
+  unit: "sat"
 ```
 
 **Price** is per Mbit — one quantity to reason about — in `usd`, `eur` or
@@ -379,10 +381,9 @@ the rate moved — is refused and retried by the buyer
 ([market-protocol.md](../market/market-protocol.md)). A price change takes
 effect on the next swap.
 
-`market.path` may be an external URL, in which case this node advertises
-somebody else's market rather than running one. A node can offer swaps
-without being a market maker, and a market maker can operate without
-forwarding a byte. The design assumes a local market: only traffic to this
+A node can also leave its market to somebody else's `merchantd` rather than
+running one, and a market maker can operate without forwarding a byte. The
+design assumes a local market: only traffic to this
 node's own daemons passes the gate unpaid, so a delegated market is the
 operator's to make reachable for peers that cannot yet pay. Letting a named
 external market through the gate is a possible later option.
@@ -392,19 +393,25 @@ external market through the gate is a possible later option.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `listen` | `"0.0.0.0:3340"` | Where the market endpoints are served over HTTP. Not 3339, which the speedtest uses |
-| `socket` | *(platform state dir)* | Local socket for `fund` and `deposit`. Must match `merchant.socket` in `tollgate.yaml`; only `tollgated` should be able to open it |
-| `control` | *(platform state dir)* | Local control socket: price, rate sources and `accepts` changed at runtime |
-| `market.enabled` | `false` | Off by default; a node without a market still delivers and gets paid |
-| `market.path` | `"/tollgate/market/v1"` | Local prefix, or an external URL to delegate to |
+| `socket` | `merchantd.sock` in the temp directory | Local socket for `fund` and `deposit`. Must match `merchant.socket` in `tollgate.yaml`; only `tollgated` should be able to open it |
+| `control` | `merchantd-control.sock` in the temp directory | Local control socket `merchanttop` reads: prices and the wallet, changed at runtime |
+| `market` | `true` | Serve the market endpoints. With no price or no `accepts`, nothing is sold anyway |
+| `mint.url` | `"http://127.0.0.1:3338"` | This node's mint, as buyers reach it: what their vouchers are issued by |
 | `mint.private` | `"http://127.0.0.1:3337"` | `mintd`'s private listener |
+| `mint.unit` | `"byte"` | The unit this node's vouchers denominate in |
+| `mint.max_amount` | `17179869184` | The most one sale may be for |
 | `price.unit` | `"usd"` | `usd`, `eur` or `sat`. Decides whether a rate is needed at all |
 | `price.per_mbit` | *(required unless every entry has its own)* | Default price. An entry with neither its own price nor a default is not sold against |
 | `accepts[].price` | *(none: `price` applies)* | This issuer's own price, `unit` and `per_mbit` |
 | `rates.sources` | the four above | Public, keyless APIs, templated per currency; replace or reorder freely. Unused unless price and payment units differ |
 | `rates.refresh_seconds` | `300` | How often the rate is fetched |
 | `accepts` | `[]` | Empty means nothing is sold |
-| `cross_mint_swap` | `false` | No atomic implementation exists yet |
-| `wallet.file` | *(platform state dir)* | Bearer tokens: the file *is* the balance |
+| `wallet.file` | `wallet.sqlite` in the state directory | Bearer tokens: the file *is* the balance |
+| `wallet.seed_file` | `wallet.seed` in the state directory, created on first start | The wallet's own secret |
+| `wallet.mint`, `wallet.unit` | minibits, `sat` | Where the wallet is topped up over Lightning, from `merchanttop` |
+
+Trading one mint's vouchers for another's is not offered: there is no atomic
+cross-mint swap to build it on.
 
 ---
 
@@ -541,7 +548,7 @@ mint:
   unit: "byte"
 
 merchant:
-  socket: "/run/tollgate/merchantd.sock"
+  socket: "/run/merchantd.sock"
 
 vouchers:
   accepted_mints:

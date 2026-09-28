@@ -1,17 +1,14 @@
-//! What the node will tell a local tool about itself, and the one thing it
-//! will take instructions about.
+//! What the node will tell a local tool about itself.
 //!
 //! A Unix socket serving a JSON snapshot, one per connection. The node
 //! republishes the snapshot on every tick and the socket hands out whatever is
 //! current, so a reader never blocks the event loop and the loop never waits on
 //! a reader.
 //!
-//! A caller that says nothing gets the snapshot, which is what every reader
-//! did before there was anything to say. A caller that sends a line of JSON
-//! first gets an answer to it instead — see [`Request`]. The only thing that
-//! can be changed this way is the market price: it is the one number an
-//! operator has a reason to move while the node runs, and moving it does not
-//! touch a session, a grant or a channel.
+//! A caller that says nothing gets the snapshot. A caller that sends a line of
+//! JSON first gets an answer to it instead — see [`Request`]. Prices and money
+//! are not here: they are `merchantd`'s ([`crate::merchant`]), and this node
+//! holds neither.
 //!
 //! Local-only by construction: a Unix socket has no port to expose, and
 //! nothing here is reachable by a peer.
@@ -29,8 +26,6 @@ use tollgate_core::session::{Phase, Sessions};
 use tracing::debug;
 
 use crate::adapter::ResourceAdapter;
-use crate::market::{Accepted, Prices};
-use crate::wallet::{Holding, TopUp, Wallet};
 
 /// Where a control socket might live, best first.
 ///
@@ -130,23 +125,6 @@ pub struct Snapshot {
     pub uptime_ms: u64,
     /// One entry per peer, ordered by key so the display does not jump around.
     pub peers: Vec<PeerSnapshot>,
-    /// What this node takes as payment, and at what price.
-    ///
-    /// Filled in where the snapshot is served rather than where it is built:
-    /// prices belong to the market, and the node's own state machine has no
-    /// opinion about money. A reader wants both in one answer all the same.
-    #[serde(default)]
-    pub accepts: Vec<Accepted>,
-    /// What it is holding, money first.
-    #[serde(default)]
-    pub holdings: Vec<Holding>,
-    /// Where this node buys the money it pays with, if it buys at all.
-    ///
-    /// Held separately from `holdings` because a node that has spent its
-    /// balance to nothing still has a mint it buys at — and that is exactly
-    /// when somebody wants to top it up.
-    #[serde(default)]
-    pub money_mint: Option<Accepted>,
 }
 
 /// One peering, from this node's side.
@@ -284,12 +262,6 @@ pub fn snapshot(
         unit: policy.unit.clone(),
         mint_url: mint_url.into(),
         uptime_ms,
-        // Filled in when the snapshot is served: what the node charges and what
-        // it holds are the market's business and the wallet's, not the session
-        // layer's.
-        accepts: Vec::new(),
-        holdings: Vec::new(),
-        money_mint: None,
         peers,
     }
 }
@@ -316,57 +288,6 @@ pub enum Request {
     /// Everything the node is doing. The same thing a caller gets by saying
     /// nothing at all.
     Snapshot,
-    /// What the node takes as payment, and at what price.
-    ShowPrices,
-    /// Change what one issuer's paper buys here.
-    ///
-    /// Per issuer, because that is what a price is about: paper from a mint an
-    /// operator has stopped trusting is worth less, and zero stops taking it.
-    SetPrice {
-        /// The mint whose paper this is about.
-        mint: String,
-        /// Its unit. Defaults to `sat`, as everywhere else.
-        #[serde(default = "default_unit")]
-        unit: String,
-        /// Units of capacity one unit of that paper buys. Zero refuses it.
-        bytes_per_unit: u64,
-    },
-    /// What this node is holding.
-    ShowWallet,
-    /// Claim any top-up that has been paid for but not collected.
-    ///
-    /// The node collects a top-up by itself while it is waiting on one, so this
-    /// is for when that went wrong: the node restarted mid-wait, or the mint
-    /// was refusing the status polls long enough for the waiter to give up. The
-    /// quote is in the wallet's database either way.
-    Claim {
-        /// Which mint to claim at. Defaults to this node's money mint.
-        #[serde(default)]
-        mint: Option<String>,
-        /// In what. Defaults to `sat`.
-        #[serde(default = "default_unit")]
-        unit: String,
-    },
-    /// Buy money, and hand back the invoice that pays for it.
-    ///
-    /// The node claims what it bought as soon as the invoice is paid, so the
-    /// caller's job is to pay it and watch the balance — there is nothing to
-    /// confirm afterwards.
-    TopUp {
-        /// How much to buy.
-        amount: u64,
-        /// Where to buy it. Defaults to the mint this node already holds its
-        /// money at, which is the answer nearly every time.
-        #[serde(default)]
-        mint: Option<String>,
-        /// In what. Defaults to `sat`.
-        #[serde(default = "default_unit")]
-        unit: String,
-    },
-}
-
-fn default_unit() -> String {
-    "sat".into()
 }
 
 /// What came back.
@@ -393,9 +314,6 @@ pub enum Response {
 pub async fn serve(
     path: &Path,
     published: Published,
-    prices: Prices,
-    wallet: Wallet,
-    money: Option<crate::channel::Money>,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> Result<()> {
     // A socket left behind by a previous run would make bind fail. Removing it
@@ -416,11 +334,8 @@ pub async fn serve(
                     }
                 };
                 let published = Arc::clone(&published);
-                let prices = prices.clone();
-                let wallet = wallet.clone();
-                let money = money.clone();
                 tokio::spawn(async move {
-                    let _ = answer(stream, published, prices, wallet, money).await;
+                    let _ = answer(stream, published).await;
                 });
             }
             _ = &mut shutdown => break,
@@ -436,13 +351,7 @@ pub async fn serve(
 /// The request is optional: a caller that closes its writing half without
 /// sending anything is asking for the snapshot, which is what every reader of
 /// this socket did before it could be asked anything else.
-async fn answer(
-    stream: tokio::net::UnixStream,
-    published: Published,
-    prices: Prices,
-    wallet: Wallet,
-    money: Option<crate::channel::Money>,
-) -> Result<()> {
+async fn answer(stream: tokio::net::UnixStream, published: Published) -> Result<()> {
     let (rx, mut tx) = stream.into_split();
     let mut line = String::new();
 
@@ -456,12 +365,12 @@ async fn answer(
 
     let response = match line.trim() {
         "" => Response::Ok {
-            data: serde_json::to_value(
-                current(&published, &prices, &wallet, money.as_ref()).await,
-            )?,
+            data: serde_json::to_value(&**published.load())?,
         },
         text => match serde_json::from_str::<Request>(text) {
-            Ok(request) => run(request, &published, &prices, &wallet, money.as_ref()).await,
+            Ok(Request::Snapshot) => Response::Ok {
+                data: serde_json::to_value(&**published.load())?,
+            },
             Err(e) => Response::Error {
                 message: format!("not a request this node understands: {e}"),
             },
@@ -481,185 +390,6 @@ async fn answer(
     Ok(())
 }
 
-async fn run(
-    request: Request,
-    published: &Published,
-    prices: &Prices,
-    wallet: &Wallet,
-    money: Option<&crate::channel::Money>,
-) -> Response {
-    match request {
-        Request::ShowWallet => match serde_json::to_value(wallet.balances().await) {
-            Ok(data) => Response::Ok {
-                data: serde_json::json!({ "holdings": data }),
-            },
-            Err(e) => Response::Error {
-                message: e.to_string(),
-            },
-        },
-        Request::TopUp { amount, mint, unit } => {
-            // Defaulting to the node's own money mint is the whole point: an
-            // operator topping up is topping up *their* wallet, and should not
-            // have to know a URL to do it.
-            let Some((mint, unit)) = mint
-                .map(|mint| (mint, unit.clone()))
-                .or_else(|| money.map(|m| (m.mint.clone(), m.unit.clone())))
-            else {
-                return Response::Error {
-                    message: "this node has no money mint configured; name one".into(),
-                };
-            };
-            top_up(wallet.clone(), mint, unit, amount).await
-        }
-        Request::Claim { mint, unit } => {
-            let Some((mint, unit)) = mint
-                .map(|mint| (mint, unit.clone()))
-                .or_else(|| money.map(|m| (m.mint.clone(), m.unit.clone())))
-            else {
-                return Response::Error {
-                    message: "this node has no money mint configured; name one".into(),
-                };
-            };
-            match wallet.claim_pending(&mint, &unit).await {
-                Ok(claimed) => Response::Ok {
-                    data: serde_json::json!({ "claimed": claimed, "unit": unit, "mint": mint }),
-                },
-                Err(e) => Response::Error {
-                    message: format!("{e:#}"),
-                },
-            }
-        }
-        Request::Snapshot => {
-            match serde_json::to_value(current(published, prices, wallet, money).await) {
-                Ok(data) => Response::Ok { data },
-                Err(e) => Response::Error {
-                    message: e.to_string(),
-                },
-            }
-        }
-        Request::ShowPrices => match serde_json::to_value(prices.listed()) {
-            Ok(data) => Response::Ok {
-                data: serde_json::json!({ "accepts": data }),
-            },
-            Err(e) => Response::Error {
-                message: e.to_string(),
-            },
-        },
-        Request::SetPrice {
-            mint,
-            unit,
-            bytes_per_unit,
-        } => {
-            prices.set(&mint, &unit, bytes_per_unit);
-            // Worth a line in the log: it changes what the node charges, and
-            // the next operator to read the logs will want to know when.
-            tracing::info!(%mint, %unit, bytes_per_unit, "a market price was changed");
-            match serde_json::to_value(prices.listed()) {
-                Ok(data) => Response::Ok {
-                    data: serde_json::json!({ "accepts": data }),
-                },
-                Err(e) => Response::Error {
-                    message: e.to_string(),
-                },
-            }
-        }
-    }
-}
-
-/// The published snapshot, with what the market and the wallet hold right now.
-async fn current(
-    published: &Published,
-    prices: &Prices,
-    wallet: &Wallet,
-    money: Option<&crate::channel::Money>,
-) -> Snapshot {
-    let mut snapshot = (**published.load()).clone();
-    snapshot.accepts = prices.listed();
-    snapshot.holdings = wallet.balances().await;
-    snapshot.money_mint = money.map(|m| Accepted {
-        mint: m.mint.clone(),
-        unit: m.unit.clone(),
-        // Not a price: this entry says where the node buys money, not what it
-        // sells capacity for. Zero rather than a number that would read as one.
-        bytes_per_unit: 0,
-    });
-    snapshot
-}
-
-/// Buy money, and collect it in the background once the invoice is paid.
-///
-/// The invoice comes back immediately because somebody has to pay it, and that
-/// somebody is a person with a Lightning wallet. Claiming what it bought is the
-/// node's job, so the caller has nothing to confirm: pay, and watch the
-/// balance.
-async fn top_up(wallet: Wallet, mint: String, unit: String, amount: u64) -> Response {
-    let top_up = match wallet.top_up(&mint, &unit, amount).await {
-        Ok(top_up) => top_up,
-        Err(e) => {
-            return Response::Error {
-                message: format!("{e:#}"),
-            };
-        }
-    };
-
-    tokio::spawn({
-        let wallet = wallet.clone();
-        let top_up: TopUp = top_up.clone();
-        async move {
-            // Backing off rather than asking once a second. A public mint is
-            // somebody else's server and several of them rate-limit hard: at
-            // one poll a second, 21mint started answering
-            // `{"detail":"Rate limit exceeded."}` to every status request,
-            // which the client cannot parse as a quote — so a top-up that had
-            // been *paid* was never collected, and the polling was the reason.
-            //
-            // A person paying an invoice takes tens of seconds anyway, so the
-            // early polls are the useless ones.
-            let mut wait = std::time::Duration::from_secs(2);
-            let deadline = std::time::Instant::now() + TOP_UP_WINDOW;
-            let mut last: Option<String> = None;
-
-            while std::time::Instant::now() < deadline {
-                tokio::time::sleep(wait).await;
-                wait = (wait * 2).min(std::time::Duration::from_secs(30));
-
-                match wallet.collect(&top_up).await {
-                    Ok(minted) => {
-                        tracing::info!(minted, unit = %top_up.unit, "top-up collected");
-                        return;
-                    }
-                    // Kept and reported once at the end rather than every time
-                    // round: "not paid yet" is the expected answer for most of
-                    // this loop, and a log line per poll would bury the one
-                    // that is not.
-                    Err(e) => last = Some(format!("{e:#}")),
-                }
-            }
-
-            tracing::warn!(
-                amount = top_up.amount,
-                unit = %top_up.unit,
-                quote = %top_up.quote,
-                last_error = last.unwrap_or_default(),
-                "gave up waiting for a top-up; if it was paid, claim it"
-            );
-        }
-    });
-
-    match serde_json::to_value(&top_up) {
-        Ok(data) => Response::Ok { data },
-        Err(e) => Response::Error {
-            message: e.to_string(),
-        },
-    }
-}
-
-/// How long to keep watching for a top-up: a person, a phone, an invoice.
-///
-/// Giving up is not losing the money — the quote stays in the wallet database
-/// and [`Request::Claim`] collects it whenever the mint will talk again.
-const TOP_UP_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
-
 /// Read one snapshot from a node's control socket.
 pub async fn fetch(path: &Path) -> Result<Snapshot> {
     let body = exchange(path, None).await?;
@@ -677,7 +407,7 @@ pub async fn send(path: &Path, request: &Request) -> Result<Response> {
 /// The writing half is closed either way, which is what tells a node that says
 /// nothing that nothing is coming: the server reads a line, and a half-closed
 /// socket ends that read rather than leaving both sides waiting on each other.
-async fn exchange(path: &Path, request: Option<String>) -> Result<String> {
+pub(crate) async fn exchange(path: &Path, request: Option<String>) -> Result<String> {
     use tokio::io::AsyncReadExt;
 
     let stream = tokio::net::UnixStream::connect(path)
@@ -704,26 +434,11 @@ async fn exchange(path: &Path, request: Option<String>) -> Result<String> {
 mod tests {
     use super::*;
 
-    const MINT: &str = "https://mint.example/Bitcoin";
-
-    fn priced(bytes_per_unit: u64) -> Prices {
-        Prices::new([Accepted {
-            mint: MINT.into(),
-            unit: "sat".into(),
-            bytes_per_unit,
-        }])
-    }
-
     /// Serve a socket in a temporary directory, and hand back the path.
-    async fn serving(prices: Prices) -> (PathBuf, tokio::task::JoinHandle<()>) {
-        let seed: u64 = prices
-            .listed()
-            .first()
-            .map(|a| a.bytes_per_unit)
-            .unwrap_or(0);
+    async fn serving(n: u64) -> (PathBuf, tokio::task::JoinHandle<()>) {
         let path = std::env::temp_dir().join(format!(
             "tollgate-control-test-{}.sock",
-            std::process::id() as u64 + seed
+            std::process::id() as u64 + n
         ));
         let published: Published = Arc::new(ArcSwap::from_pointee(Snapshot {
             pubkey: "02aa".into(),
@@ -731,23 +446,9 @@ mod tests {
             ..Snapshot::default()
         }));
 
-        // A wallet of its own per test, in the same temporary place, so nothing
-        // here touches a real balance.
-        let wallet = Wallet::open(path.with_extension("wallet"), [3u8; 64], "byte")
-            .await
-            .expect("open a wallet");
-
         let serve_path = path.clone();
         let task = tokio::spawn(async move {
-            let _ = serve(
-                &serve_path,
-                published,
-                prices,
-                wallet,
-                None,
-                std::future::pending::<()>(),
-            )
-            .await;
+            let _ = serve(&serve_path, published, std::future::pending::<()>()).await;
         });
 
         // Bound rather than fixed: binding a Unix socket is fast, but a loaded
@@ -795,79 +496,17 @@ mod tests {
     async fn a_caller_that_says_nothing_still_gets_the_snapshot() {
         // Every reader of this socket did exactly this before it could be asked
         // anything, and they must not have to change.
-        let (path, task) = serving(priced(1_000_000)).await;
+        let (path, task) = serving(1).await;
 
         let snapshot = fetch(&path).await.expect("fetch");
         assert_eq!(snapshot.pubkey, "02aa");
-        assert_eq!(
-            snapshot.accepts.first().map(|a| a.bytes_per_unit),
-            Some(1_000_000),
-            "the price list is served alongside what the node is doing"
-        );
-
-        task.abort();
-    }
-
-    #[tokio::test]
-    async fn the_price_can_be_changed_through_the_socket() {
-        let prices = priced(2_000_000);
-        let (path, task) = serving(prices.clone()).await;
-
-        let answer = send(
-            &path,
-            &Request::SetPrice {
-                mint: MINT.into(),
-                unit: "sat".into(),
-                bytes_per_unit: 500_000,
-            },
-        )
-        .await
-        .expect("set the price");
-        assert!(matches!(answer, Response::Ok { .. }));
-
-        // The market holds the same list, not a copy of it: what the socket
-        // changed is what the next swap is priced against.
-        assert_eq!(prices.bytes_per_unit(MINT, "sat"), Some(500_000));
-        assert_eq!(
-            fetch(&path)
-                .await
-                .expect("fetch")
-                .accepts
-                .first()
-                .map(|a| a.bytes_per_unit),
-            Some(500_000)
-        );
-
-        task.abort();
-    }
-
-    #[tokio::test]
-    async fn an_issuer_can_be_refused_through_the_socket() {
-        // Zero is how an operator stops taking a mint's paper — the entry goes
-        // away rather than becoming a very expensive one.
-        let prices = priced(4_000_000);
-        let (path, task) = serving(prices.clone()).await;
-
-        send(
-            &path,
-            &Request::SetPrice {
-                mint: MINT.into(),
-                unit: "sat".into(),
-                bytes_per_unit: 0,
-            },
-        )
-        .await
-        .expect("refuse the issuer");
-
-        assert!(!prices.is_selling());
-        assert!(fetch(&path).await.expect("fetch").accepts.is_empty());
 
         task.abort();
     }
 
     #[tokio::test]
     async fn a_request_that_makes_no_sense_is_refused_rather_than_guessed_at() {
-        let (path, task) = serving(priced(3_000_000)).await;
+        let (path, task) = serving(2).await;
 
         let body = exchange(&path, Some("{\"command\":\"drop_everything\"}".into()))
             .await

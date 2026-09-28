@@ -185,20 +185,33 @@ pub fn default_seed_path() -> PathBuf {
 /// other. Losing it retires every voucher outstanding, since the keyset cannot
 /// be rebuilt without it.
 pub fn load_or_create_seed(path: &std::path::Path) -> Result<Vec<u8>> {
+    load_or_create_secret(path, 32)
+}
+
+/// Read a hex secret of `len` bytes from `path`, creating it on first use,
+/// readable by its owner alone.
+pub fn load_or_create_secret(path: &std::path::Path, len: usize) -> Result<Vec<u8>> {
     if let Ok(text) = std::fs::read_to_string(path) {
-        return hex::decode(text.trim())
-            .with_context(|| format!("the mint seed at {} is not hex", path.display()));
+        let secret = hex::decode(text.trim())
+            .with_context(|| format!("the secret at {} is not hex", path.display()))?;
+        anyhow::ensure!(
+            secret.len() == len,
+            "the secret at {} is {} bytes, not {len}",
+            path.display(),
+            secret.len()
+        );
+        return Ok(secret);
     }
     if let Some(dir) = path.parent()
         && !dir.as_os_str().is_empty()
     {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
-    let seed: [u8; 32] = secp256k1::rand::random();
-    write_secret(path, &hex::encode(seed))
-        .with_context(|| format!("write a new mint seed to {}", path.display()))?;
-    tracing::info!(path = %path.display(), "created a new mint seed");
-    Ok(seed.to_vec())
+    let secret: Vec<u8> = (0..len).map(|_| secp256k1::rand::random::<u8>()).collect();
+    write_secret(path, &hex::encode(&secret))
+        .with_context(|| format!("write a new secret to {}", path.display()))?;
+    tracing::info!(path = %path.display(), "created a new secret");
+    Ok(secret)
 }
 
 #[cfg(unix)]

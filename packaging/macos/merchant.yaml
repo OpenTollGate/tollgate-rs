@@ -1,0 +1,25 @@
+# merchantd: this node's commercial side. Holds the money and buys what
+# tollgated needs to pay its upstream. Watch it with `merchanttop`.
+
+listen: "127.0.0.1:3340"
+socket: "/usr/local/var/run/merchantd.sock"
+control: "/usr/local/var/run/merchantd-control.sock"
+
+mint:
+  url: "http://127.0.0.1:3338"
+  private: "http://127.0.0.1:3337"
+  unit: "byte"
+
+# Nothing is sold until a price and at least one accepted mint are set, e.g.:
+#
+# price: { unit: sat, per_mbit: 0.007 }
+# accepts:
+#   - { mint: "https://mint.minibits.cash/Bitcoin", unit: sat }
+
+wallet:
+  # Bearer tokens: this file *is* the money.
+  file: "/usr/local/var/lib/tollgate/wallet.sqlite"
+  seed_file: "/usr/local/var/lib/tollgate/wallet.seed"
+  # Where the wallet is topped up over Lightning, from merchanttop.
+  mint: "https://mint.minibits.cash/Bitcoin"
+  unit: sat

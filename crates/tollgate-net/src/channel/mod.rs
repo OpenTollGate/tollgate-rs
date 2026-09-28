@@ -25,7 +25,22 @@ mod local;
 mod spilman;
 
 pub use local::LocalChannels;
-pub use spilman::{Money, SpilmanChannels, SpilmanConfig};
+pub use spilman::{SpilmanChannels, SpilmanConfig};
+
+/// Where the vouchers that fund a channel come from.
+///
+/// `tollgated` holds no stock of vouchers: when a channel to a peer opens or
+/// rolls over, it asks for exactly what it needs, in the peer's mint, and locks
+/// it in as it arrives. On a node that is `merchantd`, over its local socket
+/// ([`crate::merchant::MerchantClient`]); `merchantd` may refuse a purchase it
+/// judges not worth making (`docs/design/core/tollgate-daemons.md`).
+///
+/// Synchronous for the same reason [`ChannelBackend`] is: the node calls it
+/// from a blocking thread.
+pub trait Funding: Send + Sync + std::fmt::Debug {
+    /// A token of exactly `amount` of `mint`'s paper, in `unit`.
+    fn vouchers(&self, mint: &str, unit: &str, amount: u64) -> Result<String>;
+}
 
 /// A channel we funded, ready to tell the peer about.
 #[derive(Debug, Clone, PartialEq, Eq)]

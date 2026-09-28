@@ -24,6 +24,14 @@ path = "src/bin/mintd.rs"
 name = "minttop"
 path = "src/bin/minttop.rs"
 
+[[bin]]
+name = "merchantd"
+path = "src/bin/merchantd.rs"
+
+[[bin]]
+name = "merchanttop"
+path = "src/bin/merchanttop.rs"
+
 [dependencies]
 tollgate-core.workspace = true
 tollgate-protocol.workspace = true
