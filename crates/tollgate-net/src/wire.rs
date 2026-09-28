@@ -166,6 +166,24 @@ async fn read_announce(stream: &mut TcpStream) -> Result<(PubKey, Vec<Message>, 
     }
 }
 
+/// How a node opens a control-plane connection, when not the plain way.
+///
+/// A proxy speaking for a device that runs no TollGate software connects from
+/// that device's address, so the peer gates the device rather than the proxy
+/// (see `tollgate-suite-wrt`'s `proxyd`). Anything else leaves it unset.
+#[derive(Clone)]
+pub struct Connector(pub std::sync::Arc<dyn Fn(String) -> Connecting + Send + Sync>);
+
+/// A connection being opened by a [`Connector`].
+pub type Connecting =
+    std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<TcpStream>> + Send>>;
+
+impl std::fmt::Debug for Connector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Connector")
+    }
+}
+
 /// Open a control-plane connection to a peer whose identity we already know
 /// from configuration.
 pub async fn dial(
@@ -173,10 +191,13 @@ pub async fn dial(
     peer: PubKey,
     node: mpsc::Sender<Wire>,
     identify: Identify,
+    connector: Option<&Connector>,
 ) -> Result<()> {
-    let stream = TcpStream::connect(addr)
-        .await
-        .with_context(|| format!("dial {addr}"))?;
+    let stream = match connector {
+        Some(connect) => (connect.0)(addr.to_owned()).await,
+        None => TcpStream::connect(addr).await,
+    }
+    .with_context(|| format!("dial {addr}"))?;
     run(stream, peer, Vec::new(), FrameReader::new(), node, identify).await
 }
 

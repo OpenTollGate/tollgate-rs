@@ -81,6 +81,8 @@ pub struct NodeConfig {
     pub channel_ttl_seconds: u64,
     /// Peers to dial. Anyone else has to dial us.
     pub peers: Vec<PeerConfig>,
+    /// How to open a connection to a peer, if not the plain way.
+    pub connector: Option<wire::Connector>,
 }
 
 impl NodeConfig {
@@ -220,7 +222,12 @@ impl Node {
         tokio::spawn(wire::listen(control, wire_tx.clone(), config.identify));
 
         for peer in &config.peers {
-            spawn_dialer(peer.clone(), wire_tx.clone(), config.identify);
+            spawn_dialer(
+                peer.clone(),
+                wire_tx.clone(),
+                config.identify,
+                config.connector.clone(),
+            );
         }
 
         let mut ticker = tokio::time::interval(TICK);
@@ -575,13 +582,25 @@ fn log_refusal(peer: PubKey, reject: &TopUpReject, side: Side) {
 ///
 /// A peer with no endpoint is one that dials us; there is nothing to reach out
 /// to, and its policy is already in place for when it does.
-fn spawn_dialer(peer: PeerConfig, wire_tx: mpsc::Sender<Wire>, identify: Identify) {
+fn spawn_dialer(
+    peer: PeerConfig,
+    wire_tx: mpsc::Sender<Wire>,
+    identify: Identify,
+    connector: Option<wire::Connector>,
+) {
     let Some(endpoint) = peer.endpoint.clone() else {
         return;
     };
     tokio::spawn(async move {
         loop {
-            if let Err(e) = wire::dial(&endpoint, peer.pubkey, wire_tx.clone(), identify).await {
+            let dialed = wire::dial(
+                &endpoint,
+                peer.pubkey,
+                wire_tx.clone(),
+                identify,
+                connector.as_ref(),
+            );
+            if let Err(e) = dialed.await {
                 debug!(%endpoint, error = %e, "control dial failed");
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
