@@ -39,7 +39,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow, bail};
 use cdk::amount::SplitTarget;
 use cdk::nuts::nut00::KnownMethod;
-use cdk::nuts::{CurrencyUnit, PaymentMethod, Token};
+use cdk::nuts::{CurrencyUnit, MintQuoteState, PaymentMethod, Token};
 use cdk::wallet::{ReceiveOptions, SendOptions, Wallet as CdkWallet};
 use cdk_common::database::WalletDatabase;
 use serde::{Deserialize, Serialize};
@@ -234,6 +234,67 @@ impl Wallet {
         Ok(token.to_string())
     }
 
+    /// Take a token in and hand its value back out as several tokens, none
+    /// worth more than `most`: one payment split into purchases a seller
+    /// takes one at a time.
+    ///
+    /// Returns the parts and what was left over. Only what the token itself
+    /// brought in is spent — the swap fees included — never anything else
+    /// held of that paper, and once the token is in nothing is an error: a
+    /// part already made is money, and is returned with the rest. What is
+    /// left over (fees rounding a part down, or a part the wallet could not
+    /// make) stays in the wallet.
+    pub async fn split(&self, token: &str, most: u64) -> Result<(Vec<String>, u64)> {
+        if most == 0 {
+            bail!("parts of nothing are not a split");
+        }
+        let held = self.deposit(token).await?;
+        let wallet = self.wallet_for(&held.mint, &held.unit).await?;
+        let mut left = held.amount;
+        let mut parts = Vec::new();
+        'parts: while left > 0 {
+            let mut want = left.min(most);
+            for _ in 0..4 {
+                let prepared = match wallet
+                    .prepare_send(want.into(), SendOptions::default())
+                    .await
+                {
+                    Ok(p) => p,
+                    // Short by a fee, usually: ask for a unit less.
+                    Err(e) if want > 1 => {
+                        debug!(want, error = %e, "a part did not fit; asking for less");
+                        want -= 1;
+                        continue;
+                    }
+                    Err(_) => break 'parts,
+                };
+                let fee: u64 = prepared.swap_fee().into();
+                if want.saturating_add(fee) > left {
+                    let _ = prepared.cancel().await;
+                    want = left.saturating_sub(fee);
+                    if want == 0 {
+                        break 'parts;
+                    }
+                    continue;
+                }
+                match prepared.confirm(None).await {
+                    Ok(part) => {
+                        parts.push(part.to_string());
+                        left -= want + fee;
+                        continue 'parts;
+                    }
+                    Err(e) => {
+                        debug!(want, error = %e, "could not make a part");
+                        break 'parts;
+                    }
+                }
+            }
+            break;
+        }
+        debug!(mint = %held.mint, unit = %held.unit, parts = parts.len(), left, "split");
+        Ok((parts, left))
+    }
+
     /// What is held, money first.
     ///
     /// Money before prepaid transit because a node short of money cannot buy
@@ -309,19 +370,46 @@ impl Wallet {
     /// Returns what was actually minted, which is not always what was asked
     /// for: a quote can be paid short, and the mint is the authority on what it
     /// received.
+    ///
+    /// The quote's state is asked first, and nothing is minted until it is
+    /// paid: cdk reserves a quote before it looks at the amount, and minting
+    /// an unpaid one fails in a way it treats as ambiguous, leaving the quote
+    /// reserved — every later attempt, paid or not, is then refused as
+    /// "already in use by another operation". A quote left that way by an
+    /// earlier run is released and tried once more.
     pub async fn collect(&self, top_up: &TopUp) -> Result<u64> {
         let wallet = self.wallet_for(&top_up.mint, &top_up.unit).await?;
-        let proofs = wallet
+        let claim = |e: cdk::Error| {
+            anyhow!(
+                "claim {} {} from {}: {e}",
+                top_up.amount,
+                top_up.unit,
+                top_up.mint
+            )
+        };
+        let state = wallet
+            .check_mint_quote_status(&top_up.quote)
+            .await
+            .map_err(claim)?
+            .state;
+        match state {
+            MintQuoteState::Paid => {}
+            MintQuoteState::Issued => bail!("quote {} was already claimed", top_up.quote),
+            _ => bail!("quote {} is not paid yet", top_up.quote),
+        }
+        let proofs = match wallet
             .mint(&top_up.quote, SplitTarget::default(), None)
             .await
-            .map_err(|e| {
-                anyhow!(
-                    "claim {} {} from {}: {e}",
-                    top_up.amount,
-                    top_up.unit,
-                    top_up.mint
-                )
-            })?;
+        {
+            Err(e) if e.to_string().contains("already in use") => {
+                self.recover(&top_up.mint, &top_up.unit).await?;
+                wallet
+                    .mint(&top_up.quote, SplitTarget::default(), None)
+                    .await
+                    .map_err(claim)?
+            }
+            other => other.map_err(claim)?,
+        };
 
         let minted: u64 = proofs
             .iter()

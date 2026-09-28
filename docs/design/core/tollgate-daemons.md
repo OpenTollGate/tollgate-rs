@@ -315,6 +315,23 @@ to issue, just as it is about to trust the node to deliver. What changes is
 that a failure between the two steps leaves a paid quote behind instead of
 nothing.
 
+**How big one sale may be.** `merchantd` sells no more at once than the
+lower of its own `mint.max_amount` and what `mintd` issues against one quote
+(its NUT-06 `nut04` bolt11 `max_amount`, read from the private listener), and
+publishes that as `max_amount` in `info`. The check is made **before** the
+payment is deposited, so a sale the mint would refuse costs the buyer nothing.
+A buyer whose payment buys more splits it into several sales under the limit
+(proxyd does, through `Wallet::split`). `mintd`'s `max_amount` is read at
+every start and overrides the copy of its info cdk keeps in the database.
+
+**When issuing fails after the payment was taken** — `mintd` down, or
+refusing — `merchantd` hands the payment back: it spends what cleared (less
+the paying mint's input fee) out of its wallet in the same paper, and answers
+`502` with `{"error", "refund": "<token>"}`. `market::buy` turns that into
+`market::Refunded`, and the buyer keeps the refund to try again with. Only if
+that spend fails too is the money left in `merchantd`'s wallet for the
+operator to return, and logged as such.
+
 ### Between tollgated and merchantd
 
 A private interface on a local socket. Two calls:

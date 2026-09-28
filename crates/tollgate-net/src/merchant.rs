@@ -109,7 +109,7 @@ impl Default for MintSection {
             url: "http://127.0.0.1:3338".into(),
             private: "http://127.0.0.1:3337".into(),
             unit: "byte".into(),
-            max_amount: 1 << 34,
+            max_amount: 1 << 40,
         }
     }
 }

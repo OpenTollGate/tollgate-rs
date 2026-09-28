@@ -178,6 +178,12 @@ pub struct Info {
     pub mint: String,
     /// What it takes as payment, and at what price.
     pub accepts: Vec<Accepted>,
+    /// The most one sale may be for, in `unit`: the lower of this market's
+    /// own ceiling and what the mint issues against one quote. A buyer paying
+    /// for more splits the payment into several sales. Absent from markets
+    /// older than it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_amount: Option<u64>,
 }
 
 /// Money in, blinded outputs to sign.
@@ -205,7 +211,13 @@ pub struct Issuer {
     /// The unit this node's vouchers denominate in.
     pub unit: String,
     http: reqwest::Client,
+    /// The mint's own ceiling on one quote, and when it was read.
+    limit: Arc<std::sync::Mutex<Option<(std::time::Instant, u64)>>>,
 }
+
+/// How long the mint's quote ceiling is trusted: it changes only when mintd
+/// restarts with a new `max_amount`.
+const LIMIT_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl Issuer {
     /// Issue at `url`, in `unit`.
@@ -217,7 +229,35 @@ impl Issuer {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("an HTTP client"),
+            limit: Arc::default(),
         }
+    }
+
+    /// The most the mint issues against one quote in this unit: NUT-06's
+    /// `nut04` `max_amount` for bolt11. `None` when the mint cannot be asked
+    /// or sets no ceiling.
+    pub async fn limit(&self) -> Option<u64> {
+        if let Some((at, max)) = *self.limit.lock().expect("not poisoned")
+            && at.elapsed() < LIMIT_TTL
+        {
+            return Some(max);
+        }
+        let info: serde_json::Value = self
+            .http
+            .get(format!("{}/v1/info", self.url))
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        let max = info["nuts"]["4"]["methods"]
+            .as_array()?
+            .iter()
+            .find(|m| m["method"] == "bolt11" && m["unit"] == self.unit.as_str())?["max_amount"]
+            .as_u64()?;
+        *self.limit.lock().expect("not poisoned") = Some((std::time::Instant::now(), max));
+        Some(max)
     }
 
     /// Have `outputs` signed: a NUT-04 quote for their total, paid on
@@ -231,18 +271,16 @@ impl Issuer {
             .iter()
             .map(|o| u64::from(o.amount))
             .fold(0, u64::saturating_add);
-        let quote: serde_json::Value = self
+        let response = self
             .http
             .post(format!("{}/v1/mint/quote/bolt11", self.url))
             .json(&serde_json::json!({ "amount": amount, "unit": self.unit }))
             .send()
             .await
-            .with_context(|| format!("reach the mint at {}", self.url))?
-            .error_for_status()
-            .context("ask the mint for a quote")?
-            .json()
+            .with_context(|| format!("reach the mint at {}", self.url))?;
+        let quote: serde_json::Value = mint_answer(response)
             .await
-            .context("read the mint's quote")?;
+            .with_context(|| format!("ask the mint for a quote of {amount} {}", self.unit))?;
         let quote = quote["quote"]
             .as_str()
             .ok_or_else(|| anyhow!("the mint's quote had no id: {quote}"))?
@@ -252,20 +290,36 @@ impl Issuer {
         struct Minted {
             signatures: Vec<BlindSignature>,
         }
-        let minted: Minted = self
+        let response = self
             .http
             .post(format!("{}/v1/mint/bolt11", self.url))
             .json(&serde_json::json!({ "quote": quote, "outputs": outputs }))
             .send()
             .await
-            .with_context(|| format!("reach the mint at {} to mint quote {quote}", self.url))?
-            .error_for_status()
-            .with_context(|| format!("mint against quote {quote}"))?
-            .json()
-            .await
-            .with_context(|| format!("read the signatures for quote {quote}"))?;
+            .with_context(|| format!("reach the mint at {} to mint quote {quote}", self.url))?;
+        let minted: Minted = serde_json::from_value(
+            mint_answer(response)
+                .await
+                .with_context(|| format!("mint against quote {quote}"))?,
+        )
+        .with_context(|| format!("read the signatures for quote {quote}"))?;
         Ok(minted.signatures)
     }
+}
+
+/// A mint's JSON answer, or its refusal in its own words: cdk says what was
+/// wrong in the body (`{"code", "detail"}`), which a bare status throws away.
+async fn mint_answer(response: reqwest::Response) -> Result<serde_json::Value> {
+    let status = response.status();
+    let text = response.text().await.context("read the mint's answer")?;
+    if !status.is_success() {
+        let detail = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v["detail"].as_str().map(str::to_owned))
+            .unwrap_or(text);
+        bail!("{status}: {detail}");
+    }
+    serde_json::from_str(&text).with_context(|| format!("not JSON: {text}"))
 }
 
 /// The market's state.
@@ -304,10 +358,26 @@ pub fn router(
         })
 }
 
-type Failure = (axum::http::StatusCode, String);
+type Failure = axum::response::Response;
 
+/// A refused swap: logged, since the buyer is often a daemon whose own log
+/// is the only other place the reason would show.
 fn bad_request(message: impl Into<String>) -> Failure {
-    (axum::http::StatusCode::BAD_REQUEST, message.into())
+    use axum::response::IntoResponse;
+    let message = message.into();
+    warn!(reason = %message, "refused a swap");
+    (axum::http::StatusCode::BAD_REQUEST, message).into_response()
+}
+
+impl Market {
+    /// The most one sale may be for: this market's own ceiling, and the
+    /// mint's on one quote, whichever is lower.
+    async fn max_sale(&self) -> u64 {
+        match self.issuer.limit().await {
+            Some(mint) => self.max_amount.min(mint),
+            None => self.max_amount,
+        }
+    }
 }
 
 async fn info(State(market): State<Market>) -> Json<Info> {
@@ -315,6 +385,7 @@ async fn info(State(market): State<Market>) -> Json<Info> {
         unit: market.unit.clone(),
         mint: market.mint_url.clone(),
         accepts: market.prices.listed(),
+        max_amount: Some(market.max_sale().await),
     })
 }
 
@@ -327,13 +398,20 @@ async fn swap(
     State(market): State<Market>,
     Json(request): Json<SwapRequest>,
 ) -> Result<Json<SwapResponse>, Failure> {
-    let token = Token::from_str(request.token.trim())
-        .map_err(|e| bad_request(format!("that is not a Cashu token: {e}")))?;
+    // Refusals are read by people, on a captive portal: in plain words, with
+    // the library's in the log.
+    let token = Token::from_str(request.token.trim()).map_err(|e| {
+        debug!(error = %e, "unreadable payment");
+        bad_request("that is not a voucher")
+    })?;
 
     let paid_mint = normalise(
         &token
             .mint_url()
-            .map_err(|e| bad_request(e.to_string()))?
+            .map_err(|e| {
+                debug!(error = %e, "payment without an issuer");
+                bad_request("that voucher names no issuer")
+            })?
             .to_string(),
     );
     let paid_unit = token
@@ -342,7 +420,10 @@ async fn swap(
         .unwrap_or_else(|| "sat".into());
     let paid: u64 = token
         .value()
-        .map_err(|e| bad_request(e.to_string()))?
+        .map_err(|e| {
+            debug!(error = %e, "payment without a value");
+            bad_request("that voucher looks damaged")
+        })?
         .into();
 
     let wanted: u64 = request
@@ -350,9 +431,12 @@ async fn swap(
         .iter()
         .map(|o| u64::from(o.amount))
         .fold(0, u64::saturating_add);
+    // Checked against the mint's ceiling as well as ours before the money is
+    // taken: a quote the mint refuses after the deposit leaves the buyer paid
+    // up with nothing to show for it.
     let bought = priced_purchase(
         &market.prices,
-        market.max_amount,
+        market.max_sale().await,
         &market.unit,
         (&paid_mint, &paid_unit, paid),
         wanted,
@@ -364,12 +448,18 @@ async fn swap(
     // spending them again while this request is in flight. It is also what
     // makes this payment rather than a receipt — a balance is what a node has
     // actually been paid.
-    let held = market
-        .wallet
-        .deposit(&request.token)
-        .await
-        .map_err(|e| bad_request(format!("that payment did not clear: {e:#}")))?;
+    let started = std::time::Instant::now();
+    let held = market.wallet.deposit(&request.token).await.map_err(|e| {
+        let e = format!("{e:#}");
+        warn!(error = %e, from = %paid_mint, "a payment did not clear");
+        bad_request(if e.to_ascii_lowercase().contains("spent") {
+            "that payment did not clear: already spent"
+        } else {
+            "that payment did not clear"
+        })
+    })?;
 
+    let cleared_ms = started.elapsed().as_millis();
     match market.issuer.issue(request.outputs).await {
         Ok(signatures) => {
             info!(
@@ -377,25 +467,101 @@ async fn swap(
                 unit = %paid_unit,
                 from = %paid_mint,
                 sold = bought,
+                cleared_ms,
+                issued_ms = started.elapsed().as_millis() - cleared_ms,
                 "sold capacity"
             );
             debug!(banked = held.amount, unit = %held.unit, "payment banked");
             Ok(Json(SwapResponse { signatures }))
         }
         Err(e) => {
-            // The money is already ours and the buyer has nothing. Loud,
-            // because it is the one outcome this design cannot make good
-            // automatically — and the reason a buyer is trusting the seller.
-            warn!(
-                paid,
-                unit = %paid_unit,
-                error = %format!("{e:#}"),
-                "took payment and could not issue against it"
-            );
-            Err(bad_request(e.to_string()))
+            // The money is already ours and the buyer has nothing: hand back
+            // what cleared, as a token in the same paper, beside the reason.
+            let reason = format!("{e:#}");
+            match refund(&market.wallet, &held.mint, &held.unit, held.amount).await {
+                Ok(token) => {
+                    warn!(
+                        paid,
+                        refunded = held.amount,
+                        unit = %paid_unit,
+                        error = %reason,
+                        "could not issue against a payment; refunded it"
+                    );
+                    Err(refused_with_refund(
+                        "the router could not issue the data just now",
+                        &token,
+                    ))
+                }
+                Err(why) => {
+                    // Loud, because nothing more can be done automatically:
+                    // the money is in the wallet and an operator has to
+                    // return it.
+                    warn!(
+                        paid,
+                        held = held.amount,
+                        unit = %paid_unit,
+                        from = %paid_mint,
+                        error = %reason,
+                        refund_error = %format!("{why:#}"),
+                        "took payment, could not issue against it, and could not refund it"
+                    );
+                    Err(bad_request(
+                        "the router took the payment and could not issue the data; \
+                         ask the operator for a refund",
+                    ))
+                }
+            }
         }
     }
 }
+
+/// `amount` of what was just deposited, back out as a token. The spend may
+/// cost the mint's input fee, which comes off the refund rather than out of
+/// anybody else's money: a unit at a time, a few times.
+async fn refund(wallet: &Wallet, mint: &str, unit: &str, amount: u64) -> Result<String> {
+    let mut last = anyhow!("nothing to refund");
+    for less in 0..4u64 {
+        let Some(give) = amount.checked_sub(less).filter(|g| *g > 0) else {
+            break;
+        };
+        match wallet.spend(mint, unit, give).await {
+            Ok(token) => return Ok(token),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// A sale refused after its payment was taken, with the payment handed back:
+/// `{"error", "refund"}`, which [`buy`] turns into [`Refunded`].
+fn refused_with_refund(reason: &str, token: &str) -> Failure {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::BAD_GATEWAY,
+        Json(serde_json::json!({ "error": reason, "refund": token })),
+    )
+        .into_response()
+}
+
+/// A purchase the market refused after taking the payment, and paid back.
+///
+/// `refund` is a token for what cleared, in the paper that was paid: the
+/// buyer's money, to keep or to try again with.
+#[derive(Debug, Clone)]
+pub struct Refunded {
+    /// Why nothing was sold.
+    pub reason: String,
+    /// The payment, returned.
+    pub refund: String,
+}
+
+impl std::fmt::Display for Refunded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (the payment was refunded)", self.reason)
+    }
+}
+
+impl std::error::Error for Refunded {}
 
 /// What a payment buys: `wanted`, if `paid` is exactly its price.
 ///
@@ -463,7 +629,10 @@ pub fn buy(
         })
         .to_string(),
     )
-    .map_err(|e| anyhow!("buy {amount} {unit} from {market_url}: {e}"))?;
+    .map_err(|e| match refund_in(&e) {
+        Some(refunded) => anyhow::Error::new(refunded),
+        None => anyhow!("buy {amount} {unit} from {market_url}: {e}"),
+    })?;
 
     let response: serde_json::Value = serde_json::from_str(&body).context("swap response")?;
     let signatures = response["signatures"]
@@ -476,6 +645,16 @@ pub fn buy(
 
     cdk_spilman::build_cashu_b_token(market_url, unit, &proofs)
         .map_err(|e| anyhow!("build a token: {e}"))
+}
+
+/// A refusal from [`http`] that carries the payment back.
+fn refund_in(error: &str) -> Option<Refunded> {
+    let body = &error[error.find('{')?..];
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    Some(Refunded {
+        reason: v["error"].as_str().unwrap_or("refused").to_owned(),
+        refund: v["refund"].as_str()?.to_owned(),
+    })
 }
 
 /// What a market takes as payment.

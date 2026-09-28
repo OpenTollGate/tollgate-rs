@@ -157,6 +157,28 @@ async fn more_than_one_quote_allows_is_asked_for_in_several() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_token_splits_into_parts_none_over_the_most_and_nothing_else_is_spent() {
+    let seller = seller(true, 1 << 30).await;
+    let (dir, other) = (TempDir::new(), TempDir::new());
+    let wallet = buyer_wallet(&dir, 3).await;
+    let payer = buyer_wallet(&other, 4).await;
+
+    // Something already held, which the split must leave alone.
+    wallet.issue(&seller.url, UNIT, 500).await.expect("held");
+    payer.issue(&seller.url, UNIT, 2_500).await.expect("money");
+    let token = payer.spend(&seller.url, UNIT, 2_500).await.expect("pay");
+
+    let (parts, left) = wallet.split(&token, 1_000).await.expect("split");
+    let mut worth = Vec::new();
+    for part in &parts {
+        worth.push(payer.deposit(part).await.expect("a good part").amount);
+    }
+    assert_eq!(worth, vec![1_000, 1_000, 500]);
+    assert_eq!(left, 0, "a mint without fees leaves nothing over");
+    assert_eq!(wallet.balance_of(&seller.url, UNIT).await, 500);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_mint_that_does_not_auto_accept_issues_nothing() {
     let seller = seller(false, 1 << 30).await;
     let dir = TempDir::new();
@@ -325,7 +347,9 @@ async fn a_sale_is_paid_into_the_wallet_and_issued_at_the_private_listener() {
             unit: UNIT.into(),
             seed: vec![11; 32],
             file: dir.path().join("mint.sqlite"),
-            max_amount: 1 << 30,
+            // Lower than the market's own ceiling: the mint's is the one a
+            // sale has to fit.
+            max_amount: 1 << 20,
         })
         .await
         .expect("build the seller's mint"),
@@ -432,4 +456,53 @@ async fn a_sale_is_paid_into_the_wallet_and_issued_at_the_private_listener() {
         1,
         "issued through the private listener, once"
     );
+
+    // The market publishes the mint's ceiling, the lower of the two.
+    let info = tokio::task::spawn_blocking(move || {
+        tollgate_net::market::info_of(&format!("http://{market}"))
+    })
+    .await
+    .expect("join")
+    .expect("info");
+    assert_eq!(info.max_amount, Some(1 << 20));
+
+    // A sale over the mint's ceiling is refused before the payment is taken.
+    let big = (1u64 << 20) + 2;
+    buyer
+        .issue(&money.url, UNIT, big / 2)
+        .await
+        .expect("get money");
+    let payment = buyer.spend(&money.url, UNIT, big / 2).await.expect("pay");
+    let outputs = PreMintSecrets::random(
+        id,
+        cashu::Amount::from(big),
+        &SplitTarget::None,
+        &denominations,
+    )
+    .expect("blind");
+    let refused = reqwest::Client::new()
+        .post(format!(
+            "http://{market}{}",
+            tollgate_net::market::SWAP_PATH
+        ))
+        .json(&serde_json::json!({
+            "token": payment,
+            "outputs": outputs.blinded_messages(),
+        }))
+        .send()
+        .await
+        .expect("reach the market");
+    assert_eq!(refused.status(), 400);
+    assert!(
+        refused
+            .text()
+            .await
+            .unwrap_or_default()
+            .contains("more capacity"),
+        "refused for its size"
+    );
+    buyer
+        .deposit(&payment)
+        .await
+        .expect("the refused payment was never taken");
 }
