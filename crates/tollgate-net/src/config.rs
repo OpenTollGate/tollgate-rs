@@ -545,6 +545,15 @@ pub struct PeerSection {
     pub endpoint: Option<String>,
 }
 
+/// Who chose a configuration's renewal lead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lead {
+    /// An operator, in a file: a thin one is probably a mistake.
+    Operator,
+    /// The code that wrote the configuration, deliberately.
+    Chosen,
+}
+
 impl File {
     /// Read a configuration file.
     pub fn load(path: &Path) -> Result<Self> {
@@ -555,6 +564,21 @@ impl File {
 
     /// Resolve into what the node actually runs on.
     pub fn resolve(&self) -> Result<NodeConfig> {
+        self.resolve_with(Lead::Operator)
+    }
+
+    /// Resolve a configuration whose renewal lead was chosen in code, knowing
+    /// it is thin, rather than written by an operator.
+    ///
+    /// The same checks, without the warning about a thin lead: it is there to
+    /// catch an operator's mistake, and [`crate::client::run`] picks one below
+    /// the safe minimum on purpose. Logged for every session it starts, it
+    /// would only teach operators to ignore it.
+    pub(crate) fn resolve_with_chosen_lead(&self) -> Result<NodeConfig> {
+        self.resolve_with(Lead::Chosen)
+    }
+
+    fn resolve_with(&self, lead: Lead) -> Result<NodeConfig> {
         let identity = match &self.identity.secret_key {
             Some(hex) => Identity::from_hex(hex)?,
             None => Identity::generate(),
@@ -627,7 +651,7 @@ impl File {
         // with a short lead, and on an idle link it is free. It is a trap for
         // anything carrying TCP, and the failure — a flow that stalls for
         // seconds after a gap of a tenth of one — does not look like its cause.
-        if buyer.lead_is_thin() {
+        if lead == Lead::Operator && buyer.lead_is_thin() {
             warn!(
                 renew_lead_ms = self.buying.renew_lead_ms,
                 window_ms = self.buying.window_ms,

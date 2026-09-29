@@ -12,6 +12,12 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 ### Added
 
+- A proxied session (`client::run`) buys 10 s grants and renews them 250 ms
+  before they run out, so 2.5% of each grant is forfeit to the renewal rather
+  than the 30% the defaults cost. The lead is below `MIN_SAFE_LEAD_MS` on
+  purpose, since the gateway is on the same machine, and such sessions do not
+  log the thin-lead warning. Other nodes keep the defaults.
+
 - A customer's IPv6 is gated, shaped and metered with its IPv4. The nftables
   adapter ties a customer on the link to its MAC (from the IPv4 neighbour
   table) and to the global and ULA IPv6 addresses the IPv6 neighbour table
