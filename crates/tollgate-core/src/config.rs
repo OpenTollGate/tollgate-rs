@@ -128,7 +128,7 @@ impl Default for NodePolicy {
             max_channel_capacity: 1 << 34,
             capacity_growth_pct: 200,
             safety_margin_floor_ms: 60_000,
-            stale_timeout_ms: 60_000,
+            stale_timeout_ms: Self::DEFAULT_STALE_TIMEOUT_MS,
             rollover_threshold_pct: 80,
         }
     }
@@ -163,6 +163,23 @@ impl NodePolicy {
     pub fn grown_capacity(&self, capacity: u64) -> u64 {
         let grown = (capacity as u128) * (self.capacity_growth_pct as u128) / 100;
         self.clamp_capacity(grown.min(u64::MAX as u128) as u64)
+    }
+
+    /// The stale timeout a node runs with unless told otherwise.
+    pub const DEFAULT_STALE_TIMEOUT_MS: u64 = 60_000;
+
+    /// How long we may send a peer nothing before we send a keepalive.
+    ///
+    /// A third of the stale timeout, so two can be lost before the peer gives
+    /// up on us. The peer's timeout is not advertised, so this assumes it is
+    /// the same as ours — as the safety margin assumes the same floor. With
+    /// ours switched off, the default's: the peer may still have one.
+    pub fn keepalive_interval_ms(&self) -> u64 {
+        let timeout = match self.stale_timeout_ms {
+            0 => Self::DEFAULT_STALE_TIMEOUT_MS,
+            ms => ms,
+        };
+        (timeout / 3).max(1)
     }
 
     /// How long before a channel's expiry the funder starts replacing it.

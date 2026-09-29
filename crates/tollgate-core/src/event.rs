@@ -61,9 +61,16 @@ pub enum Event {
 
     /// Our wallet finished funding the channel we pay this peer on, in response
     /// to [`Action::FundChannel`](crate::Action::FundChannel).
+    ///
+    /// If the request it answers has been superseded — another channel came
+    /// back first — core does not use it, and hands it back with
+    /// [`Action::ReclaimChannel`](crate::Action::ReclaimChannel).
     OutgoingChannelFunded {
         /// The peer we will pay on it.
         peer: PubKey,
+        /// The `request` of the [`Action::FundChannel`](crate::Action::FundChannel)
+        /// this answers, exactly as it was given.
+        request: u64,
         /// The channel.
         channel_id: ChannelId,
         /// Units it can carry before it must roll over.
@@ -77,6 +84,22 @@ pub enum Event {
         /// Opaque funding blob to put in the Accept, interpreted by whatever
         /// channel backend produced it.
         funding: Vec<u8>,
+    },
+
+    /// Our wallet could not fund the channel we asked for with
+    /// [`Action::FundChannel`](crate::Action::FundChannel).
+    ///
+    /// Clears the request, so a channel that is still wanted — the first one,
+    /// or a rollover still due — is asked for again on the next tick. A host
+    /// that never reports this still gets a retry, once
+    /// [`FUNDING_TIMEOUT_MS`](crate::buyer::FUNDING_TIMEOUT_MS) passes without
+    /// an answer.
+    OutgoingFundingFailed {
+        /// The peer the channel was for.
+        peer: PubKey,
+        /// The `request` of the [`Action::FundChannel`](crate::Action::FundChannel)
+        /// that failed, exactly as it was given.
+        request: u64,
     },
 
     /// Our wallet verified the funding a peer sent, in response to

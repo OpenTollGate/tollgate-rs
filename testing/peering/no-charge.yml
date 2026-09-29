@@ -1,13 +1,10 @@
-# Does buying continue across a channel boundary?
+# Is a payer that does not charge its provider back held past the stale
+# timeout, on one connection? The same gateway as docker-compose.yml; the
+# client does not charge it, and buys steadily.
 services:
-  # The money. A sat-denominated mint standing in for the likes of minibits:
-  # a node buys its paper here and pays a peer with it, because a peer sells
-  # capacity for money it can hold, not for its own vouchers.
   sat-mint:
     # Pinned: mintd's CLI and config format change between releases.
     image: cashubtc/mintd:0.18.1
-    # 0.18 keeps its configuration in the database: import the document into a
-    # fresh one, then start the mint from it.
     command:
       - sh
       - -c
@@ -26,11 +23,9 @@ services:
 
   client:
     image: tollgate-test:latest
-    command: ["-c", "/etc/tollgate/client.yaml", "--control-socket", "/run/tollgate.sock", "--demand", "2000000"]
-    # For the test to slow the client's funding down with tc; see test.sh.
-    cap_add: [NET_ADMIN]
+    command: ["-c", "/etc/tollgate/client.yaml", "--control-socket", "/run/tollgate.sock", "--demand", "1000000"]
     volumes:
-      - ./client.yaml:/etc/tollgate/client.yaml:ro
+      - ./client-no-charge.yaml:/etc/tollgate/client.yaml:ro
     environment:
       RUST_LOG: "${RUST_LOG:-tollgate_net=debug,info}"
     depends_on:

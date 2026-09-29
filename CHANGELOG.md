@@ -12,6 +12,23 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 ### Added
 
+- A quiet link is kept alive: a node that has sent a peer nothing for a third
+  of its stale timeout sends it the last Offer again, byte for byte, so a
+  payer its provider does not charge is no longer dropped every minute. An
+  unchanged Offer is a no-op on receipt, so older nodes count it without an
+  upgrade. A policy override is sent as a revised Offer when it is made
+  (`Sessions::set_peer_policy` takes `now` and returns actions). Funding
+  requests carry an id (`request` on `Action::FundChannel`,
+  `Event::OutgoingChannelFunded` and the new `Event::OutgoingFundingFailed`):
+  a rollover funds one replacement, the first channel back is taken, and a
+  late one is handed back as `Action::ReclaimChannel`, which `tollgated` only
+  logs for now. A payer with no channel toward its peer and no request out
+  asks for one on the next tick, so a failed first funding no longer leaves a
+  session connected and unpaid. The docker nodes wait for `mintd` and
+  `merchantd` before starting `tollgated`; `testing/peering` holds a
+  non-charging payer past the stale timeout, and `testing/rollover` checks one
+  replacement per rollover under a slow funder.
+
 - A proxied session (`client::run`) buys 10 s grants and renews them 250 ms
   before they run out, so 2.5% of each grant is forfeit to the renewal rather
   than the 30% the defaults cost. The lead is below `MIN_SAFE_LEAD_MS` on

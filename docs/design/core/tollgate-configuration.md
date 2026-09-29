@@ -465,7 +465,7 @@ channels:
 | `ttl_seconds` | `3600` | Lifetime of a channel this node funds (1 hour). As a receiver, this node refuses a channel expiring sooner than half its own TTL |
 | `rollover_threshold_pct` | `80` | Trigger rollover at 80% exhaustion |
 | `safety_margin_seconds` | `60` | The floor of the safety margin, which is `max(safety_margin_seconds, 2 × max_window_ms)` — see [Safety Margin](tollgate-payment-channels.md#safety-margin) |
-| `stale_timeout_seconds` | `60` | Session closed if the peer sends nothing for this long. Also how long a session that ended without a Disconnect is held, so a peer that reconnects can resume its channels; then its incoming channels are settled, as is any held channel that reaches its settle point first. `0` disables both: silence never closes a session, and a disconnect settles at once |
+| `stale_timeout_seconds` | `60` | Session closed if the peer sends nothing for this long. A node that has sent a peer nothing for a third of it sends that peer the Offer it last sent again, unchanged, as a keepalive (a third of 60 s when this is `0`), so a peer is only silent when it is gone — see Keepalive in [tollgate-protocol.md](tollgate-protocol.md#raw-tcp). Also how long a session that ended without a Disconnect is held, so a peer that reconnects can resume its channels; then its incoming channels are settled, as is any held channel that reaches its settle point first. `0` disables both: silence never closes a session, and a disconnect settles at once |
 
 Capacities must satisfy `0 < min_capacity ≤ initial_capacity ≤ max_capacity`, and `ttl_seconds` must be at least twice the safety margin, so a channel is never born inside its own margin.
 

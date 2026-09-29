@@ -17,7 +17,7 @@ use tollgate_protocol::{
 use super::*;
 use crate::access::AccessLevel;
 use crate::action::Action;
-use crate::buyer::BuyerPolicy;
+use crate::buyer::{BuyerPolicy, FUNDING_TIMEOUT_MS};
 use crate::config::{GrantPolicy, NodePolicy, PeerPolicy};
 use crate::event::Event;
 use crate::grant::MAX_VERIFICATION_FAILURES;
@@ -89,6 +89,18 @@ struct Node {
     /// How long a channel this node funds lives, or `None` for channels that
     /// never expire — which is what every test not about expiry wants.
     ttl_ms: Option<u64>,
+    /// Hold funding requests until the test answers them, rather than funding
+    /// at once — a real wallet takes a mint round trip, many ticks long.
+    defer_funding: bool,
+    /// Funding requests held under `defer_funding`, oldest first: the peer,
+    /// the request id and the capacity.
+    held_funding: VecDeque<(PubKey, u64, u64)>,
+    /// Channels core handed back unused, to reclaim through the refund path.
+    reclaimed: Vec<ChannelId>,
+    /// Offers this node sent each peer, opening one included.
+    offers_sent: BTreeMap<PubKey, usize>,
+    /// The last Offer this node sent each peer.
+    last_offer: BTreeMap<PubKey, tollgate_protocol::Offer>,
 }
 
 impl Node {
@@ -103,6 +115,31 @@ impl Node {
             settled: Vec::new(),
             settle_deadlines: BTreeMap::new(),
             ttl_ms: None,
+            defer_funding: false,
+            held_funding: VecDeque::new(),
+            reclaimed: Vec::new(),
+            offers_sent: BTreeMap::new(),
+            last_offer: BTreeMap::new(),
+        }
+    }
+
+    /// What the wallet reports once it has funded a channel toward `peer`. The
+    /// blob carries what the other side's wallet would read out of real
+    /// funding: the channel, its capacity and its expiry.
+    fn funding_done(&mut self, peer: PubKey, request: u64, capacity: u64, now: Millis) -> Event {
+        self.next_channel = self.next_channel.wrapping_add(1);
+        let channel_id = ChannelId([self.next_channel; 32]);
+        let expires_at = self.ttl_ms.map(|ttl| now + ttl);
+        let mut funding = vec![self.next_channel];
+        funding.extend_from_slice(&capacity.to_be_bytes());
+        funding.extend_from_slice(&expires_at.map_or(0, |e| e.0).to_be_bytes());
+        Event::OutgoingChannelFunded {
+            peer,
+            request,
+            channel_id,
+            capacity,
+            expires_at,
+            funding,
         }
     }
 }
@@ -120,95 +157,106 @@ fn run(nodes: &mut [&mut Node], now: Millis, initial: impl IntoIterator<Item = (
             .iter_mut()
             .find(|n| n.id == to)
             .expect("event addressed to a node in the harness");
-        let from = node.id;
+        let actions = node.sessions.handle(event, now);
+        carry_out(node, actions, now, &mut queue);
+    }
+}
 
-        for action in node.sessions.handle(event, now) {
-            match action {
-                // The wire: what one node sends, the other receives.
-                Action::Send { peer, msg } => {
-                    queue.push_back((peer, Event::MessageReceived { peer: from, msg }))
+/// Carry out what one node asked for, queueing whatever it sets off.
+fn carry_out(
+    node: &mut Node,
+    actions: Vec<Action>,
+    now: Millis,
+    queue: &mut VecDeque<(PubKey, Event)>,
+) {
+    let from = node.id;
+    for action in actions {
+        match action {
+            // The wire: what one node sends, the other receives.
+            Action::Send { peer, msg } => {
+                if let Message::Offer(offer) = &msg {
+                    *node.offers_sent.entry(peer).or_default() += 1;
+                    node.last_offer.insert(peer, offer.clone());
                 }
-
-                // The wallet: funding always succeeds, instantly. The blob
-                // carries what the other side's wallet would read out of real
-                // funding: the channel, its capacity and its expiry.
-                Action::FundChannel { peer, capacity, .. } => {
-                    node.next_channel = node.next_channel.wrapping_add(1);
-                    node.funded.push(capacity);
-                    let channel_id = ChannelId([node.next_channel; 32]);
-                    let expires_at = node.ttl_ms.map(|ttl| now + ttl);
-                    let mut funding = vec![node.next_channel];
-                    funding.extend_from_slice(&capacity.to_be_bytes());
-                    funding.extend_from_slice(&expires_at.map_or(0, |e| e.0).to_be_bytes());
-                    queue.push_back((
-                        from,
-                        Event::OutgoingChannelFunded {
-                            peer,
-                            channel_id,
-                            capacity,
-                            expires_at,
-                            funding,
-                        },
-                    ));
-                }
-                Action::VerifyFunding { peer, funding } => {
-                    let number = |at: usize| {
-                        u64::from_be_bytes(funding[at..at + 8].try_into().expect("8 bytes"))
-                    };
-                    queue.push_back((
-                        from,
-                        Event::IncomingFundingVerified {
-                            peer,
-                            channel_id: ChannelId([funding[0]; 32]),
-                            capacity: number(1),
-                            expires_at: Some(Millis(number(9))).filter(|e| e.0 > 0),
-                            mint_url: node.sessions.node_policy().accepted_mints[0].clone(),
-                        },
-                    ))
-                }
-
-                // The signer: core decides what to sign, we produce bytes.
-                Action::SignAndSendTopUp {
-                    peer,
-                    ratchets,
-                    window_ms,
-                } => queue.push_back((
-                    peer,
-                    Event::MessageReceived {
-                        peer: from,
-                        msg: Message::TopUp(TopUp {
-                            updates: ratchets
-                                .into_iter()
-                                .map(|(channel_id, cumulative)| ChannelUpdate {
-                                    channel_id,
-                                    cumulative,
-                                    signature: Signature([0; 64]),
-                                })
-                                .collect(),
-                            window_ms,
-                        }),
-                    },
-                )),
-
-                // The resource adapter.
-                Action::SetShapingRate { peer, rate } => {
-                    node.shaping.insert(peer, rate);
-                }
-                Action::SetAccess { peer, access } => {
-                    node.access.insert(peer, access);
-                }
-
-                Action::SettleChannel {
-                    channel_id,
-                    expires_at,
-                    ..
-                } => {
-                    node.settled.push(channel_id);
-                    node.settle_deadlines.insert(channel_id, expires_at);
-                }
-                // The channel backend's record, which only settlement reads.
-                Action::RecordUpdates { .. } | Action::DropPeer { .. } => {}
+                queue.push_back((peer, Event::MessageReceived { peer: from, msg }))
             }
+
+            // The wallet: funding always succeeds, instantly, unless the
+            // test holds it to answer later.
+            Action::FundChannel {
+                peer,
+                request,
+                capacity,
+                ..
+            } => {
+                node.funded.push(capacity);
+                if node.defer_funding {
+                    node.held_funding.push_back((peer, request, capacity));
+                } else {
+                    let done = node.funding_done(peer, request, capacity, now);
+                    queue.push_back((from, done));
+                }
+            }
+            Action::VerifyFunding { peer, funding } => {
+                let number = |at: usize| {
+                    u64::from_be_bytes(funding[at..at + 8].try_into().expect("8 bytes"))
+                };
+                queue.push_back((
+                    from,
+                    Event::IncomingFundingVerified {
+                        peer,
+                        channel_id: ChannelId([funding[0]; 32]),
+                        capacity: number(1),
+                        expires_at: Some(Millis(number(9))).filter(|e| e.0 > 0),
+                        mint_url: node.sessions.node_policy().accepted_mints[0].clone(),
+                    },
+                ))
+            }
+
+            // The signer: core decides what to sign, we produce bytes.
+            Action::SignAndSendTopUp {
+                peer,
+                ratchets,
+                window_ms,
+            } => queue.push_back((
+                peer,
+                Event::MessageReceived {
+                    peer: from,
+                    msg: Message::TopUp(TopUp {
+                        updates: ratchets
+                            .into_iter()
+                            .map(|(channel_id, cumulative)| ChannelUpdate {
+                                channel_id,
+                                cumulative,
+                                signature: Signature([0; 64]),
+                            })
+                            .collect(),
+                        window_ms,
+                    }),
+                },
+            )),
+
+            // The resource adapter.
+            Action::SetShapingRate { peer, rate } => {
+                node.shaping.insert(peer, rate);
+            }
+            Action::SetAccess { peer, access } => {
+                node.access.insert(peer, access);
+            }
+
+            Action::SettleChannel {
+                channel_id,
+                expires_at,
+                ..
+            } => {
+                node.settled.push(channel_id);
+                node.settle_deadlines.insert(channel_id, expires_at);
+            }
+            Action::ReclaimChannel { channel_id, .. } => {
+                node.reclaimed.push(channel_id);
+            }
+            // The channel backend's record, which only settlement reads.
+            Action::RecordUpdates { .. } | Action::DropPeer { .. } => {}
         }
     }
 }
@@ -271,6 +319,27 @@ impl Link {
             (true, Event::PeerDisconnected { peer: b }),
             (false, Event::PeerDisconnected { peer: a }),
         ]);
+    }
+
+    /// An operator override on one node, made while the link runs, and
+    /// everything it sets off.
+    fn set_policy(&mut self, on_a: bool, peer: PubKey, policy: PeerPolicy) {
+        let now = self.now;
+        let node = if on_a { &mut self.a } else { &mut self.b };
+        let actions = node.sessions.set_peer_policy(peer, policy, now);
+        let mut queue = VecDeque::new();
+        carry_out(node, actions, now, &mut queue);
+        run(&mut [&mut self.a, &mut self.b], now, queue);
+    }
+
+    /// Advance the clock to `until` and tick both nodes a second at a time
+    /// on the way, as a host would — so neither side's stale timeout sees a
+    /// jump it would read as silence.
+    fn advance_to(&mut self, until: Millis) {
+        while self.now < until {
+            let step = until.saturating_since(self.now).min(1_000);
+            self.advance(step);
+        }
     }
 
     /// Advance the clock and tick both nodes.
@@ -897,6 +966,7 @@ fn a_peer_the_operator_does_not_charge_is_free_and_unmetered() {
             no_charge: true,
             ..PeerPolicy::default()
         },
+        link.now,
     );
     link.connect();
 
@@ -932,6 +1002,7 @@ fn an_offer_says_whether_the_sender_charges_that_peer() {
             no_charge: true,
             ..PeerPolicy::default()
         },
+        link.now,
     );
 
     assert!(opening_offer(&mut link.b, a).no_charge);
@@ -951,6 +1022,7 @@ fn a_peer_that_is_not_charged_funds_nothing_toward_the_node_that_said_so() {
             no_charge: true,
             ..PeerPolicy::default()
         },
+        link.now,
     );
     link.connect();
 
@@ -1000,8 +1072,8 @@ fn when_neither_side_charges_there_are_no_channels_and_no_topups() {
         no_charge: true,
         ..PeerPolicy::default()
     };
-    link.a.sessions.set_peer_policy(b, free);
-    link.b.sessions.set_peer_policy(a, free);
+    link.a.sessions.set_peer_policy(b, free, link.now);
+    link.b.sessions.set_peer_policy(a, free, link.now);
     link.connect();
 
     for (node, peer) in [(&link.a, b), (&link.b, a)] {
@@ -1041,6 +1113,7 @@ fn a_blocked_peer_is_dropped_without_a_session() {
             blocked: true,
             ..PeerPolicy::default()
         },
+        link.now,
     );
 
     let actions = link
@@ -1217,6 +1290,256 @@ fn a_peer_that_has_merely_stopped_paying_is_kept() {
 }
 
 #[test]
+fn a_payer_its_provider_never_answers_is_kept_alive_and_a_silent_one_still_dropped() {
+    // A payer that asked not to be charged — a proxy buying for a phone —
+    // hears nothing back from its provider after setup: TopUps are never
+    // answered, and the provider buys nothing from it. Silence is what the
+    // stale timeout reads as gone, so without a keepalive the payer dropped a
+    // healthy session every minute, and the grant it had just paid for with it.
+    const STALE_MS: u64 = 60_000;
+    let mut link = Link::with_grace(STALE_MS);
+    let (a, b) = (link.a.id, link.b.id);
+    link.a.sessions.set_peer_policy(
+        b,
+        PeerPolicy {
+            no_charge: true,
+            ..PeerPolicy::default()
+        },
+        link.now,
+    );
+    link.connect();
+    assert!(
+        link.b
+            .sessions
+            .peer(&a)
+            .expect("session")
+            .buyer
+            .active()
+            .is_none(),
+        "B buys nothing from A, so has nothing of its own to send"
+    );
+
+    // A buys steadily for more than three stale timeouts.
+    for _ in 0..200 {
+        link.deliver(
+            true,
+            Event::DemandObserved {
+                peer: b,
+                rate: 1_000_000,
+            },
+        );
+        link.advance(1_000);
+    }
+    assert!(link.now > Millis(3 * STALE_MS));
+    assert!(link.a.sessions.peer(&b).is_some(), "A still holds B");
+    assert!(link.a.sessions.parked(&b).is_none(), "and never dropped it");
+    assert_eq!(link.b.access.get(&a), Some(&AccessLevel::Active));
+
+    // What kept it alive: B's Offer again, every third of the timeout. A was
+    // topping up all along, so it never needed to.
+    assert_eq!(link.b.offers_sent[&a], 1 + 200 / 20, "opening + keepalives");
+    assert_eq!(link.a.offers_sent[&b], 1, "the opening Offer alone");
+
+    // B hangs — its process stops, its socket stays open. A keeps ticking and
+    // buying, and hears nothing at all.
+    let last_heard = link.a.sessions.peer(&b).expect("session").last_seen;
+    let mut dropped_at = None;
+    for _ in 0..STALE_MS / 1_000 + 2 {
+        link.now = link.now + 1_000;
+        let actions = link.a.sessions.handle(Event::Tick, link.now);
+        if actions
+            .iter()
+            .any(|x| matches!(x, Action::DropPeer { peer } if *peer == b))
+        {
+            dropped_at = Some(link.now);
+            break;
+        }
+    }
+    let dropped_at = dropped_at.expect("a silent peer is still dropped");
+    let silent_for = dropped_at.saturating_since(last_heard);
+    assert!(
+        silent_for > STALE_MS && silent_for <= STALE_MS + 1_000,
+        "dropped {silent_for} ms after it last spoke"
+    );
+    assert!(link.a.sessions.peer(&b).is_none());
+    assert!(
+        link.a.sessions.parked(&b).is_some(),
+        "held for a return, like any peer that fell silent"
+    );
+}
+
+#[test]
+fn an_opening_channel_that_fails_or_goes_unanswered_is_asked_for_again() {
+    // The first channel is asked for once, when the peer's Offer arrives.
+    // Before the keepalive, a failure there cost a reconnect: the payer sent
+    // nothing, the provider's stale timeout dropped it, and it dialled again
+    // and asked again. Now neither side ever goes quiet, so a payer whose
+    // opening funding failed stayed connected and unpaid for good — the
+    // mint not up yet at boot was enough. The tick asks again instead.
+    const STALE_MS: u64 = 60_000;
+    let mut link = Link::with_grace(STALE_MS);
+    let (a, b) = (link.a.id, link.b.id);
+    link.a.defer_funding = true;
+    link.connect();
+    assert_eq!(link.a.funded.len(), 1, "asked for when B's Offer arrived");
+    assert_eq!(link.b.access.get(&a), Some(&AccessLevel::None));
+
+    // The wallet fails. The channel is asked for again on the next tick, and
+    // only once while that request is out.
+    let (_, failed, _) = link.a.held_funding.pop_front().expect("held");
+    link.deliver(
+        true,
+        Event::OutgoingFundingFailed {
+            peer: b,
+            request: failed,
+        },
+    );
+    link.advance(100);
+    assert_eq!(link.a.funded.len(), 2, "asked again after the failure");
+    let asked = link.now;
+    for _ in 0..10 {
+        link.advance(100);
+    }
+    assert_eq!(link.a.funded.len(), 2);
+
+    // That one is never answered. It is given up on after the funding
+    // timeout, and the channel asked for once more.
+    link.advance_to(asked + FUNDING_TIMEOUT_MS - 1);
+    assert_eq!(link.a.funded.len(), 2, "not a moment before");
+    link.advance(1);
+    assert_eq!(link.a.funded.len(), 3, "then asked for again");
+    assert_eq!(link.b.access.get(&a), Some(&AccessLevel::None), "unpaid");
+
+    // Kept alive all along, so this is the only way out.
+    assert!(link.a.sessions.peer(&b).is_some() && link.b.sessions.peer(&a).is_some());
+
+    // The latest is answered. A announces it, B verifies it, and A pays.
+    let (_, unanswered, capacity) = link.a.held_funding.pop_front().expect("held");
+    let (_, latest, _) = link.a.held_funding.pop_front().expect("held");
+    let done = link.a.funding_done(b, latest, capacity, link.now);
+    link.deliver(true, done);
+    let opened = link
+        .a
+        .sessions
+        .peer(&b)
+        .expect("session")
+        .buyer
+        .active()
+        .map(|c| c.id);
+    assert!(opened.is_some(), "B confirmed it");
+    assert_eq!(link.b.access.get(&a), Some(&AccessLevel::Active));
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    assert_eq!(link.b_shapes_a(), 1_250_000, "service begins");
+
+    // The request given up on lands after all. The channel it opens is not
+    // wanted: it is handed back to be reclaimed, not sent as a second Accept.
+    let done = link.a.funding_done(b, unanswered, capacity, link.now);
+    let Event::OutgoingChannelFunded { channel_id, .. } = done else {
+        unreachable!()
+    };
+    link.deliver(true, done);
+    assert_eq!(link.a.reclaimed, vec![channel_id]);
+    assert_eq!(
+        link.a
+            .sessions
+            .peer(&b)
+            .expect("session")
+            .buyer
+            .active()
+            .map(|c| c.id),
+        opened
+    );
+    assert_eq!(
+        link.b
+            .sessions
+            .peer(&a)
+            .expect("session")
+            .grant
+            .channels()
+            .len(),
+        1
+    );
+
+    // And with a channel in use, the tick asks for nothing more.
+    for _ in 0..50 {
+        link.advance(100);
+    }
+    assert_eq!(link.a.funded.len(), 3);
+}
+
+#[test]
+fn an_override_reaches_the_peer_when_made_and_the_keepalive_changes_nothing() {
+    // The keepalive repeats the Offer last sent, byte for byte. Rebuilt from
+    // the policy in force instead, it carried an override out whenever the
+    // link happened to go quiet — and a payer told there that it is now
+    // charged had no channel and would never fund one. So an override is
+    // sent when it is made, and the payer funds on hearing it.
+    let mut link = Link::with_grace(60_000);
+    let (a, b) = (link.a.id, link.b.id);
+    let free = PeerPolicy {
+        no_charge: true,
+        ..PeerPolicy::default()
+    };
+    link.b.sessions.set_peer_policy(a, free, link.now);
+    link.connect();
+    let opening = link.b.last_offer[&a].clone();
+    assert!(opening.no_charge);
+    assert!(
+        link.a
+            .sessions
+            .peer(&b)
+            .expect("session")
+            .buyer
+            .active()
+            .is_none(),
+        "A has nothing to pay B for"
+    );
+
+    // Quiet: B keeps the link alive with exactly the Offer it opened with.
+    link.advance_to(Millis(25_000));
+    assert_eq!(link.b.offers_sent[&a], 2, "the opening and one keepalive");
+    assert_eq!(link.b.last_offer[&a], opening);
+
+    // B's operator starts charging A. The revision goes out at once, not
+    // with the next keepalive, and A funds a channel on hearing it.
+    link.set_policy(false, a, PeerPolicy::default());
+    assert_eq!(link.b.offers_sent[&a], 3, "the revision, once");
+    let revised = link.b.last_offer[&a].clone();
+    assert!(!revised.no_charge);
+    assert!(
+        link.a
+            .sessions
+            .peer(&b)
+            .expect("session")
+            .buyer
+            .active()
+            .is_some(),
+        "A pays B now"
+    );
+    assert_eq!(link.b.access.get(&a), Some(&AccessLevel::Active));
+
+    // The same override again changes nothing, so sends nothing.
+    link.set_policy(false, a, PeerPolicy::default());
+    assert_eq!(link.b.offers_sent[&a], 3);
+
+    // From here the keepalive repeats the revision.
+    link.advance_to(link.now + 25_000);
+    assert_eq!(link.b.offers_sent[&a], 4);
+    assert_eq!(link.b.last_offer[&a], revised);
+    assert_eq!(
+        link.b.sessions.peer(&a).expect("session").offer_sent,
+        Some(revised)
+    );
+    assert!(link.a.sessions.peer(&b).is_some() && link.b.sessions.peer(&a).is_some());
+}
+
+#[test]
 fn a_node_uploading_to_a_surcharging_peer_buys_for_the_surcharge_too() {
     // At m = 2 an uploaded unit draws the same as a downloaded one, so a node
     // that sized its purchase on download alone would be shaped for the
@@ -1317,6 +1640,7 @@ fn a_peer_with_an_overridden_multiplier_is_offered_it_and_buys_for_it() {
             received_multiplier: Some(2),
             ..PeerPolicy::default()
         },
+        link.now,
     );
     link.connect();
 
@@ -1751,6 +2075,191 @@ fn a_channel_that_fills_up_is_replaced_by_a_bigger_one_up_to_the_cap() {
         [1_000_000, 2_000_000, 3_000_000, 3_000_000],
         "doubling, clamped to max_channel_capacity"
     );
+}
+
+#[test]
+fn a_rollover_funds_one_replacement_however_long_the_wallet_takes() {
+    // Funding is a mint round trip, many ticks long. Marked as under way only
+    // once the channel came back, every tick in between funded another: three
+    // or four replacements per rollover, measured.
+    let small = NodePolicy {
+        initial_channel_capacity: 1_000_000,
+        max_channel_capacity: 1_000_000,
+        ..node_policy("https://a.example/mint")
+    };
+    let mut link = Link::new();
+    link.a = Node::new(pubkey(0xA1), small);
+    link.connect();
+    let b = link.b.id;
+    assert_eq!(link.a.funded.len(), 1);
+    link.a.defer_funding = true;
+
+    // The first purchase takes the channel to 80%, and a replacement is due.
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 320_000,
+        },
+    );
+    for _ in 0..50 {
+        link.advance(100);
+    }
+    assert_eq!(
+        link.a.funded.len(),
+        2,
+        "five seconds of ticks, one replacement asked for"
+    );
+
+    // The wallet fails. The rollover is still due, so it is asked for again,
+    // and again only once.
+    let (_, request, _) = link.a.held_funding.pop_back().expect("held");
+    link.a.held_funding.clear();
+    link.deliver(true, Event::OutgoingFundingFailed { peer: b, request });
+    link.advance(100);
+    assert_eq!(link.a.funded.len(), 3, "a failure frees it to try again");
+    let asked = link.now;
+    for _ in 0..10 {
+        link.advance(100);
+    }
+    assert_eq!(link.a.funded.len(), 3);
+
+    // An answer that never comes is given up on after the funding timeout.
+    link.advance(asked.0 + FUNDING_TIMEOUT_MS - 1 - link.now.0);
+    assert_eq!(link.a.funded.len(), 3, "not a moment before");
+    link.advance(1);
+    assert_eq!(link.a.funded.len(), 4, "then asked for again");
+
+    // The wallet answers, B confirms, and A holds its one replacement. Demand
+    // stops first, so nothing fills the replacement and makes the next one due.
+    link.deliver(true, Event::DemandObserved { peer: b, rate: 0 });
+    let (peer, request, capacity) = link.a.held_funding.pop_back().expect("held");
+    let done = link.a.funding_done(peer, request, capacity, link.now);
+    let Event::OutgoingChannelFunded { channel_id, .. } = done else {
+        unreachable!()
+    };
+    link.deliver(true, done);
+    let session = link.a.sessions.peer(&b).expect("session");
+    assert!(!session.buyer.awaiting_confirmation(), "B confirmed it");
+    // The first channel filled long ago, so it takes over at once.
+    assert_eq!(session.buyer.active().map(|c| c.id), Some(channel_id));
+    for _ in 0..50 {
+        link.advance(100);
+    }
+    assert_eq!(link.a.funded.len(), 4, "and asks for no other");
+}
+
+#[test]
+fn a_late_answer_to_a_request_given_up_on_is_taken_or_reclaimed_but_never_both() {
+    // A request given up on after the funding timeout is not cancelled — the
+    // wallet may still be working on it — so a slow one and the one asked for
+    // in its place can both come back. Taking both opened a second channel on
+    // top of the first and stranded one of them; the first back is taken,
+    // and the other is handed back to be reclaimed.
+    let small = NodePolicy {
+        initial_channel_capacity: 1_000_000,
+        max_channel_capacity: 1_000_000,
+        ..node_policy("https://a.example/mint")
+    };
+    let mut link = Link::new();
+    link.a = Node::new(pubkey(0xA1), small);
+    link.connect();
+    let b = link.b.id;
+    let a = link.a.id;
+    let opened = link
+        .a
+        .sessions
+        .peer(&b)
+        .expect("session")
+        .buyer
+        .active()
+        .map(|c| c.id);
+    link.a.defer_funding = true;
+
+    // A purchase takes the channel to 80%, and a replacement is asked for.
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 320_000,
+        },
+    );
+    link.deliver(true, Event::DemandObserved { peer: b, rate: 0 });
+    link.advance(100);
+    assert_eq!(link.a.held_funding.len(), 1);
+
+    // The wallet is slow. The request is given up on and asked again.
+    link.advance_to(link.now + FUNDING_TIMEOUT_MS);
+    assert_eq!(
+        link.a.held_funding.len(),
+        2,
+        "asked again after the timeout"
+    );
+    let (_, slow, capacity) = link.a.held_funding.pop_front().expect("held");
+    let (_, again, _) = link.a.held_funding.pop_front().expect("held");
+    assert!(again > slow, "a later request has the larger id");
+
+    // The slow one lands after all. It is taken: one replacement was wanted,
+    // and here it is.
+    let done = link.a.funding_done(b, slow, capacity, link.now);
+    let Event::OutgoingChannelFunded {
+        channel_id: taken, ..
+    } = done
+    else {
+        unreachable!()
+    };
+    link.deliver(true, done);
+    let session = link.a.sessions.peer(&b).expect("session");
+    assert_eq!(session.buyer.next_channel().map(|c| c.id), Some(taken));
+    assert_eq!(
+        session.buyer.active().map(|c| c.id),
+        opened,
+        "still draining the first"
+    );
+
+    // Then the one asked for in its place. Not a second replacement: B hears
+    // nothing of it, and A hands it back to be reclaimed.
+    let done = link.a.funding_done(b, again, capacity, link.now);
+    let Event::OutgoingChannelFunded {
+        channel_id: spare, ..
+    } = done
+    else {
+        unreachable!()
+    };
+    let actions = link.a.sessions.handle(done, link.now);
+    assert_eq!(
+        actions,
+        vec![Action::ReclaimChannel {
+            peer: b,
+            channel_id: spare,
+            capacity,
+            expires_at: None,
+        }],
+        "reclaimed, and nothing sent"
+    );
+    let session = link.a.sessions.peer(&b).expect("session");
+    assert_eq!(session.buyer.next_channel().map(|c| c.id), Some(taken));
+    assert_eq!(
+        link.b
+            .sessions
+            .peer(&a)
+            .expect("session")
+            .grant
+            .channels()
+            .len(),
+        2,
+        "B knows the channel in use and its one replacement"
+    );
+
+    // Nor does a late answer overwrite a replacement still awaiting the
+    // peer's confirmation. Here the peer has not confirmed yet, and the
+    // request is answered twice over.
+    let mut buyer = crate::buyer::Buyer::new();
+    buyer.funding_requested(1, Millis(0));
+    buyer.funding_requested(2, Millis(FUNDING_TIMEOUT_MS));
+    assert!(buyer.answers(1));
+    buyer.funded(ChannelId([1; 32]), 1, None);
+    assert!(!buyer.answers(2), "`pending` is never overwritten");
 }
 
 #[test]
@@ -2252,6 +2761,7 @@ fn a_peer_that_stops_charging_while_we_were_away_lets_the_resumed_channel_go() {
             no_charge: true,
             ..PeerPolicy::default()
         },
+        link.now,
     );
     link.connect();
 
