@@ -344,6 +344,52 @@ fn a_replacement_is_opened_at_the_threshold_and_only_once() {
 }
 
 #[test]
+fn a_replacement_is_quiet_from_the_moment_its_funding_is_asked_for() {
+    // Funding is a mint round trip, many ticks long. Marked only once the
+    // channel came back, every tick in between would ask for another.
+    let mut buyer = opened(1_000_000);
+    let p = poll(&buyer, &policy(), demand(320_000), Millis(0)).expect("should buy");
+    buyer.record(p, Millis(0));
+    let asked = Millis(1_000);
+    assert_eq!(
+        buyer.rollover_due(80, asked, 0),
+        Some(RolloverReason::Capacity)
+    );
+
+    buyer.funding_requested(asked);
+    assert_eq!(buyer.rollover_due(80, asked + 1, 0), None);
+    assert_eq!(
+        buyer.rollover_due(80, asked + FUNDING_TIMEOUT_MS - 1, 0),
+        None,
+        "quiet while the host is still working on it"
+    );
+
+    // An answer that never comes is given up on, and the rollover asked again.
+    assert_eq!(
+        buyer.rollover_due(80, asked + FUNDING_TIMEOUT_MS, 0),
+        Some(RolloverReason::Capacity)
+    );
+
+    // A failure clears it at once.
+    buyer.funding_requested(asked);
+    buyer.funding_failed();
+    assert_eq!(
+        buyer.rollover_due(80, asked + 1, 0),
+        Some(RolloverReason::Capacity)
+    );
+
+    // And the channel coming back hands over to `pending`, which stays quiet
+    // until the peer confirms, however long that takes.
+    buyer.funding_requested(asked);
+    buyer.funded(channel(2), 1_000_000, None);
+    assert!(!buyer.funding_in_flight(asked));
+    assert_eq!(
+        buyer.rollover_due(80, asked + FUNDING_TIMEOUT_MS * 10, 0),
+        None
+    );
+}
+
+#[test]
 fn a_confirmed_replacement_waits_behind_the_channel_in_use() {
     // It does not displace the one being drained — that one runs to its
     // capacity first, which is what keeps the old channel's remaining capacity

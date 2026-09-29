@@ -23,5 +23,6 @@ mod tests;
 
 pub use core::{Demand, poll};
 pub use state::{
-    Buyer, BuyerPolicy, ChannelBuyer, Leg, Purchase, RolloverReason, Trigger, WindowBounds,
+    Buyer, BuyerPolicy, ChannelBuyer, FUNDING_TIMEOUT_MS, Leg, Purchase, RolloverReason, Trigger,
+    WindowBounds,
 };

@@ -79,6 +79,18 @@ pub enum Event {
         funding: Vec<u8>,
     },
 
+    /// Our wallet could not fund the channel we asked for with
+    /// [`Action::FundChannel`](crate::Action::FundChannel).
+    ///
+    /// Clears the request, so a rollover that is still due is asked for again
+    /// on the next tick. A host that never reports this still gets a retry,
+    /// once [`FUNDING_TIMEOUT_MS`](crate::buyer::FUNDING_TIMEOUT_MS) passes
+    /// without an answer.
+    OutgoingFundingFailed {
+        /// The peer the channel was for.
+        peer: PubKey,
+    },
+
     /// Our wallet verified the funding a peer sent, in response to
     /// [`Action::VerifyFunding`](crate::Action::VerifyFunding).
     IncomingFundingVerified {

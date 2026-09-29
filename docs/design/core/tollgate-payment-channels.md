@@ -222,6 +222,22 @@ Old channel continues draining: 801, 802, ... 1000
 At 1000: old channel exhausted, charges continue on new channel
 ```
 
+### One Rollover at a Time
+
+A rollover is under way from the moment the funder asks its wallet for the
+replacement, not from the moment the wallet hands it back. Funding is a mint
+round trip, far longer than the tick the rollover check runs on, and a check
+that only noticed the channel once it existed would ask for another on every
+tick in between. From the request until the receiver's RolloverReady, no
+further rollover starts.
+
+A request that fails is cleared at once, so a rollover still due is asked for
+again on the next check. One that is never answered at all is given up on
+after 30 s — long next to a mint round trip, short next to the two purchases'
+worth of headroom, or the safety margin of a minute or more, that a rollover
+starts with. The opening channel is funded once, when the peer's Offer
+arrives, so it has no check to repeat it.
+
 ### Overlap Period
 
 During rollover, **two channels exist simultaneously** for the same direction:
@@ -463,7 +479,9 @@ What a channel update commits to is the channel scheme's business, which is why 
 ### Funding Failure
 
 If channel funding fails (mint unreachable, `merchantd` cannot supply the vouchers, keyset error):
-- Retry on next mint connectivity check
+- The host reports it to core (`Event::OutgoingFundingFailed`), which clears the request, so a rollover still due is asked for again on the next tick
+- A request that is never answered is given up on after 30 s, with the same effect (see [One Rollover at a Time](#one-rollover-at-a-time))
+- A failed opening channel is not retried: nothing is signed toward that peer until it reconnects
 
 ### Settlement Failure
 

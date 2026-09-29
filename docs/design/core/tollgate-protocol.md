@@ -133,12 +133,35 @@ it. No TollGate message comes close to the cap.
 **Identity:** each side sends Announce as its first message. Per-peer state is
 keyed by the pubkey it carries.
 
-**Failure detection:** no keepalive, because nothing needs to detect a peer
-that stops paying — its grant expires, it drops to the minimum flow allowance,
-and the link is left in a state that costs nothing to hold open. A peer that
-sends nothing at all for `stale_timeout_seconds` (default 60) is dropped, which
-covers both setup and a peer content to sit on the free allowance. The knob
-already exists in [tollgate-configuration.md](tollgate-configuration.md).
+**Failure detection:** nothing needs to detect a peer that stops paying — its
+grant expires, it drops to the minimum flow allowance, and the link is left in
+a state that costs nothing to hold open. What is detected is silence: a peer
+that sends nothing at all for `stale_timeout_seconds` (default 60) is dropped.
+The knob already exists in
+[tollgate-configuration.md](tollgate-configuration.md).
+
+**Keepalive:** silence has to mean dead, so no live node stays silent. A node
+that has sent a peer nothing for a third of its own `stale_timeout_seconds`
+(20 s by default, and the default's third when its own timeout is `0`) sends
+that peer its Offer again. The payment streams alone do not guarantee a peer
+hears from us: a TopUp is never answered, so a provider its payer does not
+charge (Offer field 5) buys nothing back and would otherwise say nothing after
+setup, and its payer would drop a healthy session once a minute. Free peering,
+where neither side charges, is silent in both directions the same way.
+
+The keepalive is the Offer rather than a new message because every node
+already takes a revised Offer at any time, and one that revises nothing does
+nothing — so it needs no capability bit, and a node that predates it still
+counts it as hearing from us. The caveats:
+
+- A node that predates it sends none. Paired with one, a payer it does not
+  charge still drops it after `stale_timeout_seconds`, as before.
+- The interval is reckoned from the sender's timeout, since the peer's is not
+  advertised; a peer configured with a timeout shorter than a third of ours
+  can still drop us.
+- The Offer is rebuilt, not replayed, so it carries the multiplier and field 5
+  in force now. An operator override changed since the last Offer reaches the
+  peer with the next keepalive, which is what a revised Offer is for.
 
 **Orderly teardown:** send Disconnect, then close. The session is over: each
 side settles the channels the other paid it on and holds nothing for a return.
@@ -316,7 +339,9 @@ protocol does not restate them.
 
 The multiplier is the only field that can change mid-session, by sending a
 revised Offer. It takes effect on the payer's **next** grant — a grant already
-bought is priced at the multiplier that was in force when it was bought. The
+bought is priced at the multiplier that was in force when it was bought. A
+revised Offer that changes nothing is also the keepalive — see Keepalive under
+[Raw TCP](#raw-tcp). The
 accepted-mint set is fixed for the session, because a peer's channel is funded
 in a specific mint and dropping it would strand the channel.
 
@@ -761,7 +786,7 @@ Plus 2 bytes of length prefix per message. Setup messages are one-time. TopUp is
 | Transport | Raw TCP; HTTP polling and WebSocket recorded as future alternatives | Peerings are adjacent, so nothing sits between the peers to require HTTP dressing. Saves HTTP parsing, an upgrade handshake, a frame parser, masking and ping/pong on constrained devices |
 | Framing | 2-byte little-endian length prefix per message | Also caps a message at 65535 bytes, so a peer cannot make the receiver allocate for a claimed huge length |
 | Transport security | None at this layer | FIPS Noise IK authenticates and encrypts before TollGate sees the peer; on plain IP the operator wraps the connection as it sees fit |
-| Keepalive | None | Non-payment is self-enforcing: the grant expires, the peer drops to the minimum flow allowance, and nothing has to detect anything. Setup uses `stale_timeout_seconds`, since no grant exists yet |
+| Keepalive | The Offer again, after a third of `stale_timeout_seconds` with nothing sent to that peer | Non-payment is self-enforcing — the grant expires and the peer drops to the minimum flow allowance — so only silence is detected, and silence must then mean dead. TopUps are never answered, so a provider that buys nothing from its payer would otherwise be silent. An unchanged Offer is already a no-op everywhere, so older nodes need no upgrade to hear it |
 | Field keys | Small integers, not strings | Compact, avoids string overhead in CBOR |
 | Message discrimination | Integer `type` field (key 0) | Simple, extensible |
 | First message | Announce (protocol version + pubkey) | Identifies TollGate capability before negotiation |

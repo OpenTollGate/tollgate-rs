@@ -444,7 +444,10 @@ impl Node {
                             });
                         }
                         Err(e) => {
-                            warn!(%peer, error = format!("{e:#}"), "could not fund a channel")
+                            warn!(%peer, error = format!("{e:#}"), "could not fund a channel");
+                            // So core can ask again rather than wait out the
+                            // funding timeout.
+                            let _ = done.blocking_send(Event::OutgoingFundingFailed { peer });
                         }
                     }
                 });

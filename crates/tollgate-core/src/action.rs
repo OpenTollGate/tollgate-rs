@@ -83,6 +83,11 @@ pub enum Action {
     },
 
     /// Fund a channel to pay this peer on.
+    ///
+    /// Answer with [`Event::OutgoingChannelFunded`](crate::Event::OutgoingChannelFunded)
+    /// or, if it cannot be done,
+    /// [`Event::OutgoingFundingFailed`](crate::Event::OutgoingFundingFailed):
+    /// no rollover is started while one of them is still owed.
     FundChannel {
         /// The peer to pay.
         peer: PubKey,

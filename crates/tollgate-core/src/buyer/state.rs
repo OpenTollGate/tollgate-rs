@@ -10,6 +10,11 @@
 //! pending   funded by us, not yet confirmed by the peer
 //! ```
 //!
+//! Before `pending` there is a fourth, shorter stage with no channel yet: the
+//! host has been asked to fund one and has not answered. Funding is a mint
+//! round trip, far longer than a tick, so it is marked the moment it is asked
+//! for — see [`Buyer::funding_requested`].
+//!
 //! A channel is opened well before it is needed (default: at 80% of the one in
 //! use) precisely so that `next` is ready by the time a purchase overflows
 //! `active`, and the overflow can be signed across both rather than stalling.
@@ -227,6 +232,17 @@ pub struct Purchase {
     pub trigger: Trigger,
 }
 
+/// How long a funding request may go unanswered before a rollover is tried
+/// again.
+///
+/// The host answers every request, with the channel or with a failure, so this
+/// only matters when an answer never comes — a funding call that hangs. It is
+/// long next to a mint round trip, so a slow funding is not doubled, and short
+/// next to what a rollover has left: one starts with at least two purchases'
+/// worth of headroom, or a whole safety margin, of a minute or more, before
+/// expiry.
+pub const FUNDING_TIMEOUT_MS: u64 = 30_000;
+
 /// Why a channel is being replaced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RolloverReason {
@@ -274,6 +290,10 @@ pub struct Buyer {
     /// the peer has not said it verified the funding, so a grant signed here
     /// might be against a channel that never opens.
     pub(super) pending: Option<ChannelBuyer>,
+    /// When we last asked the host to fund a channel for this peer, while the
+    /// answer is still out. No channel exists yet, so there is nothing to put
+    /// in `pending`, but a rollover is already under way.
+    pub(super) funding_since: Option<Millis>,
     /// Rate the grant in force bought.
     pub(super) rate: u64,
     /// When it lapses.
@@ -309,6 +329,7 @@ impl Buyer {
             active: None,
             next: None,
             pending: None,
+            funding_since: None,
             rate: 0,
             deadline: Millis::ZERO,
             started: false,
@@ -372,6 +393,7 @@ impl Buyer {
             active: self.active,
             next: self.next,
             pending: self.pending,
+            funding_since: self.funding_since,
             last_grant: self.last_grant,
             ..Self::new()
         };
@@ -385,8 +407,32 @@ impl Buyer {
         self.pending = None;
     }
 
+    /// Record that we have asked the host to fund a channel for this peer.
+    ///
+    /// From here no rollover is started until the host answers — with the
+    /// channel, [`Self::funded`], or with a failure,
+    /// [`Self::funding_failed`] — or [`FUNDING_TIMEOUT_MS`] passes without
+    /// either. Marking it only once the channel came back would leave every
+    /// tick of the mint round trip free to ask for another.
+    pub fn funding_requested(&mut self, now: Millis) {
+        self.funding_since = Some(now);
+    }
+
+    /// The host could not fund the channel we asked for. The next check may
+    /// ask again.
+    pub fn funding_failed(&mut self) {
+        self.funding_since = None;
+    }
+
+    /// Whether a funding request is still out and not yet given up on.
+    pub fn funding_in_flight(&self, now: Millis) -> bool {
+        self.funding_since
+            .is_some_and(|since| now.saturating_since(since) < FUNDING_TIMEOUT_MS)
+    }
+
     /// Record a channel we have funded but the peer has not yet confirmed.
     pub fn funded(&mut self, id: ChannelId, capacity: u64, expires_at: Option<Millis>) {
+        self.funding_since = None;
         self.pending = Some(ChannelBuyer::new(id, capacity, expires_at));
     }
 
@@ -465,12 +511,18 @@ impl Buyer {
     ///
     /// `margin_ms` is the safety margin, from
     /// [`NodePolicy::safety_margin_ms`](crate::config::NodePolicy::safety_margin_ms).
+    ///
+    /// Quiet while a funding request is out, from the moment it is asked for —
+    /// see [`Self::funding_requested`].
     pub fn rollover_due(
         &self,
         threshold_pct: u8,
         now: Millis,
         margin_ms: u64,
     ) -> Option<RolloverReason> {
+        if self.funding_in_flight(now) {
+            return None;
+        }
         if self.needs_rollover(threshold_pct) {
             return Some(RolloverReason::Capacity);
         }

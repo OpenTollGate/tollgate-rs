@@ -10,6 +10,11 @@
 //! A peer that drops without saying Disconnect is held for a while rather than
 //! forgotten. If it comes back in time, the new session picks up the channels
 //! the old one left — both sides still hold them, so there is nothing to fund.
+//!
+//! Silence is what marks a peer gone, so no live peer is left silent: a node
+//! that has sent a peer nothing for a third of the stale timeout sends its
+//! Offer again. That matters most for a payer the provider never charges,
+//! which otherwise hears nothing back after setup — TopUps are not answered.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -135,6 +140,7 @@ impl Sessions {
     /// Feed in something that happened; get back what to do about it.
     pub fn handle(&mut self, event: Event, now: Millis) -> Vec<Action> {
         let mut out = Vec::new();
+        let tick = matches!(event, Event::Tick);
         match event {
             Event::PeerConnected { peer } => self.on_connected(peer, now, &mut out),
             Event::PeerDisconnected { peer } => self.on_disconnected(peer, now, &mut out),
@@ -160,6 +166,14 @@ impl Sessions {
                     session.buyer.funded(channel_id, capacity, expires_at);
                 }
                 self.on_outgoing_funded(peer, funding, now, &mut out)
+            }
+            Event::OutgoingFundingFailed { peer } => {
+                // Nothing was funded, so nothing is sent. The request is
+                // cleared, and a rollover still due is asked for again on the
+                // next tick.
+                if let Some(session) = self.peers.get_mut(&peer) {
+                    session.buyer.funding_failed();
+                }
             }
             Event::IncomingFundingVerified {
                 peer,
@@ -239,7 +253,59 @@ impl Sessions {
                 self.expire_parked(now, &mut out);
             }
         }
+        self.note_sent(&out, now);
+        if tick {
+            self.keep_alive(now, &mut out);
+        }
         out
+    }
+
+    // -----------------------------------------------------------------------
+    // Keeping a quiet link alive
+    // -----------------------------------------------------------------------
+
+    /// Remember when we last sent each peer anything, from the actions about
+    /// to be carried out.
+    fn note_sent(&mut self, out: &[Action], now: Millis) {
+        for action in out {
+            let (Action::Send { peer, .. } | Action::SignAndSendTopUp { peer, .. }) = action else {
+                continue;
+            };
+            if let Some(session) = self.peers.get_mut(peer) {
+                session.last_sent = now;
+            }
+        }
+    }
+
+    /// Send our Offer again to every peer we have sent nothing for a while.
+    ///
+    /// The peer drops us after `stale_timeout` of silence, and the payment
+    /// streams do not guarantee it hears from us: a TopUp is never answered,
+    /// so a provider that does not buy from its payer — one that payer asked
+    /// not to charge — says nothing at all after setup, and the payer would
+    /// drop a healthy session every minute.
+    ///
+    /// The Offer, because it is the one message every node already takes again
+    /// at any time and to no effect: a revision that changes nothing. So a node
+    /// that predates this still counts it as hearing from us.
+    fn keep_alive(&mut self, now: Millis, out: &mut Vec<Action>) {
+        let interval = self.node.keepalive_interval_ms();
+        let quiet: Vec<(PubKey, PeerPolicy)> = self
+            .peers
+            .iter()
+            .filter(|(_, s)| s.phase != Phase::Closing)
+            .filter(|(_, s)| now.saturating_since(s.last_sent) >= interval)
+            .map(|(peer, s)| (*peer, s.policy))
+            .collect();
+        for (peer, policy) in quiet {
+            out.push(Action::Send {
+                peer,
+                msg: self.our_offer(&policy),
+            });
+            if let Some(session) = self.peers.get_mut(&peer) {
+                session.last_sent = now;
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -628,6 +694,7 @@ impl Sessions {
             Some(mint_url) if buying => {
                 // Start small: a new peering may not last. The capacity grows
                 // as rollovers show that it does.
+                session.buyer.funding_requested(now);
                 out.push(Action::FundChannel {
                     peer,
                     mint_url,
@@ -1008,8 +1075,14 @@ impl Sessions {
             RolloverReason::Expiry => self.node.clamp_capacity(active.capacity),
         };
 
-        // `rollover_due` stays quiet from here until the peer confirms, so
-        // this cannot fire again and fund a channel on every tick.
+        // Marked now, not when the channel comes back: funding is a mint
+        // round trip, many ticks long, and `rollover_due` would otherwise ask
+        // for another channel on every one of them. It stays quiet until the
+        // host answers and the peer confirms, or the host reports a failure,
+        // or the request times out.
+        if let Some(session) = self.peers.get_mut(&peer) {
+            session.buyer.funding_requested(now);
+        }
         out.push(Action::FundChannel {
             peer,
             mint_url,

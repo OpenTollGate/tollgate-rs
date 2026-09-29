@@ -102,6 +102,9 @@ pub struct PeerSession {
     pub applied_rate: Option<u64>,
     /// When we last heard anything at all from them.
     pub last_seen: Millis,
+    /// When we last sent them anything at all, so a link we have nothing to
+    /// say on is kept alive before the peer's stale timeout drops it.
+    pub last_sent: Millis,
     /// Whether the peer, coming back after an unclean disconnect, said it
     /// still holds the channel we pay it on.
     ///
@@ -128,6 +131,7 @@ impl PeerSession {
             last_meter_at: now,
             applied_rate: None,
             last_seen: now,
+            last_sent: now,
             kept_by_peer: false,
         }
     }
