@@ -179,8 +179,6 @@ async fn main() -> Result<()> {
             file: mint_path.clone(),
             // A peer funds its channel to us with our vouchers, and a peering
             // that has proven itself grows to the largest channel we open.
-            // The issue limit's burst is never below this, so one quote of
-            // that size can always be had.
             max_amount: config.policy.max_channel_capacity.max(1),
             auto_accept: file.mint.auto_accept,
             issue_limit: file.mint.issue_limit(),

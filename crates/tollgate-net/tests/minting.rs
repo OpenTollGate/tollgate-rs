@@ -273,14 +273,13 @@ async fn a_buyer_funds_a_channel_the_seller_verifies_from_minted_vouchers() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn funding_is_served_and_a_flood_past_the_issue_limit_is_refused() {
-    // A burst of one channel and a rate so slow that nothing refills while
-    // the test runs: the channel is funded, and what comes after it is not.
+    // One quote a minute: the channel's quote is served, and the next one
+    // asked for straight after it is not. How much a quote is for is never
+    // capped — auto-accept is free or it is off.
     let seller = seller_limited(
         2_000_000,
         IssueLimit {
-            bytes_per_sec: 1,
-            burst_bytes: 2_000_000,
-            quotes_per_minute: 0,
+            quotes_per_minute: 1,
         },
     )
     .await;

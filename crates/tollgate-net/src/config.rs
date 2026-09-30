@@ -86,16 +86,9 @@ pub struct MintSection {
     /// Off, the mint serves no mint quotes and issues nothing to anybody, so
     /// peers can only pay with vouchers they came by some other way.
     pub auto_accept: bool,
-    /// Bytes of vouchers an auto-accepting mint issues per second, across
-    /// everybody who asks. `0` is unlimited.
-    ///
-    /// The defaults, and why they are what they are, are
-    /// [`crate::mint::IssueLimit`]'s.
-    pub issue_rate_bytes_per_sec: u64,
-    /// Bytes that may be issued at once before the rate applies. Never less
-    /// than one channel's initial capacity.
-    pub issue_burst_bytes: u64,
-    /// Mint quotes an auto-accepting mint creates per minute. `0` is unlimited.
+    /// Mint quotes an auto-accepting mint creates per minute, across everybody
+    /// who asks. `0` is unlimited. What a quote may be for is not capped:
+    /// auto-accept is free or it is off. See [`crate::mint::IssueLimit`].
     pub issue_quotes_per_minute: u64,
     /// Where the mint database lives. Empty picks the state directory the
     /// packages keep across an upgrade, beside the wallet.
@@ -115,8 +108,6 @@ impl Default for MintSection {
             listen: "0.0.0.0:3338".into(),
             unit: "byte".into(),
             auto_accept: true,
-            issue_rate_bytes_per_sec: limit.bytes_per_sec,
-            issue_burst_bytes: limit.burst_bytes,
             issue_quotes_per_minute: limit.quotes_per_minute,
             file: String::new(),
         }
@@ -127,8 +118,6 @@ impl MintSection {
     /// The issue limit these settings describe.
     pub fn issue_limit(&self) -> crate::mint::IssueLimit {
         crate::mint::IssueLimit {
-            bytes_per_sec: self.issue_rate_bytes_per_sec,
-            burst_bytes: self.issue_burst_bytes,
             quotes_per_minute: self.issue_quotes_per_minute,
         }
     }
@@ -909,15 +898,11 @@ mod tests {
         let file: File = serde_yaml::from_str("{}").expect("parse");
         assert_eq!(file.mint.issue_limit(), crate::mint::IssueLimit::default());
 
-        let file: File = serde_yaml::from_str(
-            "mint:\n  issue_rate_bytes_per_sec: 0\n  issue_burst_bytes: 7\n  issue_quotes_per_minute: 3\n",
-        )
-        .expect("parse");
+        let file: File =
+            serde_yaml::from_str("mint:\n  issue_quotes_per_minute: 3\n").expect("parse");
         assert_eq!(
             file.mint.issue_limit(),
             crate::mint::IssueLimit {
-                bytes_per_sec: 0,
-                burst_bytes: 7,
                 quotes_per_minute: 3,
             }
         );

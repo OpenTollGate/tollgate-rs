@@ -242,9 +242,7 @@ private:
   socket: "/run/tollgate/mintd.sock"    # merchantd only: mint quotes paid on creation
 
 auto_accept: true                       # public mint quotes paid on creation too
-issue_rate_bytes_per_sec: 125000000     # ...but no faster than this
-issue_burst_bytes: 4000000000
-issue_quotes_per_minute: 60
+issue_quotes_per_minute: 60             # ...but no more quotes than this
 ```
 
 ### Defaults
@@ -256,12 +254,10 @@ issue_quotes_per_minute: 60
 | `public.listen` | `"0.0.0.0:3338"` | The mint as peers and wallets see it. Mint quotes here are never paid unless auto-accept is on |
 | `private.socket` | *(platform state dir)* | Mint quotes here are paid on creation. Whoever can open it can print this node's vouchers, so only `merchantd` should |
 | `auto_accept` | `true` | Report every NUT-04 mint quote on the public listener paid, so a peer mints what it needs for free |
-| `issue_rate_bytes_per_sec` | `125000000` | Vouchers an auto-accepting mint issues per second, across all askers; `0` = unlimited |
-| `issue_burst_bytes` | `4000000000` | Issued at once before the rate applies; never less than one channel's initial capacity |
 | `issue_quotes_per_minute` | `60` | Mint quotes created per minute, a minute's worth at once; `0` = unlimited |
 | `file` | `mint.sqlite` in the state directory | The mint database: the spent-proof set and the mint quotes issued |
 
-There is no issuance ceiling on what `merchantd` issues: how much to sell is its decision. The `issue_*` limits apply to auto-accept alone.
+There is no issuance ceiling, on what `merchantd` sells or on what auto-accept gives away: auto-accept is free or it is off.
 
 While the market is deferred, `auto_accept` is how a peer comes to hold this
 node's vouchers: a buyer funds a channel by minting at the seller's mint, with
@@ -270,14 +266,14 @@ With `auto_accept: false` the public listener serves no mint quotes, so peers
 can only pay with vouchers they bought from `merchantd` or came by some other
 way.
 
-Free is not unlimited. The `issue_*` keys ration how fast the mint gives
-vouchers away, so its quote endpoint cannot be used to make the node sign and
-store without end. The limit is node-wide, because the mint cannot tell one
-asker from another, and a quote over it is refused when it is asked for. The
-defaults sit well above honest use: 1 Gbit/s of vouchers is more than the node
-could deliver, 4 GB at once is four default-size channels opening together,
-and one quote a second is far more than a buyer needs, since it asks for one
-per channel it opens.
+What is rationed is **requests, not value**. `issue_quotes_per_minute` caps
+how many quotes the public listener serves, so its quote endpoint cannot be
+used to make the mint sign and store without end; how much a quote is for is
+not capped. The limit is node-wide, because the mint cannot tell one asker
+from another, and a quote over it is refused when it is asked for. One a
+second is far more than a buyer needs, since it asks for one per channel it
+opens. Auto-accept exists for testing and for handing free vouchers to third
+parties; a node that sells turns it off.
 
 The keyset is derived from `seed_file` — `mintd`'s own seed, not the node's identity key, so the mint's secret never has to be shared with `tollgated` — and survives a restart without the database. Losing the seed retires every voucher outstanding: the keyset cannot be rebuilt. The spent-proof set does not: losing `file` makes every voucher this node has already redeemed redeemable again.
 

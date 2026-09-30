@@ -24,9 +24,10 @@
 //! That makes service free to anyone who asks, which is the point for now
 //! rather than an oversight: what is being exercised is delivery, admission and
 //! the channels, not pricing. [`MintConfig::auto_accept`] turns it off, and the
-//! mint then issues nothing through NUT-04 at all. Free is not unlimited:
-//! [`IssueLimit`] rations how fast the mint gives vouchers away, so the quote
-//! endpoint cannot be used to make the node sign and store without end.
+//! mint then issues nothing through NUT-04 at all. On, it is free without a
+//! cap on how much: [`IssueLimit`] rations only how many quotes are asked for,
+//! so the quote endpoint cannot be used to make the node sign and store without
+//! end.
 //!
 //! Everything the mint itself does is real: the keysets, the blind signatures,
 //! the DLEQ proofs and the spent-proof set.
@@ -88,47 +89,33 @@ pub struct MintConfig {
     /// the mint serves no mint quotes at all, and its vouchers have to be had
     /// some other way.
     pub auto_accept: bool,
-    /// How fast an auto-accepting mint gives its vouchers away.
+    /// How many quotes an auto-accepting mint serves.
     pub issue_limit: IssueLimit,
 }
 
-/// How fast an auto-accepting mint issues, across everybody who asks.
+/// How many quotes an auto-accepting mint serves, across everybody who asks.
 ///
-/// Free vouchers are the point while there is no market, but a free quote
-/// endpoint is also a way to make the node sign and store without end. This
-/// caps the work, not anybody's share: the mint cannot tell one asker from
-/// another, so the limit is node-wide, charged when a quote is created, and a
-/// quote over it is refused.
+/// Auto-accept is free or it is off: what a quote may be for is not capped,
+/// only how often one may be asked for. A free quote endpoint is otherwise a
+/// way to make the node sign and store without end. This caps the work, not
+/// anybody's share: the mint cannot tell one asker from another, so the limit
+/// is node-wide, charged when a quote is created, and a quote over it is
+/// refused.
 ///
-/// A rate of zero switches that limit off.
+/// A rate of zero switches the limit off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IssueLimit {
-    /// Bytes of vouchers issued per second, on average.
-    pub bytes_per_sec: u64,
-    /// Bytes that may be issued at once before the rate applies. Never less
-    /// than [`MintConfig::max_amount`], so one quote of the largest size the
-    /// mint allows can always be had.
-    pub burst_bytes: u64,
     /// Mint quotes created per minute, with a minute's worth as the burst.
     pub quotes_per_minute: u64,
 }
 
 impl Default for IssueLimit {
-    /// Sized so that no peer funding channels in earnest ever waits on it.
-    ///
-    /// - 125 MB/s is 1 Gbit/s. Issuing vouchers faster than the node could
-    ///   deliver the bytes they claim buys nobody anything, and no router this
-    ///   ships on forwards more than that.
-    /// - A 4 GB burst is four channels of the default 1 GB opened at once, as
-    ///   when several peers arrive together; the rate refills one in 8 s.
-    /// - 60 quotes a minute: a buyer asks for one quote per channel it opens
-    ///   (more only for a channel larger than one quote allows), so one a
-    ///   second is far above use, and holds a flood of quotes to a trickle of
-    ///   stored rows and signatures.
+    /// 60 quotes a minute: a buyer asks for one quote per channel it opens
+    /// (more only for a channel larger than one quote allows), so one a second
+    /// is far above use, and holds a flood of quotes to a trickle of stored
+    /// rows and signatures.
     fn default() -> Self {
         Self {
-            bytes_per_sec: 125_000_000,
-            burst_bytes: 4_000_000_000,
             quotes_per_minute: 60,
         }
     }
@@ -198,7 +185,6 @@ pub async fn build(config: &MintConfig) -> Result<Mint> {
                 Arc::new(AutoAccept::new(
                     unit.clone(),
                     config.issue_limit,
-                    config.max_amount,
                     Instant::now(),
                 )),
             )
@@ -241,7 +227,7 @@ pub async fn build(config: &MintConfig) -> Result<Mint> {
 /// against it, and the answer is always the full amount. Melting is refused,
 /// because nothing this mint issues can be paid out as money.
 ///
-/// Quotes are rationed by [`IssueLimit`], checked when a quote is asked for:
+/// Quotes are counted against [`IssueLimit`] when one is asked for:
 /// that is where the work starts, and a quote refused there never reaches the
 /// database.
 #[derive(Debug)]
@@ -251,32 +237,23 @@ struct AutoAccept {
 }
 
 impl AutoAccept {
-    fn new(unit: CurrencyUnit, limit: IssueLimit, max_amount: u64, now: Instant) -> Self {
+    fn new(unit: CurrencyUnit, limit: IssueLimit, now: Instant) -> Self {
         Self {
             unit,
-            limits: Mutex::new(Limits::new(limit, max_amount, now)),
+            limits: Mutex::new(Limits::new(limit, now)),
         }
     }
 }
 
-/// The two buckets an [`IssueLimit`] fills, either of which may be off.
+/// The bucket an [`IssueLimit`] fills, if it is on.
 #[derive(Debug)]
 struct Limits {
-    bytes: Option<Bucket>,
     quotes: Option<Bucket>,
 }
 
 impl Limits {
-    fn new(limit: IssueLimit, max_amount: u64, now: Instant) -> Self {
+    fn new(limit: IssueLimit, now: Instant) -> Self {
         Self {
-            bytes: (limit.bytes_per_sec > 0).then(|| {
-                Bucket::new(
-                    limit.bytes_per_sec,
-                    Duration::from_secs(1),
-                    limit.burst_bytes.max(max_amount),
-                    now,
-                )
-            }),
             quotes: (limit.quotes_per_minute > 0).then(|| {
                 Bucket::new(
                     limit.quotes_per_minute,
@@ -288,23 +265,16 @@ impl Limits {
         }
     }
 
-    /// Take one quote for `amount`, or take nothing and say which ran out.
-    fn admit(&mut self, now: Instant, amount: u64) -> Result<(), &'static str> {
-        for bucket in [&mut self.bytes, &mut self.quotes].into_iter().flatten() {
-            bucket.refill(now);
-        }
-        if self.bytes.as_ref().is_some_and(|b| !b.holds(amount)) {
-            return Err("bytes issued");
-        }
-        if self.quotes.as_ref().is_some_and(|b| !b.holds(1)) {
+    /// Take one quote, or take nothing and refuse.
+    fn admit(&mut self, now: Instant) -> Result<(), &'static str> {
+        let Some(quotes) = &mut self.quotes else {
+            return Ok(());
+        };
+        quotes.refill(now);
+        if !quotes.holds(1) {
             return Err("quotes asked for");
         }
-        if let Some(b) = &mut self.bytes {
-            b.take(amount);
-        }
-        if let Some(b) = &mut self.quotes {
-            b.take(1);
-        }
+        quotes.take(1);
         Ok(())
     }
 }
@@ -412,7 +382,7 @@ impl MintPayment for AutoAccept {
             .limits
             .lock()
             .expect("not poisoned")
-            .admit(Instant::now(), amount)
+            .admit(Instant::now())
         {
             tracing::debug!(
                 amount,
@@ -627,80 +597,40 @@ mod tests {
         assert_eq!(amount_of(&PaymentIdentifier::PaymentHash([0; 32])), None);
     }
 
-    fn limit(bytes_per_sec: u64, burst_bytes: u64, quotes_per_minute: u64) -> IssueLimit {
-        IssueLimit {
-            bytes_per_sec,
-            burst_bytes,
-            quotes_per_minute,
-        }
-    }
-
     #[test]
-    fn a_burst_is_issued_at_once_and_the_rest_is_refused() {
+    fn quotes_are_rationed_per_minute_and_refill() {
         let t0 = Instant::now();
-        let mut limits = Limits::new(limit(1_000, 10_000, 0), 1, t0);
-
-        assert_eq!(limits.admit(t0, 6_000), Ok(()));
-        assert_eq!(limits.admit(t0, 4_000), Ok(()), "the whole burst");
-        assert_eq!(
-            limits.admit(t0, 1),
-            Err("bytes issued"),
-            "and not a byte more"
+        let mut limits = Limits::new(
+            IssueLimit {
+                quotes_per_minute: 2,
+            },
+            t0,
         );
+
+        assert_eq!(limits.admit(t0), Ok(()));
+        assert_eq!(limits.admit(t0), Ok(()), "a minute's worth at once");
+        assert_eq!(limits.admit(t0), Err("quotes asked for"));
+
+        // Half a minute is one quote back, and an hour idle fills it to a
+        // minute's worth, not beyond.
+        assert_eq!(limits.admit(t0 + Duration::from_secs(30)), Ok(()));
+        let later = t0 + Duration::from_secs(3_600);
+        assert_eq!(limits.admit(later), Ok(()));
+        assert_eq!(limits.admit(later), Ok(()));
+        assert_eq!(limits.admit(later), Err("quotes asked for"));
     }
 
     #[test]
-    fn the_bucket_refills_at_the_rate_and_no_further_than_the_burst() {
+    fn a_zero_rate_switches_the_limit_off() {
         let t0 = Instant::now();
-        let mut limits = Limits::new(limit(1_000, 10_000, 0), 1, t0);
-        limits.admit(t0, 10_000).expect("empty it");
-
-        // Half a second is 500 bytes, arriving however finely it is sliced.
-        let mut now = t0;
-        for _ in 0..500 {
-            now += Duration::from_millis(1);
-            limits.bytes.as_mut().expect("on").refill(now);
-        }
-        assert_eq!(limits.admit(now, 501), Err("bytes issued"));
-        assert_eq!(limits.admit(now, 500), Ok(()));
-
-        // An hour idle fills it to the burst, not beyond.
-        let later = now + Duration::from_secs(3_600);
-        assert_eq!(limits.admit(later, 10_001), Err("bytes issued"));
-        assert_eq!(limits.admit(later, 10_000), Ok(()));
-    }
-
-    #[test]
-    fn a_refused_quote_takes_nothing() {
-        let t0 = Instant::now();
-        let mut limits = Limits::new(limit(1_000, 10_000, 2), 1, t0);
-
-        // Too large for the bytes: the quote allowance is left alone.
-        assert_eq!(limits.admit(t0, 20_000), Err("bytes issued"));
-        assert_eq!(limits.admit(t0, 1), Ok(()));
-        assert_eq!(limits.admit(t0, 1), Ok(()));
-
-        // Out of quotes: the bytes are left alone.
-        assert_eq!(limits.admit(t0, 1), Err("quotes asked for"));
-        let bytes = limits.bytes.as_ref().expect("on");
-        assert!(bytes.holds(9_998) && !bytes.holds(9_999));
-    }
-
-    #[test]
-    fn the_largest_quote_the_mint_allows_always_fits_the_burst() {
-        // A burst smaller than one full-size quote would refuse that quote
-        // forever, however long the buyer waited.
-        let t0 = Instant::now();
-        let mut limits = Limits::new(limit(1, 10, 0), 1_000_000, t0);
-        assert_eq!(limits.admit(t0, 1_000_000), Ok(()));
-    }
-
-    #[test]
-    fn a_zero_rate_switches_that_limit_off() {
-        let t0 = Instant::now();
-        let mut limits = Limits::new(limit(0, 0, 0), 1, t0);
+        let mut limits = Limits::new(
+            IssueLimit {
+                quotes_per_minute: 0,
+            },
+            t0,
+        );
         for _ in 0..1_000 {
-            assert_eq!(limits.admit(t0, u64::MAX), Ok(()));
+            assert_eq!(limits.admit(t0), Ok(()));
         }
     }
 

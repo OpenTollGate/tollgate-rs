@@ -162,9 +162,8 @@ Nothing has been released yet. Everything below is on `master` and will ship as
   — and a buyer funds a channel by minting what it needs at the seller's mint,
   with no Lightning, money mint or swap involved. `mint.auto_accept` (on by
   default) turns it off. While it is on, service is free to any peer that can
-  reach the mint, though not without limit: `mint.issue_rate_bytes_per_sec`,
-  `mint.issue_burst_bytes` and `mint.issue_quotes_per_minute` ration how fast
-  the mint gives vouchers away, and a quote over the limit is refused. The
+  reach the mint, with no cap on how much: only requests are rationed, by
+  `mint.issue_quotes_per_minute`, and a quote over that limit is refused. The
   market and the wallet's top-up are no longer on the funding path: a node
   still serves its market endpoint and its configuration still parses, but
   nothing it runs buys through a market any more. This is a deliberate break
