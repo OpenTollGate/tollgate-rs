@@ -56,7 +56,8 @@ pub enum Wire {
 /// An Announce is unauthenticated: it is the first thing a stranger says. What
 /// makes it costly to lie about is the address it was said from, and whether
 /// that address means anything depends on the network underneath.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Identify {
     /// Take the peer at its word.
     ///

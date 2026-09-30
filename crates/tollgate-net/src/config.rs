@@ -417,7 +417,7 @@ impl Default for NetworkSection {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ForwardingSection {
-    /// `loopback`, `nftables` or `fips`.
+    /// `loopback`, `nftables`, `fips` or `external`.
     ///
     /// `loopback` shapes and meters a socket of its own and forwards nobody's
     /// traffic — right for a demo or a test, and it runs anywhere. `nftables`
@@ -426,7 +426,9 @@ pub struct ForwardingSection {
     /// transit across a FIPS mesh instead, leaving the enforcement to the FIPS
     /// node and reaching it over its control socket — and, because a mesh
     /// address names a key, it is also the only mode in which a peer's
-    /// announced identity is checked rather than believed.
+    /// announced identity is checked rather than believed. `external` hands
+    /// the enforcement to a gate, a separate program listening on
+    /// [`Self::gate_socket`] (`docs/design/core/tollgate-gate-protocol.md`).
     pub mode: ForwardingMode,
     /// Interface facing the peers, where their `tc` classes live.
     ///
@@ -435,6 +437,14 @@ pub struct ForwardingSection {
     /// FIPS control socket to drive. Only `fips` uses this; empty means the
     /// same default path the FIPS daemon itself resolves.
     pub fips_socket: String,
+    /// The gate's Unix socket. Required by `external`, and used by nothing
+    /// else. Its permissions should admit `tollgated` alone: reaching it is the
+    /// power to open the gate.
+    pub gate_socket: String,
+    /// Pin the Identify mode, `fips` or `claimed`. Only `external` takes it,
+    /// and it is optional there: the gate's `hello` names the mode, and
+    /// `tollgated` refuses to start if it names the other one.
+    pub identify: Option<Identify>,
 }
 
 impl Default for ForwardingSection {
@@ -446,6 +456,8 @@ impl Default for ForwardingSection {
             mode: ForwardingMode::Loopback,
             interface: "eth0".into(),
             fips_socket: String::new(),
+            gate_socket: String::new(),
+            identify: None,
         }
     }
 }
@@ -460,6 +472,8 @@ pub enum ForwardingMode {
     Nftables,
     /// Per-peer transit policy on a FIPS node, over its control socket.
     Fips,
+    /// A gate: an enforcement program of its own, over a Unix socket.
+    External,
 }
 
 /// A byte source clients can measure this node against.
@@ -689,10 +703,26 @@ impl File {
         // network carrying the control plane, and that is what `forwarding.mode`
         // already says. A FIPS node therefore verifies from the first
         // connection, with no second setting to forget.
+        //
+        // Except behind a gate, where `forwarding.mode` cannot say which
+        // network carries the control plane. There the gate's `hello` decides,
+        // and this is only the pin, or `Claimed` until the hello replaces it —
+        // nothing is listening before then.
         let identify = match self.forwarding.mode {
             ForwardingMode::Fips => Identify::Fips,
             ForwardingMode::Loopback | ForwardingMode::Nftables => Identify::Claimed,
+            ForwardingMode::External => self.forwarding.identify.unwrap_or(Identify::Claimed),
         };
+        if self.forwarding.mode == ForwardingMode::External {
+            if self.forwarding.gate_socket.is_empty() {
+                bail!("forwarding.mode: external needs forwarding.gate_socket, the gate's socket");
+            }
+        } else if self.forwarding.identify.is_some() {
+            bail!(
+                "forwarding.identify only applies to forwarding.mode: external; the other \
+                 modes fix the Identify mode themselves"
+            );
+        }
 
         Ok(NodeConfig {
             identity,
@@ -785,6 +815,47 @@ mod tests {
                 Identify::Claimed,
                 "{mode}"
             );
+        }
+    }
+
+    #[test]
+    fn an_external_gate_needs_a_socket() {
+        let file: File = serde_yaml::from_str("forwarding:\n  mode: external\n").expect("parse");
+        assert!(file.resolve().is_err());
+
+        let file: File =
+            serde_yaml::from_str("forwarding:\n  mode: external\n  gate_socket: /run/gate.sock\n")
+                .expect("parse");
+        let config = file.resolve().expect("resolve");
+        // Only until the gate's hello names the mode.
+        assert_eq!(config.identify, Identify::Claimed);
+    }
+
+    #[test]
+    fn an_external_gate_takes_an_identify_pin() {
+        let file: File = serde_yaml::from_str(
+            "forwarding:\n  mode: external\n  gate_socket: /run/gate.sock\n  identify: fips\n",
+        )
+        .expect("parse");
+        assert_eq!(file.forwarding.identify, Some(Identify::Fips));
+        assert_eq!(file.resolve().expect("resolve").identify, Identify::Fips);
+
+        assert!(
+            serde_yaml::from_str::<File>(
+                "forwarding:\n  mode: external\n  gate_socket: /g\n  identify: proven\n"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn only_an_external_gate_takes_an_identify_pin() {
+        // Every other mode fixes the mode itself; a pin there would be a second
+        // setting that could disagree with the first.
+        for mode in ["loopback", "nftables", "fips"] {
+            let yaml = format!("forwarding:\n  mode: {mode}\n  identify: claimed\n");
+            let file: File = serde_yaml::from_str(&yaml).expect("parse");
+            assert!(file.resolve().is_err(), "{mode}");
         }
     }
 

@@ -16,7 +16,9 @@ use tollgate_core::buyer::BuyerPolicy;
 use tollgate_core::config::{NodePolicy, PeerPolicy};
 use tollgate_core::session::Sessions;
 use tollgate_core::{Action, Event, Millis};
-use tollgate_protocol::{ChannelUpdate, Message, PubKey, ReasonCode, TopUp, TopUpReject};
+use tollgate_protocol::{
+    ChannelUpdate, Message, PubKey, ReasonCode, RefusedUpdate, TopUp, TopUpReject,
+};
 use tracing::{debug, info, warn};
 
 use crate::adapter::ResourceAdapter;
@@ -40,6 +42,13 @@ const TICK: Duration = Duration::from_millis(100);
 /// abandoned: the channel is lost to its refund timelock, as it would be to a
 /// power cut.
 const SHUTDOWN_SETTLE_GRACE: Duration = Duration::from_secs(5);
+
+/// Most channel fundings held per peer while the adapter is not selling.
+///
+/// A peer normally has one in flight — its first channel or a rollover — so
+/// this is room for both and a repeat; past it a peer is only making the node
+/// hold its bytes.
+const MAX_DEFERRED_FUNDINGS: usize = 4;
 
 /// A peer the operator has said something about.
 #[derive(Debug, Clone)]
@@ -107,6 +116,9 @@ pub struct Node {
     settler: Settler,
     /// Outbound queue per connected peer.
     links: HashMap<PubKey, mpsc::Sender<Message>>,
+    /// Channel fundings a peer sent while the adapter was not selling to it,
+    /// verified once it is. See [`ResourceAdapter::selling`].
+    deferred: HashMap<PubKey, Vec<Vec<u8>>>,
     /// What the node is doing, republished each tick for the control socket.
     published: control::Published,
     started: Instant,
@@ -138,6 +150,7 @@ impl Node {
             settler: Settler::new(Arc::clone(&channels), Backoff::DEFAULT),
             channels,
             links: HashMap::new(),
+            deferred: HashMap::new(),
             published: Default::default(),
             started: Instant::now(),
         }
@@ -290,10 +303,34 @@ impl Node {
             }
             Wire::PeerDown { peer } => {
                 self.links.remove(&peer);
+                self.deferred.remove(&peer);
                 self.adapter.remove(peer);
                 self.dispatch(Event::PeerDisconnected { peer }, done).await;
             }
             Wire::Message { peer, msg } => {
+                // Nothing is sold while the adapter cannot enforce it: the
+                // capacity this node can deliver is zero, and the payer is told
+                // so as it would be at any other ceiling. Its money is untouched,
+                // since nothing is ratcheted, and core never hears of it.
+                if let Message::TopUp(ref t) = msg
+                    && !self.adapter.selling(peer)
+                {
+                    let reject = TopUpReject {
+                        refused: t
+                            .updates
+                            .iter()
+                            .map(|u| RefusedUpdate {
+                                channel_id: u.channel_id,
+                                cumulative: u.cumulative,
+                            })
+                            .collect(),
+                        max_rate_available: 0,
+                        reason: ReasonCode::RateExceedsCapacity,
+                    };
+                    log_refusal(peer, &reject, Side::Sent);
+                    self.send(peer, Message::TopUpReject(reject)).await;
+                    return;
+                }
                 // Core trusts what it is handed, so the signature is checked
                 // here — before the message reaches anything that acts on it.
                 // Every update in the purchase, since it is honored or refused
@@ -343,6 +380,7 @@ impl Node {
 
     /// Sample the meters and tick core.
     async fn on_tick(&mut self, done: &mpsc::Sender<Event>) {
+        self.release_deferred(done).await;
         for peer in self.adapter.peers() {
             let counters = self.adapter.counters(peer);
             self.dispatch(Event::Metered { peer, counters }, done).await;
@@ -352,6 +390,26 @@ impl Node {
                 .await;
         }
         self.dispatch(Event::Tick, done).await;
+    }
+
+    /// Verify the fundings held back from peers the adapter now sells to.
+    async fn release_deferred(&mut self, done: &mpsc::Sender<Event>) {
+        if self.deferred.is_empty() {
+            return;
+        }
+        let ready: Vec<PubKey> = self
+            .deferred
+            .keys()
+            .copied()
+            .filter(|peer| self.adapter.selling(*peer))
+            .collect();
+        for peer in ready {
+            for funding in self.deferred.remove(&peer).unwrap_or_default() {
+                debug!(%peer, "verifying a channel funding held while not selling");
+                self.execute(Action::VerifyFunding { peer, funding }, done)
+                    .await;
+            }
+        }
     }
 
     /// Feed one event to core and carry out everything it asks for.
@@ -432,6 +490,13 @@ impl Node {
                 mint_url,
                 capacity,
             } => {
+                // No new money goes out while this node cannot sell. Core is
+                // not told: it asks again once its funding timeout passes, and
+                // a failure reported now would have it ask every tick.
+                if !self.adapter.selling(peer) {
+                    debug!(%peer, request, "not funding a channel while not selling");
+                    return;
+                }
                 let channels = Arc::clone(&self.channels);
                 let done = done.clone();
                 let started = self.started;
@@ -460,6 +525,19 @@ impl Node {
             }
 
             Action::VerifyFunding { peer, funding } => {
+                // Held, not refused: refusing a funding ends the session, and
+                // a session already running is kept through an outage. Verified
+                // on the first tick the adapter sells to this peer again.
+                if !self.adapter.selling(peer) {
+                    let held = self.deferred.entry(peer).or_default();
+                    if held.len() < MAX_DEFERRED_FUNDINGS {
+                        debug!(%peer, "holding a channel funding while not selling");
+                        held.push(funding);
+                    } else {
+                        warn!(%peer, "dropping a channel funding: too many held while not selling");
+                    }
+                    return;
+                }
                 let channels = Arc::clone(&self.channels);
                 let done = done.clone();
                 let started = self.started;
@@ -537,6 +615,7 @@ impl Node {
             Action::DropPeer { peer } => {
                 info!(%peer, "dropping peer");
                 self.links.remove(&peer);
+                self.deferred.remove(&peer);
                 self.adapter.remove(peer);
             }
         }

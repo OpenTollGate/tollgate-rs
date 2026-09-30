@@ -9,7 +9,7 @@
 //! because the minimum flow allowance is itself a rate. Every peer therefore
 //! carries both at all times.
 //!
-//! Two implementations:
+//! The implementations:
 //!
 //! - [`Loopback`] shapes and meters a dedicated socket in userspace. It
 //!   forwards nobody's traffic, but the shaping and the counters are real, so it
@@ -20,6 +20,9 @@
 //! - [`Fips`] sets the same two numbers on a FIPS node through its control
 //!   socket, and lets the mesh enforce them. The only one whose peers are
 //!   authenticated before this node hears of them.
+//! - [`External`] hands them to a gate: an enforcement program this node does
+//!   not contain, over a Unix socket (`tollgate-gate-protocol.md`). A new use
+//!   case is a new gate rather than a new adapter.
 
 use std::net::IpAddr;
 
@@ -28,11 +31,15 @@ use tollgate_core::meter::Counters;
 use tollgate_protocol::PubKey;
 
 #[cfg(unix)]
+mod external;
+#[cfg(unix)]
 mod fips;
 mod loopback;
 #[cfg(target_os = "linux")]
 mod nftables;
 
+#[cfg(unix)]
+pub use external::{DelegateError, External, Refusal, check_hello};
 #[cfg(unix)]
 pub use fips::Fips;
 pub use loopback::Loopback;
@@ -78,4 +85,16 @@ pub trait ResourceAdapter: Send + Sync + std::fmt::Debug {
 
     /// Forget a peer that has gone away.
     fn remove(&self, peer: PubKey);
+
+    /// Whether this node may sell to a peer right now.
+    ///
+    /// Always, for an adapter that enforces in this process or refuses to
+    /// start. One whose enforcement lives in another program says no while it
+    /// cannot reach that program, and for a peer it refuses: the node then
+    /// rejects the peer's purchases and takes no new channel from it, and
+    /// funds none toward it, until it says yes again. Sessions and channels
+    /// already running are kept.
+    fn selling(&self, _peer: PubKey) -> bool {
+        true
+    }
 }

@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
         Some(path) => File::load(path)?,
         None => serde_yaml::from_str("{}").expect("the empty document is valid"),
     };
-    let config = file.resolve().context("resolve configuration")?;
+    let mut config = file.resolve().context("resolve configuration")?;
 
     if args.show_identity {
         println!("pubkey:     {}", hex::encode(config.identity.pubkey().0));
@@ -204,6 +204,25 @@ async fn main() -> Result<()> {
         #[cfg(not(unix))]
         ForwardingMode::Fips => {
             anyhow::bail!("forwarding.mode: fips needs a Unix control socket")
+        }
+        // A gate: a program of its own enforces, and this node tells it who has
+        // paid for what. Nothing listens until the gate has said hello,
+        // because the hello decides whether a peer's key is checked or
+        // believed; a gate asking for what the operator pinned against, or for
+        // something that contradicts itself, is a reason not to start at all.
+        #[cfg(unix)]
+        ForwardingMode::External => {
+            let socket = PathBuf::from(&file.forwarding.gate_socket);
+            info!(socket = %socket.display(), "waiting for the gate to say hello");
+            let (adapter, identify) =
+                tollgate_net::adapter::External::connect(&socket, file.forwarding.identify).await?;
+            config.identify = identify;
+            info!(socket = %socket.display(), ?identify, "enforcing through the gate");
+            Arc::new(adapter)
+        }
+        #[cfg(not(unix))]
+        ForwardingMode::External => {
+            anyhow::bail!("forwarding.mode: external needs a Unix socket")
         }
     };
 
