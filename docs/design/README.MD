@@ -33,6 +33,7 @@ can be read independently.
 | [tollgate-metering.md](core/tollgate-metering.md) | Metering: local counters, what they are and are not used for, peer metrics |
 | [tollgate-hazards.md](core/tollgate-hazards.md) | Constraints that exist because removing them reintroduces a known abuse |
 | [tollgate-daemons.md](core/tollgate-daemons.md) | Process split: tollgated delivers, mintd issues and burns, merchantd prices and holds all value |
+| [tollgate-gate-protocol.md](core/tollgate-gate-protocol.md) | Gate protocol: payer, subject and binding, evidence levels, the local socket to an external gate |
 
 ### Configuration
 
