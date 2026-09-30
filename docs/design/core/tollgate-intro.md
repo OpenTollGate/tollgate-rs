@@ -298,7 +298,7 @@ TollGate uses the [Cashu Spilman channel](https://github.com/SatsAndSports/cashu
 | [tollgate-metering.md](tollgate-metering.md) | Local metering counters and what they are and are not used for |
 | [tollgate-hazards.md](tollgate-hazards.md) | Constraints that exist because removing them reintroduces a known abuse |
 | [tollgate-daemons.md](tollgate-daemons.md) | Process split: tollgated delivers, mintd issues and burns, merchantd prices and holds all value |
-| [tollgate-gate-protocol.md](tollgate-gate-protocol.md) | Driving an external gate: payer, subject and binding, evidence levels, the local socket protocol |
+| [tollgate-gate-protocol.md](tollgate-gate-protocol.md) | Driving an external gate: payer, subject and binding, the local socket protocol |
 | [tollgate-configuration.md](tollgate-configuration.md) | Configuration schema and runtime parameters |
 
 ### Market
