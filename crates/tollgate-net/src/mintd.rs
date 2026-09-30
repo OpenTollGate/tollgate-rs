@@ -64,8 +64,10 @@ impl Default for MintdFile {
             url: "http://127.0.0.1:3338".into(),
             seed_file: String::new(),
             file: String::new(),
-            // The largest channel `tollgated` funds by default, 16 GiB.
-            max_amount: 1 << 34,
+            // 1 TiB: well over the largest channel `tollgated` funds (16 GiB),
+            // so one sale at the market fits one quote. Still within one mint
+            // request's outputs: 512 of the largest denomination, 2^31.
+            max_amount: 1 << 40,
             public: ListenSection {
                 listen: "0.0.0.0:3338".into(),
             },

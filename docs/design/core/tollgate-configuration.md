@@ -241,7 +241,7 @@ unit: "byte"
 url: "http://192.168.1.1:3338"          # as tollgate.yaml advertises it
 seed_file: "/etc/tollgate/mint.seed"    # this mint's own seed; keysets derive from it
 file: ""                                # mint.sqlite in the state directory
-max_amount: 17179869184                 # largest single quote: the largest channel
+max_amount: 1099511627776               # largest single quote (1 TiB); at least the largest channel
 
 public:
   listen: "0.0.0.0:3338"                # anyone: swap, melt (burn), state check, …
@@ -260,7 +260,7 @@ control_socket: ""                      # what minttop reads
 | `unit` | `"byte"` | Must match `mint.unit` in `tollgate.yaml` |
 | `url` | `"http://127.0.0.1:3338"` | Must match `mint.url` in `tollgate.yaml`; the mint names itself by it |
 | `seed_file` | `mint.seed` in the state directory, generated on first start | The mint's own secret, separate from the node's identity key. Keysets are derived from it |
-| `max_amount` | `17179869184` | Largest amount one quote may be for. At least the largest channel `tollgated` funds (`channels.max_capacity`) |
+| `max_amount` | `1099511627776` | Largest amount one quote may be for (1 TiB). At least the largest channel `tollgated` funds (`channels.max_capacity`), and at least what the market sells at once. Read at every start: it overrides the copy cdk keeps in the database |
 | `public.listen` | `"0.0.0.0:3338"` | The mint as peers and wallets see it. Mint quotes here are never paid unless auto-accept is on |
 | `private.listen` | `"127.0.0.1:3337"` | Mint quotes here are paid on creation. Whoever reaches it can print this node's vouchers, so it stays on loopback, for `merchantd` |
 | `auto_accept` | `true` | Report every NUT-04 mint quote on the public listener paid, so a peer mints what it needs for free |
@@ -311,7 +311,7 @@ mint:
   url: "http://192.168.1.1:3338"        # this node's mint, as buyers reach it
   private: "http://127.0.0.1:3337"      # where what is sold gets issued
   unit: "byte"
-  max_amount: 17179869184               # the most one sale may be for
+  max_amount: 1099511627776             # the most one sale may be for (1 TiB)
 
 price:                                  # default, for accepts entries without their own
   unit: "usd"                           # usd, eur or sat
@@ -402,7 +402,7 @@ external market through the gate is a possible later option.
 | `mint.url` | `"http://127.0.0.1:3338"` | This node's mint, as buyers reach it: what their vouchers are issued by |
 | `mint.private` | `"http://127.0.0.1:3337"` | `mintd`'s private listener |
 | `mint.unit` | `"byte"` | The unit this node's vouchers denominate in |
-| `mint.max_amount` | `17179869184` | The most one sale may be for |
+| `mint.max_amount` | `1099511627776` | The most one sale may be for. The market sells no more than `mintd` will issue in one quote either (its NUT-06 `nut04` `max_amount`), and publishes the lower of the two as `max_amount` in `info`; a buyer paying for more splits the payment into several sales |
 | `price.unit` | `"usd"` | `usd`, `eur` or `sat`. Decides whether a rate is needed at all |
 | `price.per_mbit` | *(required unless every entry has its own)* | Default price. An entry with neither its own price nor a default is not sold against |
 | `accepts[].price` | *(none: `price` applies)* | This issuer's own price, `unit` and `per_mbit` |
@@ -459,13 +459,13 @@ channels:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `min_capacity` | `134217728` | Smallest channel this node funds, in bytes (128 MiB) |
-| `max_capacity` | `17179869184` | Largest channel this node funds, in bytes (16 GiB). Also the most this node's market and mint issue in one swap, since a peer paying us funds a channel of up to this much |
+| `max_capacity` | `17179869184` | Largest channel this node funds, in bytes (16 GiB). The market and mint must issue at least this much in one swap, since a peer paying us funds a channel of up to this much |
 | `initial_capacity` | `1073741824` | First channel to a new peer, in bytes (1 GiB) |
 | `capacity_growth_factor` | `2.0` | Multiplier applied to a channel this node funds when it is replaced for filling up. A channel replaced because it neared expiry keeps its size. At least `1.0` |
 | `ttl_seconds` | `3600` | Lifetime of a channel this node funds (1 hour). As a receiver, this node refuses a channel expiring sooner than half its own TTL |
 | `rollover_threshold_pct` | `80` | Trigger rollover at 80% exhaustion |
 | `safety_margin_seconds` | `60` | The floor of the safety margin, which is `max(safety_margin_seconds, 2 × max_window_ms)` — see [Safety Margin](tollgate-payment-channels.md#safety-margin) |
-| `stale_timeout_seconds` | `60` | Session closed if the peer sends nothing for this long. Also how long a session that ended without a Disconnect is held, so a peer that reconnects can resume its channels; then its incoming channels are settled, as is any held channel that reaches its settle point first. `0` disables both: silence never closes a session, and a disconnect settles at once |
+| `stale_timeout_seconds` | `60` | Session closed if the peer sends nothing for this long. A node that has sent a peer nothing for a third of it sends that peer the Offer it last sent again, unchanged, as a keepalive (a third of 60 s when this is `0`), so a peer is only silent when it is gone — see Keepalive in [tollgate-protocol.md](tollgate-protocol.md#raw-tcp). Also how long a session that ended without a Disconnect is held, so a peer that reconnects can resume its channels; then its incoming channels are settled, as is any held channel that reaches its settle point first. `0` disables both: silence never closes a session, and a disconnect settles at once |
 
 Capacities must satisfy `0 < min_capacity ≤ initial_capacity ≤ max_capacity`, and `ttl_seconds` must be at least twice the safety margin, so a channel is never born inside its own margin.
 

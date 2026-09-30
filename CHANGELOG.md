@@ -12,6 +12,55 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 ### Added
 
+- A quiet link is kept alive: a node that has sent a peer nothing for a third
+  of its stale timeout sends it the last Offer again, byte for byte, so a
+  payer its provider does not charge is no longer dropped every minute. An
+  unchanged Offer is a no-op on receipt, so older nodes count it without an
+  upgrade. A policy override is sent as a revised Offer when it is made
+  (`Sessions::set_peer_policy` takes `now` and returns actions). Funding
+  requests carry an id (`request` on `Action::FundChannel`,
+  `Event::OutgoingChannelFunded` and the new `Event::OutgoingFundingFailed`):
+  a rollover funds one replacement, the first channel back is taken, and a
+  late one is handed back as `Action::ReclaimChannel`, which `tollgated` only
+  logs for now. A payer with no channel toward its peer and no request out
+  asks for one on the next tick, so a failed first funding no longer leaves a
+  session connected and unpaid. The docker nodes wait for `mintd` and
+  `merchantd` before starting `tollgated`; `testing/peering` holds a
+  non-charging payer past the stale timeout, and `testing/rollover` checks one
+  replacement per rollover under a slow funder.
+
+- A proxied session (`client::run`) buys 10 s grants and renews them 250 ms
+  before they run out, so 2.5% of each grant is forfeit to the renewal rather
+  than the 30% the defaults cost. The lead is below `MIN_SAFE_LEAD_MS` on
+  purpose, since the gateway is on the same machine, and such sessions do not
+  log the thin-lead warning. Other nodes keep the defaults.
+
+- A customer's IPv6 is gated, shaped and metered with its IPv4. The nftables
+  adapter ties a customer on the link to its MAC (from the IPv4 neighbour
+  table) and to the global and ULA IPv6 addresses the IPv6 neighbour table
+  lists for it, on the existing refresh: out by source MAC, in by destination
+  address, marked into the peer's `tc` class and counted into its counters.
+  An address stays with its peer until another MAC claims it. Past 16
+  addresses for one MAC, its IPv6 is withheld until the count drops back
+  (logged once at warn), so extra addresses cannot push the real one out of
+  the class and counters; its IPv4 is unaffected. Documented in
+  `peering-ip.md`, "A Customer's IPv6". `testing/forwarding` now runs a
+  dual-stack customer, and its gateway has no minimum flow allowance, so an
+  unpaid or lapsed customer is dropped rather than carried at 4096 B/s.
+
+- The market publishes `max_amount` in `info`: the most one sale may be for,
+  the lower of `merchantd`'s `mint.max_amount` and `mintd`'s per-quote limit,
+  and refuses a larger sale before taking the payment. If issuing fails after
+  the payment was taken, `merchantd` refunds it as a token in the same paper
+  (`502 {"error", "refund"}`, `market::Refunded` to a buyer). Refused swaps are
+  logged at warn. The refund pays its own swap fee, sized by what the mint
+  quotes, and never draws on `merchantd`'s other money; a refund token never
+  reaches a buyer's error message or log. A mint that does not answer the
+  limit lookup is asked again only after 5 s, so a hung `mintd` does not hold
+  every `info` and `swap` for 30 s. `Wallet::split` swaps a token into parts
+  of at most a given size, fees paid out of it, for buyers splitting one
+  payment into several sales.
+
 - Settling disposes of what a channel paid. `tollgated` keeps nothing a
   settlement brings in: a channel funded in this node's own vouchers is burned
   at `mintd` (`mint.local`) once closed, and one funded in another mint is
@@ -247,6 +296,17 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 - `tollgate-bootstrap.md` and its diagrams, with bootstrap tokens.
 
 ### Fixed
+
+- `mintd` applies `max_amount` (and its URL, name and methods) from its config
+  at every start: cdk kept serving the copy of its info saved on first start,
+  so a raised limit never took effect. The default `max_amount` for `mintd`
+  and `merchantd` is now 1 TiB, up from 16 GiB, which about 960 sat bought at
+  the packaged price.
+
+- `Wallet::collect` checks that a quote is paid before minting against it.
+  cdk reserved an unpaid quote and never released it, so every later claim,
+  once paid, failed with "already in use by another operation"; such a quote
+  is now released and claimed.
 
 - A `TopUp` refused in part no longer moves a channel's recorded state. The
   Spilman backend kept each update as it verified it, so when a purchase

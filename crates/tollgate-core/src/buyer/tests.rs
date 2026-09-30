@@ -344,6 +344,95 @@ fn a_replacement_is_opened_at_the_threshold_and_only_once() {
 }
 
 #[test]
+fn a_replacement_is_quiet_from_the_moment_its_funding_is_asked_for() {
+    // Funding is a mint round trip, many ticks long. Marked only once the
+    // channel came back, every tick in between would ask for another.
+    let mut buyer = opened(1_000_000);
+    let p = poll(&buyer, &policy(), demand(320_000), Millis(0)).expect("should buy");
+    buyer.record(p, Millis(0));
+    let asked = Millis(1_000);
+    assert_eq!(
+        buyer.rollover_due(80, asked, 0),
+        Some(RolloverReason::Capacity)
+    );
+
+    buyer.funding_requested(1, asked);
+    assert_eq!(buyer.rollover_due(80, asked + 1, 0), None);
+    assert_eq!(
+        buyer.rollover_due(80, asked + FUNDING_TIMEOUT_MS - 1, 0),
+        None,
+        "quiet while the host is still working on it"
+    );
+
+    // An answer that never comes is given up on, and the rollover asked again.
+    assert_eq!(
+        buyer.rollover_due(80, asked + FUNDING_TIMEOUT_MS, 0),
+        Some(RolloverReason::Capacity)
+    );
+
+    // A failure clears it at once.
+    buyer.funding_requested(2, asked);
+    buyer.funding_failed(2);
+    assert_eq!(
+        buyer.rollover_due(80, asked + 1, 0),
+        Some(RolloverReason::Capacity)
+    );
+
+    // And the channel coming back hands over to `pending`, which stays quiet
+    // until the peer confirms, however long that takes.
+    buyer.funding_requested(3, asked);
+    assert!(buyer.answers(3));
+    buyer.funded(channel(2), 1_000_000, None);
+    assert!(!buyer.funding_in_flight(asked));
+    assert_eq!(
+        buyer.rollover_due(80, asked + FUNDING_TIMEOUT_MS * 10, 0),
+        None
+    );
+}
+
+#[test]
+fn the_first_channel_back_is_taken_and_every_other_request_is_superseded() {
+    // A request given up on is not cancelled — the host may still be working
+    // on it — so after a timeout two can be out at once. One channel was
+    // wanted, whichever of them produces it.
+    let mut buyer = Buyer::new();
+    buyer.funding_requested(7, Millis(0));
+    buyer.funding_requested(9, Millis(FUNDING_TIMEOUT_MS));
+    assert!(buyer.answers(7), "the one given up on still counts");
+    assert!(buyer.answers(9));
+    assert!(!buyer.answers(6), "asked before either, of somebody else");
+    assert!(!buyer.answers(10), "not asked yet");
+
+    // The one given up on comes back first, and is taken.
+    buyer.funded(channel(1), 1_000, None);
+    assert!(
+        !buyer.answers(9),
+        "the later one is superseded: its channel is not wanted"
+    );
+
+    // Nor is anything taken over a channel still awaiting confirmation, even
+    // for a request asked since.
+    buyer.funding_requested(10, Millis(FUNDING_TIMEOUT_MS * 2));
+    assert!(!buyer.answers(10), "never over `pending`");
+    buyer.confirmed(channel(1));
+    assert!(buyer.answers(10));
+
+    // A failure of a request given up on leaves the later one waited on.
+    buyer.funding_requested(11, Millis(FUNDING_TIMEOUT_MS * 4));
+    buyer.funding_failed(10);
+    assert!(buyer.funding_in_flight(Millis(FUNDING_TIMEOUT_MS * 4 + 1)));
+    buyer.funding_failed(11);
+    assert!(!buyer.funding_in_flight(Millis(FUNDING_TIMEOUT_MS * 4 + 1)));
+    assert!(
+        buyer.answers(10) && buyer.answers(11),
+        "either may still land"
+    );
+
+    // A buyer started over has asked for nothing.
+    assert!(!Buyer::new().answers(11));
+}
+
+#[test]
 fn a_confirmed_replacement_waits_behind_the_channel_in_use() {
     // It does not displace the one being drained — that one runs to its
     // capacity first, which is what keeps the old channel's remaining capacity

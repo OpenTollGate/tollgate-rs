@@ -83,9 +83,19 @@ pub enum Action {
     },
 
     /// Fund a channel to pay this peer on.
+    ///
+    /// Answer with [`Event::OutgoingChannelFunded`](crate::Event::OutgoingChannelFunded)
+    /// or, if it cannot be done,
+    /// [`Event::OutgoingFundingFailed`](crate::Event::OutgoingFundingFailed),
+    /// carrying `request` back: no other channel is asked for while one of
+    /// them is still owed, unless the request times out.
     FundChannel {
         /// The peer to pay.
         peer: PubKey,
+        /// Which request this is, unique for the life of the node. Core can
+        /// only tell a late answer to a request it has given up on from the
+        /// answer to the one it asked since by this.
+        request: u64,
         /// Mint to fund against, picked from the ordered list the peer's Offer
         /// carried — the earliest entry we can actually fund in.
         mint_url: String,
@@ -110,6 +120,25 @@ pub enum Action {
         /// When the funder can reclaim it through the refund path, on the
         /// same clock as `now`, or `None` if it never expires or we do not
         /// know. Past it, a settlement is no longer worth retrying.
+        expires_at: Option<Millis>,
+    },
+
+    /// Take back the funds of a channel we funded and will never use.
+    ///
+    /// The answer to a [`Self::FundChannel`] core no longer wanted: another
+    /// request for the same peer came back first, or the peer is gone. Core
+    /// has told the peer nothing about it and forgets it here, so nothing will
+    /// ever be signed on it and no receiver will close it — the funds come
+    /// back only through the refund path, once `expires_at` has passed.
+    ReclaimChannel {
+        /// The peer it was funded toward.
+        peer: PubKey,
+        /// The channel.
+        channel_id: ChannelId,
+        /// Units locked in it.
+        capacity: u64,
+        /// When the refund path opens, on the same clock as `now`, or `None`
+        /// for a channel that never expires.
         expires_at: Option<Millis>,
     },
 

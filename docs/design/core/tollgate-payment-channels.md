@@ -222,6 +222,33 @@ Old channel continues draining: 801, 802, ... 1000
 At 1000: old channel exhausted, charges continue on new channel
 ```
 
+### One Rollover at a Time
+
+A rollover is under way from the moment the funder asks its wallet for the
+replacement, not from the moment the wallet hands it back. Funding is a mint
+round trip, far longer than the tick the rollover check runs on, and a check
+that only noticed the channel once it existed would ask for another on every
+tick in between. From the request until the receiver's RolloverReady, no
+further rollover starts.
+
+A request that fails is cleared at once, so a rollover still due is asked for
+again on the next check. One that is never answered at all is given up on
+after 30 s — long next to a mint round trip, short next to the two purchases'
+worth of headroom, or the safety margin of a minute or more, that a rollover
+starts with. The opening channel is asked for when the peer's Offer arrives,
+and after that by the same check, under the same rule: see
+[Funding Failure](#funding-failure).
+
+A request given up on is not cancelled — the wallet may still be working on
+it — so two can be out at once, and both can come back. Each carries an id
+that its answer echoes (`Action::FundChannel`, `Event::OutgoingChannelFunded`
+and `Event::OutgoingFundingFailed` all carry `request`). The first channel to
+come back for any open request is taken, since one channel was wanted,
+whichever request produced it; every other request open at that moment is
+superseded. Nor is a channel ever taken over one that is still awaiting the
+peer's confirmation. A superseded channel is not announced to the peer; core
+hands it to the host with `Action::ReclaimChannel` instead.
+
 ### Overlap Period
 
 During rollover, **two channels exist simultaneously** for the same direction:
@@ -463,7 +490,10 @@ What a channel update commits to is the channel scheme's business, which is why 
 ### Funding Failure
 
 If channel funding fails (mint unreachable, `merchantd` cannot supply the vouchers, keyset error):
-- Retry on next mint connectivity check
+- The host reports it to core (`Event::OutgoingFundingFailed`), which clears the request, so a channel still wanted is asked for again on the next tick
+- A request that is never answered is given up on after 30 s, with the same effect (see [One Rollover at a Time](#one-rollover-at-a-time))
+- A channel still wanted is either a rollover still due or the first channel. On every tick, a payer that buys from a peer (the peer's Offer does not set `no_charge`, and its own `max_rate` is not zero) and has no channel toward it — none in use, none confirmed and waiting, none awaiting confirmation, and no request out — asks for one as it did at the opening, and sends it with Accept. So a payer whose opening funding failed, because the peer's mint was not up yet at boot, say, keeps asking until it pays; the keepalive means it would otherwise stay connected and unpaid for good. The same check funds a payer whose peer starts charging it mid-session, and one whose channel in use reached its settle point with no replacement behind it
+- A request that succeeds after it was given up on, once another channel has come back in its place, is superseded (see [One Rollover at a Time](#one-rollover-at-a-time)). Its channel was never announced, so nothing will ever be signed on it and no receiver will close it: its funds come back only through the refund path, after its expiry. Core emits `Action::ReclaimChannel` for it. This is a known gap: `tollgated` gets money back out of a channel it funded only as change, once the receiver has closed it (see `settle` in the [ChannelBackend Trait](#channelbackend-trait)), and nobody will close this one; taking the refund path itself is not built yet. Until it is, `tollgated` logs the channel at `warn`, with its capacity and when its refund path opens, for the operator to reclaim
 
 ### Settlement Failure
 

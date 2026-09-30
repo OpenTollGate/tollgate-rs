@@ -10,6 +10,13 @@
 //! pending   funded by us, not yet confirmed by the peer
 //! ```
 //!
+//! Before `pending` there is a fourth, shorter stage with no channel yet: the
+//! host has been asked to fund one and has not answered. Funding is a mint
+//! round trip, far longer than a tick, so it is marked the moment it is asked
+//! for — see [`Buyer::funding_requested`]. Each request carries an id, so an
+//! answer that comes after its request was given up on and asked again can be
+//! told apart from the answer to the one asked since — see [`Buyer::answers`].
+//!
 //! A channel is opened well before it is needed (default: at 80% of the one in
 //! use) precisely so that `next` is ready by the time a purchase overflows
 //! `active`, and the overflow can be signed across both rather than stalling.
@@ -227,6 +234,36 @@ pub struct Purchase {
     pub trigger: Trigger,
 }
 
+/// How long a funding request may go unanswered before a rollover is tried
+/// again.
+///
+/// The host answers every request, with the channel or with a failure, so this
+/// only matters when an answer never comes — a funding call that hangs. It is
+/// long next to a mint round trip, so a slow funding is not doubled, and short
+/// next to what a rollover has left: one starts with at least two purchases'
+/// worth of headroom, or a whole safety margin, of a minute or more, before
+/// expiry.
+pub const FUNDING_TIMEOUT_MS: u64 = 30_000;
+
+/// The funding requests still open for one peer: every one asked for since a
+/// channel last came back, of which the latest is the one being waited on.
+///
+/// The ids come from one counter for the whole node, so they only ever grow,
+/// and a request asked for later always has the larger one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct FundingRequests {
+    /// The earliest request still open. Every request this buyer made from
+    /// here to `latest` is still open: none has been answered with a channel.
+    /// An id in between may have gone to another peer, but its answer names
+    /// that peer, so it never reaches this buyer.
+    first: u64,
+    /// The one asked for last.
+    latest: u64,
+    /// When `latest` was asked for, while it is still being waited on. `None`
+    /// once the host said it failed.
+    since: Option<Millis>,
+}
+
 /// Why a channel is being replaced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RolloverReason {
@@ -274,6 +311,10 @@ pub struct Buyer {
     /// the peer has not said it verified the funding, so a grant signed here
     /// might be against a channel that never opens.
     pub(super) pending: Option<ChannelBuyer>,
+    /// The requests we have made to the host to fund a channel for this peer
+    /// and have had no channel back for. No channel exists yet, so there is
+    /// nothing to put in `pending`, but a channel is already on the way.
+    pub(super) funding: Option<FundingRequests>,
     /// Rate the grant in force bought.
     pub(super) rate: u64,
     /// When it lapses.
@@ -309,6 +350,7 @@ impl Buyer {
             active: None,
             next: None,
             pending: None,
+            funding: None,
             rate: 0,
             deadline: Millis::ZERO,
             started: false,
@@ -372,6 +414,7 @@ impl Buyer {
             active: self.active,
             next: self.next,
             pending: self.pending,
+            funding: self.funding,
             last_grant: self.last_grant,
             ..Self::new()
         };
@@ -385,8 +428,66 @@ impl Buyer {
         self.pending = None;
     }
 
+    /// Record that we have asked the host to fund a channel for this peer,
+    /// under the id `request`.
+    ///
+    /// From here no rollover is started until the host answers — with the
+    /// channel, [`Self::funded`], or with a failure,
+    /// [`Self::funding_failed`] — or [`FUNDING_TIMEOUT_MS`] passes without
+    /// either. Marking it only once the channel came back would leave every
+    /// tick of the mint round trip free to ask for another.
+    ///
+    /// A request asked for after an earlier one timed out does not close the
+    /// earlier one: whichever of them comes back first is taken.
+    pub fn funding_requested(&mut self, request: u64, now: Millis) {
+        let first = self.funding.map_or(request, |open| open.first);
+        self.funding = Some(FundingRequests {
+            first,
+            latest: request,
+            since: Some(now),
+        });
+    }
+
+    /// The host could not fund the channel we asked for under `request`. The
+    /// next check may ask again.
+    ///
+    /// A failure of a request already given up on changes nothing: a later one
+    /// is being waited on.
+    pub fn funding_failed(&mut self, request: u64) {
+        if let Some(open) = self.funding.as_mut()
+            && open.latest == request
+        {
+            open.since = None;
+        }
+    }
+
+    /// Whether a funding request is still out and not yet given up on.
+    pub fn funding_in_flight(&self, now: Millis) -> bool {
+        self.funding
+            .and_then(|open| open.since)
+            .is_some_and(|since| now.saturating_since(since) < FUNDING_TIMEOUT_MS)
+    }
+
+    /// Whether the channel the host funded under `request` is one to take.
+    ///
+    /// It is if we asked this buyer for it and no channel has come back since
+    /// — neither another answer, nor one still waiting in `pending`. The first
+    /// answer to arrive for any request still open wins, and closes the rest:
+    /// one channel was wanted, whichever request produced it. Any other is
+    /// superseded, and its funds have to be reclaimed rather than a second
+    /// channel opened on top of the first.
+    pub fn answers(&self, request: u64) -> bool {
+        self.pending.is_none()
+            && self
+                .funding
+                .is_some_and(|open| (open.first..=open.latest).contains(&request))
+    }
+
     /// Record a channel we have funded but the peer has not yet confirmed.
+    ///
+    /// Closes every funding request still open; check [`Self::answers`] first.
     pub fn funded(&mut self, id: ChannelId, capacity: u64, expires_at: Option<Millis>) {
+        self.funding = None;
         self.pending = Some(ChannelBuyer::new(id, capacity, expires_at));
     }
 
@@ -465,12 +566,18 @@ impl Buyer {
     ///
     /// `margin_ms` is the safety margin, from
     /// [`NodePolicy::safety_margin_ms`](crate::config::NodePolicy::safety_margin_ms).
+    ///
+    /// Quiet while a funding request is out, from the moment it is asked for —
+    /// see [`Self::funding_requested`].
     pub fn rollover_due(
         &self,
         threshold_pct: u8,
         now: Millis,
         margin_ms: u64,
     ) -> Option<RolloverReason> {
+        if self.funding_in_flight(now) {
+            return None;
+        }
         if self.needs_rollover(threshold_pct) {
             return Some(RolloverReason::Capacity);
         }

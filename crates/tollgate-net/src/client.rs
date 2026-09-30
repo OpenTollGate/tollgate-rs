@@ -28,6 +28,18 @@ use crate::config::File;
 use crate::node::Node;
 use crate::wire::Connector;
 
+/// How long each grant a session buys lasts. A proxied device's rate holds
+/// until its user changes it, so long windows cost little in reaction and keep
+/// the forfeit on each renewal (lead / window) small.
+const WINDOW_MS: u32 = 10_000;
+
+/// How long before a grant runs out the session buys the next. Below
+/// [`tollgate_core::buyer::BuyerPolicy::MIN_SAFE_LEAD_MS`] on purpose: the
+/// gateway is on the same machine, and at 250 ms of 10 s only 2.5% of each
+/// grant is forfeit instead of 30%. If renewals land late under load, the
+/// phone's flows stall for seconds — raise this first.
+const RENEW_LEAD_MS: u32 = 250;
+
 /// What a buyer session needs to know.
 #[derive(Debug, Clone)]
 pub struct ClientSpec {
@@ -63,7 +75,7 @@ identity: {{ secret_key: "{secret}" }}
 mint: {{ url: "{mint}" }}
 vouchers: {{ accepted_mints: ["{mint}"] }}
 network: {{ listen: "127.0.0.1:0" }}
-buying: {{ headroom_pct: 100 }}
+buying: {{ headroom_pct: 100, window_ms: {window_ms}, renew_lead_ms: {renew_lead_ms} }}
 channels:
   initial_capacity: {capacity}
   min_capacity: {capacity}
@@ -78,9 +90,15 @@ peers:
         mint = spec.gateway_mint,
         gateway = spec.gateway,
         endpoint = spec.endpoint,
+        window_ms = WINDOW_MS,
+        renew_lead_ms = RENEW_LEAD_MS,
     );
     let file: File = serde_yaml::from_str(&yaml).context("describe the session")?;
-    let mut config = file.resolve().context("resolve the session")?;
+    // The lead is thin on purpose (see `RENEW_LEAD_MS`), so the warning an
+    // operator's thin lead gets would be noise here, once per device.
+    let mut config = file
+        .resolve_with_chosen_lead()
+        .context("resolve the session")?;
     config.connector = connector;
 
     let channels = Arc::new(

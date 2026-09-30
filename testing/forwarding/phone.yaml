@@ -1,0 +1,21 @@
+# A dual-stack customer: buys transit, and its IPv6 is charged to what it buys.
+identity:
+  secret_key: "561d1621ead68284145770d1baf7f11f90af2843817ec58e5842b3db13feb928"
+mint:
+  # Its own mint, in the namespace it shares with `phone`.
+  url: "http://phone:3338"
+  unit: "byte"
+vouchers:
+  accepted_mints:
+    - "http://phone:3338"
+buying:
+  # As the client's: a real TCP flow.
+  window_ms: 4000
+  renew_lead_ms: 1200
+network:
+  listen: "0.0.0.0:4747"
+peers:
+  "02f383c916faa702f91b5e836ed6f12d5f80fb1752ff4db28e6e77997036befd74":
+    # By address, so the session comes from the phone's IPv4: that is what
+    # ties its MAC, and through the MAC its IPv6, to the grant.
+    endpoint: "172.28.0.20:4747"

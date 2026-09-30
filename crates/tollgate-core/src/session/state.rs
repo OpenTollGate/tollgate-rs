@@ -8,7 +8,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tollgate_protocol::PubKey;
+use tollgate_protocol::{Offer, PubKey};
 
 use crate::access::AccessLevel;
 use crate::buyer::{Buyer, WindowBounds};
@@ -64,6 +64,12 @@ pub struct PeerSession {
     pub policy: PeerPolicy,
     /// Their Offer, once it arrives.
     pub offer: Option<PeerOffer>,
+    /// The Offer we last sent them, which is what the keepalive repeats.
+    ///
+    /// Replayed, not rebuilt: a keepalive is meant to change nothing, and one
+    /// rebuilt from the policy in force would carry an override made since as
+    /// a side effect of the link being quiet.
+    pub offer_sent: Option<Offer>,
 
     // --- the stream where they pay us -------------------------------------
     /// What they have bought and drawn, and the channels they pay us on. The
@@ -102,6 +108,9 @@ pub struct PeerSession {
     pub applied_rate: Option<u64>,
     /// When we last heard anything at all from them.
     pub last_seen: Millis,
+    /// When we last sent them anything at all, so a link we have nothing to
+    /// say on is kept alive before the peer's stale timeout drops it.
+    pub last_sent: Millis,
     /// Whether the peer, coming back after an unclean disconnect, said it
     /// still holds the channel we pay it on.
     ///
@@ -120,6 +129,7 @@ impl PeerSession {
             access: AccessLevel::None,
             policy,
             offer: None,
+            offer_sent: None,
             grant: GrantState::new(),
             meter: Meter::new(),
             buyer: Buyer::new(),
@@ -128,6 +138,7 @@ impl PeerSession {
             last_meter_at: now,
             applied_rate: None,
             last_seen: now,
+            last_sent: now,
             kept_by_peer: false,
         }
     }

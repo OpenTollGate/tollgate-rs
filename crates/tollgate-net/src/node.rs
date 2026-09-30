@@ -124,8 +124,11 @@ impl Node {
             config.policy.clone(),
             config.buyer,
         );
+        // Nobody is connected yet, so there is nobody to tell: each peer
+        // hears its terms in the Offer it gets on connecting.
         for peer in &config.peers {
-            sessions.set_peer_policy(peer.pubkey, peer.policy);
+            let told = sessions.set_peer_policy(peer.pubkey, peer.policy, Millis::ZERO);
+            debug_assert!(told.is_empty());
         }
 
         Self {
@@ -425,6 +428,7 @@ impl Node {
 
             Action::FundChannel {
                 peer,
+                request,
                 mint_url,
                 capacity,
             } => {
@@ -437,6 +441,7 @@ impl Node {
                             let now = millis_since(started);
                             let _ = done.blocking_send(Event::OutgoingChannelFunded {
                                 peer,
+                                request,
                                 channel_id: funded.channel_id,
                                 capacity: funded.capacity,
                                 expires_at: funded.expiry.map(|e| channel::expires_at(e, now)),
@@ -444,7 +449,11 @@ impl Node {
                             });
                         }
                         Err(e) => {
-                            warn!(%peer, error = format!("{e:#}"), "could not fund a channel")
+                            warn!(%peer, error = format!("{e:#}"), "could not fund a channel");
+                            // So core can ask again rather than wait out the
+                            // funding timeout.
+                            let _ =
+                                done.blocking_send(Event::OutgoingFundingFailed { peer, request });
                         }
                     }
                 });
@@ -498,6 +507,31 @@ impl Node {
                     .and_then(|at| self.started.checked_add(Duration::from_millis(at.0)))
                     .map(tokio::time::Instant::from_std);
                 self.settler.settle(peer, channel_id, deadline);
+            }
+
+            Action::ReclaimChannel {
+                peer,
+                channel_id,
+                capacity,
+                expires_at,
+            } => {
+                // A funding core had given up on came back after the one
+                // asked for in its place. Nothing was signed on it and the
+                // peer never heard of it, so no receiver will ever close it,
+                // and what is locked in it comes back only through the
+                // refund path once it expires. Taking that path is not built
+                // yet — the same gap as change after a reboot — so the
+                // channel is named here for the operator to reclaim.
+                let expires_in_s = expires_at.map(|at| at.saturating_since(self.now()) / 1_000);
+                warn!(
+                    %peer,
+                    ?channel_id,
+                    capacity,
+                    ?expires_in_s,
+                    "funded a channel that is no longer wanted; its funds are \
+                     locked until its refund path opens, and this node does \
+                     not reclaim them itself yet"
+                );
             }
 
             Action::DropPeer { peer } => {
