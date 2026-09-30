@@ -14,6 +14,9 @@
 //!   has no way to express.
 //! - `frame.rs` — the 2-byte little-endian length prefix used by the raw-TCP
 //!   transport, and an incremental reader for it.
+//! - [`gate`] — the gate protocol: the messages `tollgated` and an external
+//!   enforcement program exchange over a Unix socket, in the same encoding and
+//!   framing (`docs/design/core/tollgate-gate-protocol.md`).
 //!
 //! The crate is `no_std` + `alloc`: it runs unchanged on an ESP32.
 
@@ -23,6 +26,7 @@ extern crate alloc;
 
 mod codec;
 mod frame;
+pub mod gate;
 mod message;
 mod types;
 
