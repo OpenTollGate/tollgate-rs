@@ -30,12 +30,12 @@ Nothing has been released yet. Everything below is on `master` and will ship as
   unreachable, before its first hello, or for a payer it reported a conflict
   for, the node sells nothing: TopUps are refused with a ceiling of 0, a new
   channel's funding is held until the gate is back, and none is funded
-  toward the payer; sessions and channels already running are kept, and every
+  toward the payer (core asks again after its 30 s funding timeout); sessions and channels already running are kept, and every
   reconnect sends the gate the full state. `ResourceAdapter` gains
   `selling`, true for the built-in adapters. `External::delegate` adds a
   subject a local trusted client vouches for, refused when the gate refuses
   delegated bindings; nothing on the control socket calls it yet.
-  `testing/external` runs a gateway behind the stub gate, and
+  `testing/external` runs a gateway behind the stub gate, in CI too, and
   `testing/scripts/build.sh` takes `IMAGE_TAG` to build under another tag.
 
 - A quiet link is kept alive: a node that has sent a peer nothing for a third

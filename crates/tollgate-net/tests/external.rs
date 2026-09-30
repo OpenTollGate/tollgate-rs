@@ -532,6 +532,39 @@ async fn a_delegated_binding_reaches_a_gate_that_accepts_them_flagged() {
 }
 
 #[tokio::test]
+async fn a_payer_holds_at_most_one_binds_worth_of_subjects() {
+    let stub = Stub::new();
+    let mut hello = lan_hello();
+    hello.delegated = true;
+    let (adapter, _, mut conn) = connected(&stub, hello).await;
+    let payer = key(12);
+    adapter.register(payer, lan(12));
+    conn.until("the payer's set", |m| is_set(m, payer, Some(0)))
+        .await;
+
+    // Its own, and seven more.
+    for i in 0..7 {
+        adapter
+            .delegate(payer, Subject::Ipv4([10, 0, 0, i]))
+            .expect("room left");
+    }
+    let GateMessage::Bind(bind) = conn
+        .until(
+            "the last bind",
+            |m| matches!(m, GateMessage::Bind(b) if b.bindings.len() == gate::MAX_BINDINGS),
+        )
+        .await
+    else {
+        unreachable!()
+    };
+    assert_eq!(bind.bindings.iter().filter(|b| b.delegated).count(), 7);
+    assert_eq!(
+        adapter.delegate(payer, Subject::Ipv4([10, 0, 0, 99])),
+        Err(DelegateError::TooMany)
+    );
+}
+
+#[tokio::test]
 async fn a_conflict_stops_sales_to_that_payer_only() {
     let stub = Stub::new();
     let (adapter, _, mut conn) = connected(&stub, lan_hello()).await;

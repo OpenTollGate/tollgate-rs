@@ -376,6 +376,8 @@ pub enum Error {
     TooManyBindings(usize),
     /// An opaque subject longer than [`MAX_OPAQUE_LEN`].
     OpaqueTooLong(usize),
+    /// A message longer than a frame can carry, [`crate::MAX_FRAME_LEN`].
+    FrameTooLong(usize),
 }
 
 impl fmt::Display for Error {
@@ -397,6 +399,11 @@ impl fmt::Display for Error {
             Self::TooManyBindings(n) => write!(
                 f,
                 "bind carried {n} subjects, more than the {MAX_BINDINGS} allowed"
+            ),
+            Self::FrameTooLong(n) => write!(
+                f,
+                "a message of {n} bytes, more than a frame's {}",
+                crate::MAX_FRAME_LEN
             ),
             Self::OpaqueTooLong(n) => write!(
                 f,
@@ -528,10 +535,11 @@ pub fn encode_frame(msg: &GateMessage, out: &mut Vec<u8>) -> Result<(), Error> {
     encode(msg, out)?;
 
     let len = out.len() - prefix_at - 2;
-    debug_assert!(
-        len <= crate::MAX_FRAME_LEN,
-        "no gate message can exceed the 16-bit cap"
-    );
+    // Only a hello with an enormous list of opaque kinds could get here.
+    if len > crate::MAX_FRAME_LEN {
+        out.truncate(prefix_at);
+        return Err(Error::FrameTooLong(len));
+    }
     out[prefix_at..prefix_at + 2].copy_from_slice(&(len as u16).to_le_bytes());
     Ok(())
 }

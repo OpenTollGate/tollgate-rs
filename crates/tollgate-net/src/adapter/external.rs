@@ -75,6 +75,10 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 /// the next connection starts from the full state.
 const OUTBOX: usize = 4_096;
 
+/// How long one write to the gate may take before the gate is taken to have
+/// stopped reading, and the connection is closed.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Why a `hello` was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
@@ -221,6 +225,10 @@ struct Link {
     /// the state of the one after it.
     id: u64,
     out: mpsc::Sender<GateMessage>,
+    /// Closes the socket at once when this node drops the link, rather than
+    /// once whatever is queued has drained: the gate only closes when it sees
+    /// the connection go.
+    close: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Debug, Default)]
@@ -306,9 +314,10 @@ impl State {
     /// Stop selling, and carry what the connection counted into the base the
     /// next one counts from.
     fn drop_link(&mut self) {
-        if self.link.take().is_none() {
+        let Some(link) = self.link.take() else {
             return;
-        }
+        };
+        link.close.notify_one();
         for peer in self.peers.values_mut() {
             peer.base = peer.total();
             peer.current = Counters::default();
@@ -394,7 +403,7 @@ impl External {
         if entry.delegated.contains(&subject) {
             return Ok(());
         }
-        // One of the eight is the payer's own.
+        // One of the eight is the payer's own: seven delegated at most.
         if entry.delegated.len() + 1 >= MAX_BINDINGS {
             return Err(DelegateError::TooMany);
         }
@@ -422,23 +431,29 @@ async fn maintain(
 ) {
     let mut first = Some(first);
     let mut reported = false;
+    let mut refused = false;
     loop {
         match UnixStream::connect(&socket).await {
             Ok(stream) => {
                 reported = false;
                 match session(stream, &state, pin, &mut first).await {
-                    Ok(()) => {}
+                    Ok(()) => refused = false,
                     Err(Ended::Refused(refusal)) => {
                         if let Some(first) = first.take() {
                             let _ = first.send(Err(refusal));
                             return;
                         }
-                        error!(
-                            socket = %socket.display(),
-                            "refusing the gate: {refusal}; selling nothing until it is fixed"
-                        );
+                        // Once, not every second it is tried again.
+                        if !refused {
+                            error!(
+                                socket = %socket.display(),
+                                "refusing the gate: {refusal}; selling nothing until it is fixed"
+                            );
+                            refused = true;
+                        }
                     }
                     Err(Ended::Error(e)) => {
+                        refused = false;
                         warn!(
                             socket = %socket.display(),
                             error = format!("{e:#}"),
@@ -508,15 +523,24 @@ async fn session(
     // Install the link and queue the full state under one lock, so a change
     // made meanwhile lands either in the snapshot or after it — never
     // between.
-    let (out, mut outbox) = mpsc::channel(OUTBOX);
+    let close = Arc::new(tokio::sync::Notify::new());
+    let mut outbox;
     let id = {
         let mut state = state.lock().expect("not poisoned");
+        // Room for the full state on top of the ordinary margin, so the
+        // snapshot can never fill the queue by itself.
+        let (out, rx) = mpsc::channel(OUTBOX + 2 * state.peers.len());
+        outbox = rx;
         state.mode = Some(mode);
         state.hello = Some(hello.clone());
         state.unbindable.clear();
         state.next_id += 1;
         let id = state.next_id;
-        state.link = Some(Link { id, out });
+        state.link = Some(Link {
+            id,
+            out,
+            close: Arc::clone(&close),
+        });
         // A conflict belongs to the connection that reported it: the gate that
         // refused a binding has forgotten it, and reports it again on this one.
         // In the order the payers arrived, so the payer that held a subject
@@ -552,7 +576,9 @@ async fn session(
             buf.clear();
             gate::encode_frame(&msg, &mut buf)
                 .map_err(|e| anyhow::anyhow!("a message for the gate would not encode: {e}"))?;
-            tx.write_all(&buf).await?;
+            tokio::time::timeout(WRITE_TIMEOUT, tx.write_all(&buf))
+                .await
+                .map_err(|_| anyhow::anyhow!("the gate stopped reading"))??;
         }
         // The sender went: this node dropped the connection itself.
         anyhow::Ok(())
@@ -562,6 +588,7 @@ async fn session(
     let result = tokio::select! {
         r = writer => r,
         r = reading => r,
+        () = close.notified() => Err(anyhow::anyhow!("this node dropped the connection")),
     };
 
     state.lock().expect("not poisoned").drop_link_if(id);
@@ -653,6 +680,7 @@ async fn read_loop(
                     }
                     entry.conflicted = true;
                 }
+                GateMessage::Hello(_) => bail!("the gate said hello twice"),
                 other => bail!(
                     "the gate sent {:?}, which only this node sends",
                     other.msg_type()
@@ -678,7 +706,11 @@ impl ResourceAdapter for External {
         let mut state = self.state.lock().expect("not poisoned");
         match state.peers.get_mut(&peer) {
             Some(entry) if entry.addr == addr => return,
-            Some(entry) => entry.addr = addr,
+            Some(entry) => {
+                entry.addr = addr;
+                // A new subject gets a fresh answer from the gate.
+                entry.conflicted = false;
+            }
             None => {
                 state.next_seq += 1;
                 let seq = state.next_seq;

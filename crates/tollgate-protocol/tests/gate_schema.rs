@@ -452,3 +452,20 @@ fn a_hello_accepts_only_the_kinds_it_listed() {
         delegated: true,
     }));
 }
+
+#[test]
+fn a_message_too_long_for_a_frame_is_refused_rather_than_truncated() {
+    let hello = GateMessage::Hello(Hello {
+        version: GATE_PROTOCOL_VERSION,
+        kinds: vec![SubjectKind::Opaque],
+        identify: Identify::Claimed,
+        delegated: true,
+        opaque_kinds: vec![u32::MAX; 20_000],
+    });
+    let mut out = vec![1, 2, 3];
+    assert!(matches!(
+        encode_frame(&hello, &mut out),
+        Err(Error::FrameTooLong(_))
+    ));
+    assert_eq!(out, [1, 2, 3], "nothing half-written is left behind");
+}
