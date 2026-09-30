@@ -15,6 +15,7 @@ use tollgate_core::config::{GrantPolicy, NodePolicy, PeerPolicy};
 use tollgate_protocol::{DEFAULT_PORT, PubKey};
 use tracing::warn;
 
+use crate::channel::Settle;
 use crate::identity::Identity;
 use crate::node::{NodeConfig, PeerConfig};
 use crate::wire::Identify;
@@ -107,11 +108,74 @@ impl MintSection {
 #[serde(deny_unknown_fields, default)]
 pub struct VouchersSection {
     /// Most preferred first, at least one. Defaults to this node's own mint.
-    pub accepted_mints: Vec<String>,
+    pub accepted_mints: Vec<AcceptedMint>,
     /// Unsigned surcharge on what a peer pushes at us. The net rate is `m - 1`,
     /// so `2` charges an upload like a download and `k + 1` charges it `k`
     /// times.
     pub received_multiplier: u16,
+}
+
+/// A mint this node takes payment in, and what becomes of its vouchers once a
+/// channel funded in them has settled.
+///
+/// Written as a bare URL, which keeps them, or as `{ url, settle }`. `settle`
+/// is ignored for this node's own mint, whose vouchers are always burned.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(from = "AcceptedMintEntry")]
+pub struct AcceptedMint {
+    /// The mint.
+    pub url: String,
+    /// Keep or burn what a channel funded in it pays.
+    pub settle: Settle,
+}
+
+/// The two ways an accepted mint may be written.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AcceptedMintEntry {
+    Url(String),
+    Full(FullEntry),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FullEntry {
+    url: String,
+    #[serde(default)]
+    settle: Settle,
+}
+
+impl From<AcceptedMintEntry> for AcceptedMint {
+    fn from(entry: AcceptedMintEntry) -> Self {
+        match entry {
+            AcceptedMintEntry::Url(url) => Self {
+                url,
+                settle: Settle::Keep,
+            },
+            AcceptedMintEntry::Full(FullEntry { url, settle }) => Self { url, settle },
+        }
+    }
+}
+
+impl VouchersSection {
+    /// The accepted mints set to burn: what a channel funded in one of them
+    /// pays is melted at it rather than kept.
+    pub fn burned(&self) -> Vec<String> {
+        self.accepted_mints
+            .iter()
+            .filter(|m| m.settle == Settle::Burn)
+            .map(|m| m.url.clone())
+            .collect()
+    }
+
+    /// Whether anything is kept: an accepted mint other than `own` set to
+    /// keep, whose proceeds go to `merchantd`.
+    pub fn keeps_any(&self, own: &str) -> bool {
+        let same = |a: &str, b: &str| a.trim_end_matches('/') == b.trim_end_matches('/');
+        self.accepted_mints
+            .iter()
+            .any(|m| m.settle == Settle::Keep && !same(&m.url, own))
+    }
 }
 
 /// Where `merchantd` is.
@@ -501,7 +565,11 @@ impl File {
         let accepted_mints = if self.vouchers.accepted_mints.is_empty() {
             vec![self.mint.url.clone()]
         } else {
-            self.vouchers.accepted_mints.clone()
+            self.vouchers
+                .accepted_mints
+                .iter()
+                .map(|m| m.url.clone())
+                .collect()
         };
 
         let [min_window_ms, max_window_ms] = self.grants.window_range_ms;
@@ -870,6 +938,71 @@ mod tests {
                 .first_channel_capacity(),
             5_000_000
         );
+    }
+
+    #[test]
+    fn an_accepted_mint_is_a_bare_url_that_keeps_or_says_what_to_do() {
+        let file: File = serde_yaml::from_str(
+            "vouchers:\n  accepted_mints:\n\
+             \x20   - http://ours:3338\n\
+             \x20   - url: http://upstream:3338\n\
+             \x20   - url: http://upstream2:3338\n      settle: keep\n\
+             \x20   - url: http://neighbour:3338\n      settle: burn\n",
+        )
+        .expect("parse");
+        let settles: Vec<_> = file
+            .vouchers
+            .accepted_mints
+            .iter()
+            .map(|m| (m.url.as_str(), m.settle))
+            .collect();
+        assert_eq!(
+            settles,
+            [
+                ("http://ours:3338", Settle::Keep),
+                ("http://upstream:3338", Settle::Keep),
+                ("http://upstream2:3338", Settle::Keep),
+                ("http://neighbour:3338", Settle::Burn),
+            ]
+        );
+        assert_eq!(file.vouchers.burned(), ["http://neighbour:3338"]);
+
+        // Core sees the URLs, in order.
+        let config = file.resolve().expect("resolve");
+        assert_eq!(config.policy.accepted_mints.len(), 4);
+        assert_eq!(config.policy.accepted_mints[3], "http://neighbour:3338");
+    }
+
+    #[test]
+    fn only_another_mint_kept_needs_somewhere_to_keep_it() {
+        let own = "http://ours:3338";
+        let keeps = |yaml: &str| {
+            serde_yaml::from_str::<File>(yaml)
+                .expect("parse")
+                .vouchers
+                .keeps_any(own)
+        };
+        // The own mint is burned whatever it says, so it keeps nothing.
+        assert!(!keeps(
+            "vouchers:\n  accepted_mints: [\"http://ours:3338/\"]\n"
+        ));
+        assert!(!keeps(
+            "vouchers:\n  accepted_mints:\n    - url: http://theirs:3338\n      settle: burn\n"
+        ));
+        assert!(keeps(
+            "vouchers:\n  accepted_mints: [\"http://theirs:3338\"]\n"
+        ));
+    }
+
+    #[test]
+    fn a_settle_that_is_neither_keep_nor_burn_is_an_error() {
+        for yaml in [
+            "vouchers:\n  accepted_mints:\n    - url: http://a\n      settle: sell\n",
+            "vouchers:\n  accepted_mints:\n    - url: http://a\n      setle: burn\n",
+            "vouchers:\n  accepted_mints:\n    - settle: burn\n",
+        ] {
+            assert!(serde_yaml::from_str::<File>(yaml).is_err(), "{yaml}");
+        }
     }
 
     #[test]

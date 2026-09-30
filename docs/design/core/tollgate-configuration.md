@@ -176,9 +176,12 @@ node can spend, sell or be reimbursed for; **burn** melts them at their mint, fo
 accepted as a courtesy. This node's own mint is always burned — the resource
 has been delivered — and a bare URL means `keep` for any other.
 
-`keep` needs somewhere to keep them: **`tollgated` refuses to start** if any
-accepted mint resolves to `keep` and no `merchant.socket` is configured,
-rather than silently destroying what it would have kept.
+`keep` needs somewhere to keep them: `merchantd`, at `merchant.socket`. If
+any accepted mint other than this node's own resolves to `keep` and nothing is
+listening there when `tollgated` starts, it **logs a warning** and starts
+anyway — `merchantd` may simply start after it. A deposit that finds nobody
+there fails, and is retried with the settlement it came from, so what would
+have been kept is held back rather than silently destroyed.
 
 `received_multiplier` is an unsigned surcharge on what a peer pushes at us, on
 top of that peer already being paid for delivering it. Netted out:
@@ -198,7 +201,7 @@ set `received_multiplier = k + 1`. Setting `10` gives 9×, not 10×.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `accepted_mints` | *(required)* | Mints this node will take payment in, best first; at least one. Each one taken on is that issuer's credit risk |
-| `accepted_mints[].settle` | `keep` | `keep` or `burn`, for mints other than this node's own. Ignored for its own, which is always burned. `keep` without a `merchant` block is a startup error |
+| `accepted_mints[].settle` | `keep` | `keep` or `burn`, for mints other than this node's own. Ignored for its own, which is always burned. `keep` with no `merchantd` at `merchant.socket` is a startup warning; the deposit is retried with its settlement |
 | `received_multiplier` | `0` | No surcharge; each side simply pays for what it received. Per-peer overrides in the `peers` section |
 
 ---
@@ -628,7 +631,7 @@ Each daemon watches its own config file for changes and applies runtime-changeab
 | Received multiplier | Unsigned, per peer | Prices scarce uplink and signals how welcome a peer's traffic is, without any signed number in the protocol |
 | Market services | Own daemon (`merchantd`), own file, own endpoints, own protocol, disabled by default | Buying and swapping is not part of paying for delivery. `path` may point at a third party, so a node can offer swaps without running a market |
 | One file per executable | `tollgate.yaml`, `mint.yaml`, `merchant.yaml` | Each daemon can be restarted, replaced or run by someone else without touching the others' settings. Prices never reach the protocol daemon |
-| Other mints after settlement | Per-mint `settle: keep \| burn` in `tollgate.yaml`; `keep` without `merchantd` refuses to start | Whether another issuer's paper is worth anything depends on the relationship; value is never destroyed silently |
+| Other mints after settlement | Per-mint `settle: keep \| burn` in `tollgate.yaml`; `keep` without `merchantd` warns at startup and retries the deposit | Whether another issuer's paper is worth anything depends on the relationship; value is never destroyed silently |
 | Quote step | None: swap at the price in force | A moved rate costs a retry. Quotes can be added later |
 | Selling price | Per Mbit, in `usd`, `eur` or `sat`; a default `price`, overridable per `accepts` entry | One quantity to reason about, in the operator's unit, and priced per issuer because that is how issuer risk is priced. A rate is fetched only when price and payment units differ; zero answers are skipped, and with every source down the last good rate is used |
 | mintd privilege | A second listener serving the same NUT API, where mint quotes are paid on creation | No custom endpoints: the privilege is the address, not the call |

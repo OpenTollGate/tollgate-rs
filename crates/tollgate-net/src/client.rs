@@ -89,6 +89,7 @@ peers:
             mint_local: config.mint_local.clone(),
             unit: config.policy.unit.clone(),
             accepted_mints: config.policy.accepted_mints.clone(),
+            burned_mints: Vec::new(),
             secret_key_hex: config.identity.secret_hex(),
             funding,
             ttl_seconds: config.channel_ttl_seconds,

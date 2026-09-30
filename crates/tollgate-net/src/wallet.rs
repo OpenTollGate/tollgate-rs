@@ -548,6 +548,12 @@ impl crate::channel::Funding for WalletFunding {
         let wallet = self.wallet.clone();
         tokio::task::block_in_place(|| handle.block_on(fund_from(&wallet, mint, unit, amount)))
     }
+
+    fn deposit(&self, token: &str) -> Result<()> {
+        let handle = self.runtime.clone();
+        let wallet = self.wallet.clone();
+        tokio::task::block_in_place(|| handle.block_on(wallet.deposit(token))).map(|_| ())
+    }
 }
 
 /// Where a node keeps its wallet unless told otherwise.

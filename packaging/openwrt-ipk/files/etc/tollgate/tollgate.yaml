@@ -22,7 +22,7 @@ mint:
   # one to put here — by default the router's LAN address.
   url: "http://192.168.1.1:3338"
   # Where tollgated reaches mintd itself, to settle channels funded in this
-  # node's vouchers.
+  # node's vouchers and burn what they paid.
   local: "http://127.0.0.1:3338"
   unit: "byte"
 

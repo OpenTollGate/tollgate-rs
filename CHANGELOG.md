@@ -12,6 +12,22 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 ### Added
 
+- Settling disposes of what a channel paid. `tollgated` keeps nothing a
+  settlement brings in: a channel funded in this node's own vouchers is burned
+  at `mintd` (`mint.local`) once closed, and one funded in another mint is
+  burned there or deposited with `merchantd`, as that mint's `settle` says in
+  `vouchers.accepted_mints` — written as a bare URL, which keeps, or as
+  `{ url, settle: keep | burn }`. A mint with no burn method has its proofs
+  dropped with a warning. `mintd` gains the `burn` melt method on both
+  listeners, unauthenticated, whose quote request carries the amount to burn;
+  it is the only melt it advertises, and the public listener still refuses
+  `/v1/mint/` without auto-accept. A mint set to `keep` with no `merchantd` at
+  `merchant.socket` is a startup warning, not an error: the deposit fails and
+  is retried with its settlement. Settling a channel this node funded reclaims
+  its change once the receiver has closed it and deposits it with `merchantd`.
+  Not yet: nothing triggers that funder-side settle, so change is only
+  recovered when something calls `settle` on such a channel.
+
 - `merchantd`: the node's commercial side, reading `merchant.yaml`. It holds
   the wallet — `tollgated` no longer holds any money or vouchers — and funds
   `tollgated`'s channels over a local socket (`fund`), taking back anything of

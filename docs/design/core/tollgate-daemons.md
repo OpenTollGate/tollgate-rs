@@ -87,8 +87,9 @@ in `tollgated`'s configuration:
 - **keep** — the vouchers are worth something to this node: it can spend
   them upstream, sell them, or is reimbursed for them. `tollgated` swaps them
   at their mint and deposits the fresh proofs with `merchantd`, which holds
-  everything of value. Without a `merchantd` to deposit into, `keep` is a
-  configuration error and `tollgated` refuses to start.
+  everything of value. Without a `merchantd` to deposit into, `tollgated`
+  warns at startup and the deposit fails, to be retried with the settlement
+  it came from until `merchantd` is there.
 - **burn** — they are worth nothing to this node, and accepting them was a
   courtesy: free transit for a neighbor, say, whose paper this node has no
   use for. `tollgated` melts them at their mint so the claim is gone rather
@@ -208,10 +209,14 @@ that sells turns it off.
 ### Burn
 
 A NUT-05 melt that **pays nothing out**: the proofs are marked spent and the
-claim is gone. It is a melt method `mintd` advertises in NUT-06 info — the
-standard melt quote and melt endpoints, with a method that settles by doing
-nothing. It is on the public listener and needs no credential: anyone who
-burns vouchers is only destroying their own.
+claim is gone. It is a melt method, `burn`, that `mintd` advertises in NUT-06
+info, and the only melt it advertises — the standard melt quote and melt
+endpoints (`/v1/melt/quote/burn`, `/v1/melt/burn`), with a method that
+settles by doing nothing. The quote request carries **the amount to burn** as
+its `request`, in the quote's unit, the way a Bolt11 invoice names what it
+pays; an `amount`, if also given, must agree with it. The fee reserve is zero.
+It is on both listeners and needs no credential: anyone who burns vouchers is
+only destroying their own.
 
 Plain Cashu has no other way to do this: a swap must produce outputs, and
 the usual melt pays a Lightning invoice. Burning is what `tollgated` does
