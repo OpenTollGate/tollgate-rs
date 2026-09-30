@@ -12,6 +12,32 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 ### Added
 
+- `forwarding.mode: external`: a node whose enforcement is a separate program,
+  a **gate**, reached over the Unix socket at `forwarding.gate_socket`
+  (`docs/design/core/tollgate-gate-protocol.md`). A new use case is a new gate
+  rather than a new `tollgated`. The messages are in
+  `tollgate_protocol::gate`, `no_std` like the rest of the crate and
+  normatively described by `crates/tollgate-protocol/gate.cddl`, in the wire
+  protocol's CBOR and framing; `cargo run -p tollgate-protocol --example
+  stub_gate` is a gate that enforces nothing, for tests and as a reference.
+  `tollgated` binds each payer to what it has about it — the key itself under
+  `Identify::Fips`, the address it came from under `Identify::Claimed` — and
+  sends one rate per payer, `0` closed and `null` unshaped; the gate reports
+  counts, and conflicts over a subject another payer holds. The gate's `hello`
+  names the Identify mode, which `tollgated` then runs in: it waits for that
+  hello before listening, and refuses to start behind a gate that contradicts
+  itself or `forwarding.identify`, an optional pin. While the gate is
+  unreachable, before its first hello, or for a payer it reported a conflict
+  for, the node sells nothing: TopUps are refused with a ceiling of 0, a new
+  channel's funding is held until the gate is back, and none is funded
+  toward the payer; sessions and channels already running are kept, and every
+  reconnect sends the gate the full state. `ResourceAdapter` gains
+  `selling`, true for the built-in adapters. `External::delegate` adds a
+  subject a local trusted client vouches for, refused when the gate refuses
+  delegated bindings; nothing on the control socket calls it yet.
+  `testing/external` runs a gateway behind the stub gate, and
+  `testing/scripts/build.sh` takes `IMAGE_TAG` to build under another tag.
+
 - A quiet link is kept alive: a node that has sent a peer nothing for a third
   of its stale timeout sends it the last Offer again, byte for byte, so a
   payer its provider does not charge is no longer dropped every minute. An

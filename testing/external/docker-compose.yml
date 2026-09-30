@@ -1,0 +1,86 @@
+# A gateway that enforces nothing itself: `forwarding.mode: external` hands
+# every payer's subjects and rate to a gate over a Unix socket. The gate here is
+# `stub-gate`, which carries nothing but reports made-up counts, so the test
+# sees the whole protocol from both sides without a data plane.
+services:
+  # The money. Unused on the funding path, like every topology's; kept so the
+  # configs match the others.
+  sat-mint:
+    # Pinned: mintd's CLI and config format change between releases.
+    image: cashubtc/mintd:0.18.1
+    command:
+      - sh
+      - -c
+      - cdk-mintd config init --new-mint --file /etc/cdk/mintd.toml && exec cdk-mintd
+    environment:
+      MINT_MNEMONIC: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    volumes:
+      - ../mint/mintd.toml:/etc/cdk/mintd.toml:ro
+
+  # The gate: listens, and requires identify: claimed, as a LAN gate would.
+  gate:
+    image: tollgate-test:${IMAGE_TAG:-latest}
+    # So a stop is a stop, not ten seconds of a PID 1 ignoring SIGTERM.
+    init: true
+    entrypoint: ["stub-gate"]
+    command:
+      - --socket
+      - /run/gate/gate.sock
+      - --kinds
+      - ipv4,ipv6
+      - --identify
+      - claimed
+      - --carry
+      - --state
+      - /run/gate/state.json
+    volumes:
+      - gate:/run/gate
+
+  gateway:
+    image: tollgate-test:${IMAGE_TAG:-latest}
+    command: ["-c", "/etc/tollgate/gateway.yaml", "--control-socket", "/run/tollgate.sock"]
+    volumes:
+      - ./gateway.yaml:/etc/tollgate/gateway.yaml:ro
+      - gate:/run/gate
+    environment:
+      RUST_LOG: "${RUST_LOG:-tollgate_net=debug,info}"
+    depends_on:
+      - gate
+
+  client:
+    image: tollgate-test:${IMAGE_TAG:-latest}
+    command: ["-c", "/etc/tollgate/client.yaml", "--control-socket", "/run/tollgate.sock", "--demand", "2000000"]
+    volumes:
+      - ./client.yaml:/etc/tollgate/client.yaml:ro
+    environment:
+      RUST_LOG: "${RUST_LOG:-tollgate_net=debug,info}"
+    depends_on:
+      - gateway
+      - sat-mint
+
+  # A second gate, requiring identify: fips, on a socket of its own — so that
+  # starting a node against it does not replace the gateway's connection.
+  gate-fips:
+    profiles: ["mismatch"]
+    image: tollgate-test:${IMAGE_TAG:-latest}
+    init: true
+    entrypoint: ["stub-gate"]
+    command: ["--socket", "/run/gate/gate.sock", "--kinds", "pubkey", "--identify", "fips"]
+    volumes:
+      - gate-fips:/run/gate
+
+  # A node pinned to identify: claimed, pointed at the fips gate. It must not
+  # start.
+  gateway-pinned:
+    profiles: ["mismatch"]
+    image: tollgate-test:${IMAGE_TAG:-latest}
+    command: ["-c", "/etc/tollgate/gateway-pinned.yaml", "--control-socket", "/run/tollgate.sock"]
+    volumes:
+      - ./gateway-pinned.yaml:/etc/tollgate/gateway-pinned.yaml:ro
+      - gate-fips:/run/gate
+    depends_on:
+      - gate-fips
+
+volumes:
+  gate:
+  gate-fips:

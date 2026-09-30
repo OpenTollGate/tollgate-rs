@@ -153,7 +153,8 @@ tollgate-core (lib)                Pure logic, resource-agnostic
 In `tollgate-net`, a `ResourceAdapter` enforces what core decides — an
 access level and a shaping rate per peer — and a `ChannelBackend` carries
 the money. `nftables` gates and shapes the kernel's forwarding path on
-Linux; `fips` hands the same decisions to a FIPS node; `loopback` shapes a
+Linux; `fips` hands the same decisions to a FIPS node; `external` hands
+them to a gate, a separate program on a Unix socket; `loopback` shapes a
 socket of its own and runs anywhere. ESP32 lives in a separate project due
 to fundamentally different runtime constraints.
 

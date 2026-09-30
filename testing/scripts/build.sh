@@ -2,7 +2,9 @@
 # Build the single TollGate test image, reused by every topology.
 #
 # Tagged `tollgate-test:latest`. Re-run after changing Rust code; topologies can
-# then reuse it with SKIP_BUILD=1.
+# then reuse it with SKIP_BUILD=1. `IMAGE_TAG` builds another tag instead, so two
+# checkouts building at once do not overwrite each other's image; a topology
+# that names `tollgate-test:${IMAGE_TAG:-latest}` runs it.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,10 +17,12 @@ ROOT="$(cd "$TESTING_DIR/.." && pwd)"
 # Docker; forced here so incremental rebuilds are fast regardless of config.
 export DOCKER_BUILDKIT=1
 
-echo "building tollgate-test:latest ..."
+IMAGE="tollgate-test:${IMAGE_TAG:-latest}"
+
+echo "building $IMAGE ..."
 docker build \
-    -t tollgate-test:latest \
+    -t "$IMAGE" \
     -f "$TESTING_DIR/docker/Dockerfile" \
     "$ROOT"
 
-echo "done: tollgate-test:latest"
+echo "done: $IMAGE"

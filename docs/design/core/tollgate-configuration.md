@@ -53,7 +53,7 @@ On OpenWrt, the primary config path is `/etc/tollgate/tollgate.yaml`. UCI integr
 ```yaml
 identity:    # Node identity (keypair)
 network:     # Where the TollGate protocol listens
-forwarding:  # What actually delivers the resource: loopback, nftables or fips
+forwarding:  # What actually delivers the resource: loopback, nftables, fips or external
 mint:        # Where this node's mint (mintd) is, and what it issues
 merchant:    # Where merchantd is: upstream funding and foreign proceeds
 vouchers:    # Which mints this node takes payment in, and per-peer traffic terms
@@ -96,20 +96,24 @@ network:
 
 ## Forwarding
 
-What actually delivers the resource, and so where access and rate are enforced ([peering-ip.md](../network-peering/peering-ip.md), [peering-fips.md](../network-peering/peering-fips.md)).
+What actually delivers the resource, and so where access and rate are enforced ([peering-ip.md](../network-peering/peering-ip.md), [peering-fips.md](../network-peering/peering-fips.md), [tollgate-gate-protocol.md](tollgate-gate-protocol.md)).
 
 ```yaml
 forwarding:
-  mode: loopback              # loopback, nftables or fips
+  mode: loopback              # loopback, nftables, fips or external
   interface: "eth0"           # nftables only: the interface facing the peers
   fips_socket: ""             # fips only: the FIPS control socket; empty = FIPS's own default
+  gate_socket: ""             # external only, and required there: the gate's Unix socket
+  identify: null              # external only, optional: pin the Identify mode, fips or claimed
 ```
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `mode` | `loopback` | `loopback` shapes and meters a socket of its own and forwards nobody's traffic — for demos and tests, and it runs anywhere. `nftables` gates and shapes the kernel's forwarding path, which is what sells transit; it needs Linux with `CAP_NET_ADMIN`. `fips` sells transit across a FIPS mesh, leaving enforcement to the FIPS node over its control socket — and, because a mesh address names a key, it is the only mode that checks a peer's announced identity rather than believing it |
+| `mode` | `loopback` | `loopback` shapes and meters a socket of its own and forwards nobody's traffic — for demos and tests, and it runs anywhere. `nftables` gates and shapes the kernel's forwarding path, which is what sells transit; it needs Linux with `CAP_NET_ADMIN`. `fips` sells transit across a FIPS mesh, leaving enforcement to the FIPS node over its control socket — and, because a mesh address names a key, it is the only built-in mode that checks a peer's announced identity rather than believing it. `external` hands enforcement to a **gate**, a separate program on a Unix socket, and sells nothing while it cannot reach one ([tollgate-gate-protocol.md](tollgate-gate-protocol.md)) |
 | `interface` | `"eth0"` | Where the peers' `tc` classes live. Only `nftables` uses it |
 | `fips_socket` | *(FIPS's default path)* | Only `fips` uses it |
+| `gate_socket` | *(none)* | The gate's socket. `external` requires it; nothing else uses it. Its permissions should admit `tollgated` alone: reaching it is the power to open the gate |
+| `identify` | *(none)* | Only `external` takes it. The gate's `hello` names the Identify mode — `fips` for a gate that matches public keys, `claimed` otherwise — and `tollgated` runs in it; a pin here makes a gate that asks for the other mode a startup error. Any other mode fixes the Identify mode itself, and refuses the key |
 
 The default is `loopback` because it runs everywhere and gates nothing it does not own: a node that installed firewall rules because a config line was missing would be a nasty surprise.
 

@@ -1,0 +1,23 @@
+# Sells access, enforced by a gate it does not contain.
+identity:
+  secret_key: "78d684aa33cd91c862ca9dd42e969b97e511bf36d4848e6a90d967bc174199c1"
+mint:
+  url: "http://gateway:3338"
+  unit: "byte"
+vouchers:
+  accepted_mints:
+    - "http://gateway:3338"
+  received_multiplier: 0
+access:
+  # No allowance: an unpaid payer is closed at the gate, `set(peer, 0)`, and a
+  # lapsed grant closes it again.
+  minimum_flow:
+    enabled: false
+grants:
+  window_range_ms: [200, 30000]
+forwarding:
+  mode: external
+  gate_socket: /run/gate/gate.sock
+  # No identify pin: the gate's hello names the mode.
+network:
+  listen: "0.0.0.0:4747"

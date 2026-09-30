@@ -33,12 +33,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --bin tollgated --bin tolltop --bin mintd --bin minttop \
         --bin merchantd --bin merchanttop && \
+    cargo build --release -p tollgate-protocol --example stub_gate && \
     cp target/release/tollgated /tollgated && \
     cp target/release/tolltop /tolltop && \
     cp target/release/mintd /mintd && \
     cp target/release/minttop /minttop && \
     cp target/release/merchantd /merchantd && \
-    cp target/release/merchanttop /merchanttop
+    cp target/release/merchanttop /merchanttop && \
+    cp target/release/examples/stub_gate /stub-gate
 
 # ---- Stage 2: runtime ----
 FROM debian:trixie-slim
@@ -57,6 +59,9 @@ COPY --from=builder /mintd /usr/local/bin/mintd
 COPY --from=builder /minttop /usr/local/bin/minttop
 COPY --from=builder /merchantd /usr/local/bin/merchantd
 COPY --from=builder /merchanttop /usr/local/bin/merchanttop
+# A gate that enforces nothing, for the `external` topology: it speaks the gate
+# protocol and reports made-up counts. Not a node binary; nothing else runs it.
+COPY --from=builder /stub-gate /usr/local/bin/stub-gate
 COPY testing/docker/tollgate-node.sh /usr/local/bin/tollgate-node
 
 # A node is the mint and the protocol daemon together; see tollgate-node.sh.
