@@ -3,7 +3,6 @@ identity:
   secret_key: "36544d0f28de233890c98e7ab5994a4fa6e7ebd9cb409146a4d4c5a935c078a2"
 mint:
   url: "http://client2:3338"
-  listen: "0.0.0.0:3338"
   unit: "byte"
 vouchers:
   accepted_mints:

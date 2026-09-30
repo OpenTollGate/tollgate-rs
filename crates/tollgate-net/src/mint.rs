@@ -1,56 +1,66 @@
-//! This node's own mint.
+//! This node's own mint, as `mintd` runs it.
 //!
-//! Every node issues vouchers against its own capacity and redeems them on
-//! delivery. Redemption is a local spent-proof check — the node is the
-//! authority on its own paper — which is why payment liveness and service
-//! liveness fail together rather than separately.
+//! A node that sells its capacity issues vouchers against it and redeems them
+//! on delivery. Redemption is a spent-proof check at the node's own mint — the
+//! node is the authority on its own paper — which is why payment liveness and
+//! service liveness fail together rather than separately. The mint runs as its
+//! own daemon, `mintd`, so `tollgated` holds none of its keys and settles at it
+//! like any other Cashu client (`docs/design/core/tollgate-daemons.md`).
 //!
 //! The keyset unit is the **byte**, not the sat. That is one of the three
 //! things the voucher model changes, and it is what makes a proof a claim on
 //! one unit of capacity rather than on money. A `1024` proof is a 1 KiB claim;
 //! two of them make 2 KiB; they split and combine like any other Cashu token.
 //!
-//! # Minting for the asking
+//! # One API, two listeners
 //!
-//! Until there is a market, the way to hold this node's vouchers is to mint
-//! them here, and the mint gives them away: a NUT-04 mint quote in the node's
-//! unit is reported paid the first time the mint checks it, so a buyer asks for
-//! what it needs and mints it straight away. There is no Lightning behind it and
-//! nothing to pay. Bolt11 is denominated in msat and this keyset in bytes, so a
-//! real invoice would have to invent an exchange rate; the quote keeps the
-//! standard shape so that an ordinary Cashu wallet can drive it, and nothing
-//! else about it is Lightning.
+//! The mint serves the standard Cashu API and nothing else, twice ([`serve`]):
 //!
-//! That makes service free to anyone who asks, which is the point for now
-//! rather than an oversight: what is being exercised is delivery, admission and
-//! the channels, not pricing. [`MintConfig::auto_accept`] turns it off, and the
-//! mint then issues nothing through NUT-04 at all. On, it is free without a
-//! cap on how much: [`IssueLimit`] rations only how many quotes are asked for,
-//! so the quote endpoint cannot be used to make the node sign and store without
-//! end.
+//! - **Private**, for `merchantd` alone: a NUT-04 mint quote in the node's
+//!   unit is reported paid the first time the mint checks it. That is how the
+//!   node sells — `merchantd` takes the money, then mints what it sold here.
+//! - **Public**, for everyone: the same API without mint quotes, unless
+//!   [`Listeners::auto_accept`] is on, in which case the public listener hands
+//!   them out too and service is free to anyone who asks. Auto-accept exists
+//!   for testing and for giving free vouchers to third parties; it is free
+//!   without a cap on how much, and [`IssueLimit`] rations only how many quotes
+//!   the public listener serves, so it cannot be used to make the mint sign and
+//!   store without end.
+//!
+//! What is privileged is the address, not the call. There is no Lightning
+//! behind a quote and nothing to pay. Bolt11 is denominated in msat and this
+//! keyset in bytes, so a real invoice would have to invent an exchange rate;
+//! the quote keeps the standard shape so that an ordinary Cashu wallet can
+//! drive it, and nothing else about it is Lightning.
 //!
 //! Everything the mint itself does is real: the keysets, the blind signatures,
 //! the DLEQ proofs and the spent-proof set.
 //!
 //! # The spent-proof set is kept on disk
 //!
-//! The keyset is derived from the node's identity, so it comes back unchanged
+//! The keyset is derived from the mint's own seed, so it comes back unchanged
 //! after a restart and every voucher a peer holds stays redeemable. The record
 //! of which vouchers have already been redeemed has to survive the same
 //! restart, or the paper outlives the memory of having been paid out and a
 //! peer can spend the same voucher twice. So the database is a file.
 //!
-//! The mint quotes an auto-accepting mint issues live in the same file, so
-//! their ids have to stay unique across restarts too; see `lookup_id`.
+//! The mint quotes it issues live in the same file, so their ids have to stay
+//! unique across restarts too; see `lookup_id`.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use axum::Router;
+use axum::extract::{Request, State};
+use axum::http::StatusCode;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use cdk::mint::{Mint, MintBuilder, MintMeltLimits};
 use cdk::nuts::nut00::KnownMethod;
 use cdk::nuts::{CurrencyUnit, PaymentMethod};
@@ -79,21 +89,41 @@ pub struct MintConfig {
     pub file: PathBuf,
     /// Largest amount a single issuance may create.
     ///
-    /// The ceiling on one mint quote, and on one market swap. A buyer that
-    /// needs more asks for several quotes, so this bounds the size of a request
-    /// rather than how much anybody may hold.
+    /// The ceiling on one mint quote. A buyer that needs more asks for several
+    /// quotes, so this bounds the size of a request rather than how much
+    /// anybody may hold.
     pub max_amount: u64,
-    /// Whether a NUT-04 mint quote is paid the moment it is asked for.
+}
+
+/// Where the mint is served, and who may have a quote paid.
+#[derive(Debug, Clone)]
+pub struct Listeners {
+    /// The mint as peers and wallets see it.
+    pub public: SocketAddr,
+    /// Mint quotes here are paid on creation. Whoever reaches it can print
+    /// this node's vouchers, so it belongs on loopback, for `merchantd` alone.
+    pub private: SocketAddr,
+    /// Whether the public listener pays quotes on creation too.
     ///
     /// On, anyone who can reach the mint can mint as much as they like. Off,
-    /// the mint serves no mint quotes at all, and its vouchers have to be had
-    /// some other way.
+    /// the public listener serves no mint quotes at all.
     pub auto_accept: bool,
-    /// How many quotes an auto-accepting mint serves.
+    /// How many quotes the public listener serves.
     pub issue_limit: IssueLimit,
 }
 
-/// How many quotes an auto-accepting mint serves, across everybody who asks.
+/// What the mint has been asked for since it started, for `minttop`.
+#[derive(Debug, Default)]
+pub struct Stats {
+    /// Mint quotes served on the public listener.
+    pub public_quotes: AtomicU64,
+    /// Mint quotes served on the private listener.
+    pub private_quotes: AtomicU64,
+    /// Public quotes refused for being over the [`IssueLimit`].
+    pub refused_quotes: AtomicU64,
+}
+
+/// How many quotes the public listener serves, across everybody who asks.
 ///
 /// Auto-accept is free or it is off: what a quote may be for is not capped,
 /// only how often one may be asked for. A free quote endpoint is otherwise a
@@ -138,9 +168,54 @@ pub fn currency_unit(unit: &str) -> CurrencyUnit {
 
 /// Where a node keeps its mint database unless told otherwise.
 ///
-/// Beside the wallet, so the packages keep both across an upgrade the same way.
+/// In the state directory, so the packages keep it across an upgrade.
 pub fn default_path() -> PathBuf {
     crate::config::state_file("mint.sqlite")
+}
+
+/// Where the mint keeps its seed unless told otherwise.
+pub fn default_seed_path() -> PathBuf {
+    crate::config::state_file("mint.seed")
+}
+
+/// Read the mint's seed, creating it on first start.
+///
+/// The mint's own secret, not derived from the node's identity: `tollgated`
+/// never needs it, and either key can be rotated or stored apart from the
+/// other. Losing it retires every voucher outstanding, since the keyset cannot
+/// be rebuilt without it.
+pub fn load_or_create_seed(path: &std::path::Path) -> Result<Vec<u8>> {
+    if let Ok(text) = std::fs::read_to_string(path) {
+        return hex::decode(text.trim())
+            .with_context(|| format!("the mint seed at {} is not hex", path.display()));
+    }
+    if let Some(dir) = path.parent()
+        && !dir.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    }
+    let seed: [u8; 32] = secp256k1::rand::random();
+    write_secret(path, &hex::encode(seed))
+        .with_context(|| format!("write a new mint seed to {}", path.display()))?;
+    tracing::info!(path = %path.display(), "created a new mint seed");
+    Ok(seed.to_vec())
+}
+
+#[cfg(unix)]
+fn write_secret(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(contents.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn write_secret(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    std::fs::write(path, contents)
 }
 
 /// Build and start this node's mint.
@@ -174,32 +249,25 @@ pub async fn build(config: &MintConfig) -> Result<Mint> {
         .map_err(|e| anyhow!("set the input fee: {e}"))?;
 
     // A payment processor is how a mint issues paper against something else.
-    // Without one there is no mint quote to ask for, which is what switching
-    // auto-accept off means.
-    if config.auto_accept {
-        builder
-            .add_payment_processor(
-                unit.clone(),
-                PaymentMethod::Known(KnownMethod::Bolt11),
-                MintMeltLimits::new(1, config.max_amount.max(1)),
-                Arc::new(AutoAccept::new(
-                    unit.clone(),
-                    config.issue_limit,
-                    Instant::now(),
-                )),
-            )
-            .await
-            .map_err(|e| anyhow!("accept mint quotes in {unit}: {e}"))?;
+    // This one reports every quote paid; which listener serves quotes at all
+    // is what decides who may have one (see `serve`).
+    builder
+        .add_payment_processor(
+            unit.clone(),
+            PaymentMethod::Known(KnownMethod::Bolt11),
+            MintMeltLimits::new(1, config.max_amount.max(1)),
+            Arc::new(PaidOnCreation { unit: unit.clone() }),
+        )
+        .await
+        .map_err(|e| anyhow!("accept mint quotes in {unit}: {e}"))?;
 
-        // Adding a Bolt11 processor advertises melting too, and there is
-        // nothing to melt into: redeeming a voucher is being served, not being
-        // paid out. Advertising it would only send wallets to an endpoint that
-        // refuses them.
-        let mut info = builder.current_mint_info();
-        info.nuts.nut05.methods.clear();
-        info.nuts.nut05.disabled = true;
-        builder = builder.with_mint_info(info);
-    }
+    // Adding a Bolt11 processor advertises melting too, and there is nothing
+    // to melt into: redeeming a voucher is being served, not being paid out.
+    // Advertising it would only send wallets to an endpoint that refuses them.
+    let mut info = builder.current_mint_info();
+    info.nuts.nut05.methods.clear();
+    info.nuts.nut05.disabled = true;
+    builder = builder.with_mint_info(info);
 
     let mint = builder
         .build_with_seed(db.clone(), &config.seed)
@@ -222,27 +290,14 @@ pub async fn build(config: &MintConfig) -> Result<Mint> {
 
 /// A payment processor for which every mint quote is already paid.
 ///
-/// The whole of free minting. Nothing is received, so there is nothing to wait
-/// for: the mint asks whether a quote is paid when a wallet checks it or mints
-/// against it, and the answer is always the full amount. Melting is refused,
-/// because nothing this mint issues can be paid out as money.
-///
-/// Quotes are counted against [`IssueLimit`] when one is asked for:
-/// that is where the work starts, and a quote refused there never reaches the
-/// database.
+/// Nothing is received, so there is nothing to wait for: the mint asks whether
+/// a quote is paid when a wallet checks it or mints against it, and the answer
+/// is always the full amount. Melting is refused, because nothing this mint
+/// issues can be paid out as money. Who may ask for a quote at all is the
+/// listener's business, not this one's.
 #[derive(Debug)]
-struct AutoAccept {
+struct PaidOnCreation {
     unit: CurrencyUnit,
-    limits: Mutex<Limits>,
-}
-
-impl AutoAccept {
-    fn new(unit: CurrencyUnit, limit: IssueLimit, now: Instant) -> Self {
-        Self {
-            unit,
-            limits: Mutex::new(Limits::new(limit, now)),
-        }
-    }
 }
 
 /// The bucket an [`IssueLimit`] fills, if it is on.
@@ -349,7 +404,7 @@ fn amount_of(id: &PaymentIdentifier) -> Option<u64> {
 }
 
 #[async_trait]
-impl MintPayment for AutoAccept {
+impl MintPayment for PaidOnCreation {
     type Err = payment::Error;
 
     async fn get_settings(&self) -> Result<SettingsResponse, Self::Err> {
@@ -378,22 +433,6 @@ impl MintPayment for AutoAccept {
         }
 
         let amount = options.amount.value();
-        if let Err(exhausted) = self
-            .limits
-            .lock()
-            .expect("not poisoned")
-            .admit(Instant::now())
-        {
-            tracing::debug!(
-                amount,
-                exhausted,
-                "refused a mint quote over the issue limit"
-            );
-            return Err(payment::Error::Custom(format!(
-                "this mint is issuing too fast: the limit on {exhausted} is reached, try again shortly"
-            )));
-        }
-
         let id = lookup_id(secp256k1::rand::random(), amount);
         Ok(CreateIncomingPaymentResponse {
             // Not an invoice, and not pretending to be one: there is nothing
@@ -459,26 +498,68 @@ impl MintPayment for AutoAccept {
     }
 }
 
-/// Serve the mint over HTTP until `shutdown` resolves.
+/// Serve the mint on both listeners until `shutdown` resolves.
 ///
-/// A peer funds its channel against **our** mint, so this has to be reachable
-/// by peers — which it always is, because it is the node they are already
-/// talking to.
+/// cdk serves the NUT-04 routes only for the methods it is told about. The
+/// private listener is told about the quote method, so `merchantd` can have
+/// quotes paid there; the public one only when auto-accept is on, and then
+/// behind the [`IssueLimit`]. Everything else — keys, swap, state check — is
+/// the same on both.
 pub async fn serve(
     mint: Arc<Mint>,
-    market: Router,
-    listen: std::net::SocketAddr,
+    listeners: Listeners,
+    stats: Arc<Stats>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    // The market rides on the same listener as the mint under its own path.
-    // It is a separate protocol that happens to be served by the same process;
-    // a node may point its peers at somebody else's market entirely. All that
-    // is served here is the price signal — selling this node's own vouchers is
-    // the mint API beside it, and needs nothing of its own.
-    //
-    // cdk serves the NUT-04 routes only for the methods it is told about, so
-    // they are read back from what the mint advertises: a mint that
-    // auto-accepts gets its quote endpoints, and one that does not has none.
+    let (public, private) = routers(
+        Arc::clone(&mint),
+        listeners.auto_accept,
+        listeners.issue_limit,
+        stats,
+    )
+    .await?;
+
+    let bind = |addr: SocketAddr| async move {
+        tokio::net::TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("bind the mint on {addr}"))
+    };
+    let private_listener = bind(listeners.private).await?;
+    let public_listener = bind(listeners.public).await?;
+
+    // One shutdown for both: the private listener stops with the public one.
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let mut private_stopped = stopped.clone();
+    let private = tokio::spawn(async move {
+        axum::serve(private_listener, private)
+            .with_graceful_shutdown(async move {
+                let _ = private_stopped.wait_for(|s| *s).await;
+            })
+            .await
+    });
+    axum::serve(public_listener, public)
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            let _ = stop.send(true);
+        })
+        .await
+        .context("serve the public mint")?;
+    private
+        .await
+        .context("join the private mint")?
+        .context("serve the private mint")?;
+
+    mint.stop().await.context("stop the mint")?;
+    Ok(())
+}
+
+/// The public and private routers, in that order.
+async fn routers(
+    mint: Arc<Mint>,
+    auto_accept: bool,
+    issue_limit: IssueLimit,
+    stats: Arc<Stats>,
+) -> Result<(Router, Router)> {
     let info = mint.mint_info().await.context("read the mint's info")?;
     let mut methods: Vec<String> = info
         .nuts
@@ -489,22 +570,79 @@ pub async fn serve(
         .collect();
     methods.sort();
     methods.dedup();
-    let router = cdk_axum::create_mint_router(Arc::clone(&mint), methods)
-        .await
-        .context("build the mint router")?
-        .merge(market);
 
-    let listener = tokio::net::TcpListener::bind(listen)
+    let private = cdk_axum::create_mint_router(Arc::clone(&mint), methods.clone())
         .await
-        .with_context(|| format!("bind the mint on {listen}"))?;
+        .context("build the private mint router")?
+        .layer(axum::middleware::from_fn_with_state(
+            Counting {
+                stats: Arc::clone(&stats),
+                limits: None,
+                private: true,
+            },
+            count_quotes,
+        ));
 
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown)
+    let public_methods = if auto_accept { methods } else { Vec::new() };
+    let public = cdk_axum::create_mint_router(Arc::clone(&mint), public_methods)
         .await
-        .context("serve the mint")?;
+        .context("build the public mint router")?
+        .layer(axum::middleware::from_fn_with_state(
+            Counting {
+                stats,
+                limits: Some(Arc::new(Mutex::new(Limits::new(
+                    issue_limit,
+                    Instant::now(),
+                )))),
+                private: false,
+            },
+            count_quotes,
+        ));
+    Ok((public, private))
+}
 
-    mint.stop().await.context("stop the mint")?;
-    Ok(())
+/// What a listener counts, and whether it rations quotes.
+#[derive(Clone)]
+struct Counting {
+    stats: Arc<Stats>,
+    limits: Option<Arc<Mutex<Limits>>>,
+    private: bool,
+}
+
+/// Count every mint quote asked for, and refuse one over the limit.
+///
+/// Checked when a quote is asked for: that is where the work starts, and a
+/// quote refused here never reaches the database.
+async fn count_quotes(State(counting): State<Counting>, req: Request, next: Next) -> Response {
+    let is_quote =
+        req.method() == axum::http::Method::POST && req.uri().path().starts_with("/v1/mint/quote/");
+    if !is_quote {
+        return next.run(req).await;
+    }
+    if let Some(limits) = &counting.limits
+        && let Err(exhausted) = limits.lock().expect("not poisoned").admit(Instant::now())
+    {
+        counting
+            .stats
+            .refused_quotes
+            .fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(exhausted, "refused a mint quote over the issue limit");
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            axum::Json(serde_json::json!({
+                "code": 0,
+                "detail": "this mint is serving too many quotes: try again shortly",
+            })),
+        )
+            .into_response();
+    }
+    let counter = if counting.private {
+        &counting.stats.private_quotes
+    } else {
+        &counting.stats.public_quotes
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
+    next.run(req).await
 }
 
 #[cfg(test)]
@@ -529,8 +667,6 @@ mod tests {
             seed: vec![7; 32],
             file: dir.path().join("mint.sqlite"),
             max_amount: 1_000_000_000,
-            auto_accept: false,
-            issue_limit: IssueLimit::default(),
         }
     }
 
@@ -685,7 +821,7 @@ mod tests {
                 pubkey: None,
             }))
             .await
-            .expect("an auto-accepting mint issues a quote");
+            .expect("the mint issues a quote");
         let MintQuoteResponse::Bolt11(created) = created else {
             panic!("asked for a Bolt11 quote, got {created:?}");
         };
@@ -706,10 +842,7 @@ mod tests {
         // id counted from startup would be issued a second time, and the second
         // quote would be refused or never paid.
         let dir = Dir::new();
-        let config = MintConfig {
-            auto_accept: true,
-            ..byte_mint(&dir)
-        };
+        let config = byte_mint(&dir);
 
         let before = {
             let mint = build(&config).await.expect("build the mint");
@@ -735,5 +868,76 @@ mod tests {
         };
         assert_eq!(reread.state, QuoteState::Paid);
         assert_eq!(reread.request, before.request);
+    }
+
+    /// POST a quote request for 1024 bytes to `router`, returning the status.
+    async fn ask_for_a_quote(router: &Router) -> StatusCode {
+        use tower::ServiceExt;
+        let body = r#"{"amount":1024,"unit":"byte"}"#;
+        router
+            .clone()
+            .oneshot(
+                axum::http::Request::post("/v1/mint/quote/bolt11")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body))
+                    .expect("a request"),
+            )
+            .await
+            .expect("a response")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn only_the_private_listener_serves_quotes_unless_auto_accept_is_on() {
+        let dir = Dir::new();
+        let mint = Arc::new(build(&byte_mint(&dir)).await.expect("build the mint"));
+        let stats = Arc::new(Stats::default());
+        let (public, private) = routers(
+            Arc::clone(&mint),
+            false,
+            IssueLimit::default(),
+            Arc::clone(&stats),
+        )
+        .await
+        .expect("routers");
+
+        assert!(
+            ask_for_a_quote(&private).await.is_success(),
+            "merchantd's listener pays"
+        );
+        assert_eq!(ask_for_a_quote(&public).await, StatusCode::NOT_FOUND);
+        assert_eq!(stats.private_quotes.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_accept_is_rationed_by_requests_on_the_public_listener_alone() {
+        let dir = Dir::new();
+        let mint = Arc::new(build(&byte_mint(&dir)).await.expect("build the mint"));
+        let stats = Arc::new(Stats::default());
+        let limit = IssueLimit {
+            quotes_per_minute: 1,
+        };
+        let (public, private) = routers(Arc::clone(&mint), true, limit, Arc::clone(&stats))
+            .await
+            .expect("routers");
+
+        assert!(ask_for_a_quote(&public).await.is_success());
+        assert_eq!(
+            ask_for_a_quote(&public).await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        // The private listener is never rationed: selling is merchantd's call.
+        assert!(ask_for_a_quote(&private).await.is_success());
+        assert!(ask_for_a_quote(&private).await.is_success());
+        assert_eq!(stats.refused_quotes.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_seed_is_created_once_and_read_back_after() {
+        let dir = Dir::new();
+        let path = dir.path().join("sub").join("mint.seed");
+        let first = load_or_create_seed(&path).expect("create");
+        assert_eq!(first.len(), 32);
+        assert_eq!(load_or_create_seed(&path).expect("read"), first);
     }
 }

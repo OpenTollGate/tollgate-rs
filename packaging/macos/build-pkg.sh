@@ -63,12 +63,12 @@ echo "Building TollGate v${VERSION} for macOS ${ARCH}..."
 
 if [[ "${NO_BUILD}" -eq 0 ]]; then
     cargo_args=(build --release --manifest-path="${PROJECT_ROOT}/Cargo.toml"
-                --bin tollgated --bin tolltop)
+                --bin tollgated --bin tolltop --bin mintd --bin minttop)
     [[ -n "${TARGET_TRIPLE}" ]] && cargo_args+=(--target "${TARGET_TRIPLE}")
     cargo "${cargo_args[@]}"
 fi
 
-for bin in tollgated tolltop; do
+for bin in tollgated tolltop mintd minttop; do
     [[ -f "${BINARY_DIR}/${bin}" ]] || { echo "Missing binary: ${BINARY_DIR}/${bin}" >&2; exit 1; }
 done
 
@@ -82,7 +82,7 @@ mkdir -p "${STAGING_DIR}/usr/local/var/run"
 mkdir -p "${STAGING_DIR}/usr/local/var/lib/tollgate"
 mkdir -p "${STAGING_DIR}/Library/LaunchDaemons"
 
-for bin in tollgated tolltop; do
+for bin in tollgated tolltop mintd minttop; do
     cp "${BINARY_DIR}/${bin}" "${STAGING_DIR}/usr/local/bin/"
     strip "${STAGING_DIR}/usr/local/bin/${bin}"
 done
@@ -90,7 +90,9 @@ done
 # Shipped as `.default` and copied into place by the postinstall only when
 # there is nothing there: an upgrade must not overwrite the node's identity.
 cp "${SCRIPT_DIR}/tollgate.yaml" "${STAGING_DIR}/usr/local/etc/tollgate/tollgate.yaml.default"
+cp "${SCRIPT_DIR}/mint.yaml" "${STAGING_DIR}/usr/local/etc/tollgate/mint.yaml.default"
 cp "${SCRIPT_DIR}/com.tollgate.daemon.plist" "${STAGING_DIR}/Library/LaunchDaemons/"
+cp "${SCRIPT_DIR}/com.tollgate.mint.plist" "${STAGING_DIR}/Library/LaunchDaemons/"
 
 cat > "${SCRIPTS_DIR}/postinstall" <<'POSTINSTALL'
 #!/bin/sh
@@ -122,9 +124,18 @@ else
     log "kept the existing config"
 fi
 
-launchctl bootout system /Library/LaunchDaemons/com.tollgate.daemon.plist 2>/dev/null || true
-launchctl bootstrap system /Library/LaunchDaemons/com.tollgate.daemon.plist 2>/dev/null || true
-log "launchd service loaded"
+if [ ! -f "$CONFDIR/mint.yaml" ]; then
+    cp "$CONFDIR/mint.yaml.default" "$CONFDIR/mint.yaml"
+    chmod 600 "$CONFDIR/mint.yaml"
+    log "installed default mint config"
+fi
+
+# The mint first: tollgated settles at it, and retries until it answers.
+for svc in mint daemon; do
+    launchctl bootout system "/Library/LaunchDaemons/com.tollgate.$svc.plist" 2>/dev/null || true
+    launchctl bootstrap system "/Library/LaunchDaemons/com.tollgate.$svc.plist" 2>/dev/null || true
+done
+log "launchd services loaded"
 
 log "postinstall complete"
 exit 0
@@ -133,8 +144,9 @@ chmod +x "${SCRIPTS_DIR}/postinstall"
 
 cat > "${SCRIPTS_DIR}/preinstall" <<'PREINSTALL'
 #!/bin/sh
-# Stop the daemon before its binary is replaced.
+# Stop the daemons before their binaries are replaced.
 launchctl bootout system /Library/LaunchDaemons/com.tollgate.daemon.plist 2>/dev/null || true
+launchctl bootout system /Library/LaunchDaemons/com.tollgate.mint.plist 2>/dev/null || true
 exit 0
 PREINSTALL
 chmod +x "${SCRIPTS_DIR}/preinstall"

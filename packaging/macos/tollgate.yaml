@@ -12,22 +12,15 @@ identity:
   secret_key: null
 
 mint:
-  # This node's own mint, which peers fund channels against. It has to be
-  # reachable *by them*, so put the address a peer sees here.
+  # This node's own mint, which peers fund channels against. It is `mintd`,
+  # configured in mint.yaml beside this file; this block only says where it
+  # is. It has to be reachable *by peers*, so the address a peer sees is the
+  # one to put here.
   url: "http://127.0.0.1:3338"
-  listen: "127.0.0.1:3338"
+  # Where tollgated reaches mintd itself, to settle channels funded in this
+  # node's vouchers.
+  local: "http://127.0.0.1:3338"
   unit: "byte"
-  # Mint vouchers for any peer that asks, without being paid. Until the market
-  # returns this is how peers get vouchers at all — and it means service here
-  # is free to anyone who can reach the mint. `false` issues nothing.
-  auto_accept: true
-  # Free is uncapped in value; only quotes are rationed, across everyone who
-  # asks: one a second, far above what peers funding channels use, there to
-  # stop a flood of requests. `0` lifts it.
-  issue_quotes_per_minute: 60
-  # The record of which vouchers this mint has already redeemed. Without it
-  # every voucher already paid out redeems again.
-  file: "/usr/local/var/lib/tollgate/mint.sqlite"
 
 access:
   minimum_flow:

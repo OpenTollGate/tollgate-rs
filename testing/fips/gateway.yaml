@@ -7,7 +7,6 @@ mint:
   # never transit and never shaped — which is the property that keeps a peer
   # that has run out of grant able to buy more.
   url: "http://[fde5:b78f:c4ef:a89c:82cd:b05b:8ee7:ed56]:3338"
-  listen: "[::]:3338"
   unit: "byte"
 vouchers:
   accepted_mints:

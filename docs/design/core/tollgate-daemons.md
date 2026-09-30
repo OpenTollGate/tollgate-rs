@@ -168,7 +168,7 @@ TollGate can use every part of it that is open to the public.
 | Listener | Reachable by | Mint quotes |
 |---|---|---|
 | **Public** | Anyone | Never paid — unless auto-accept is on, in which case paid on creation, within a rate limit |
-| **Private** | `merchantd` alone — a local socket, or loopback | **Paid on creation** |
+| **Private** | `merchantd` alone — on loopback | **Paid on creation** |
 
 The private listener is how the node sells. `merchantd` takes payment, asks
 for a NUT-04 quote in the amount sold, and mints against it with the buyer's
@@ -186,8 +186,10 @@ Why a quote on a private listener rather than a signing call:
   is the one outcome it cannot make good.
 
 Reaching the private listener is the power to print this node's vouchers.
-On one machine it is enforced by who can open the socket — see
-[Security](#security).
+It listens on loopback only, so nothing off the machine can reach it; on a
+router, everything on the machine is the operator's own software. A Unix
+socket whose permissions admit `merchantd` alone would narrow it further, and
+is left for later — see [Security](#security).
 
 There is **no issuance ceiling.** How much to issue is `merchantd`'s
 decision, and overissuing is bounded by what it does to the issuer's own
@@ -343,7 +345,7 @@ Not every node needs all three:
 | Asset | Who holds it | What protects it |
 |---|---|---|
 | Mint seed and keys | mintd | Its own seed, separate from the node's identity key; neither leaves the process. Losing the seed retires every outstanding voucher |
-| The private listener | merchantd | The power to print vouchers. On one machine, file permissions on the socket; every issue is a quote the mint records |
+| The private listener | merchantd | The power to print vouchers. Loopback only, so nothing off the machine reaches it; every issue is a quote the mint records |
 | Money and kept vouchers | merchantd | Its wallet. `tollgated` and `mintd` hold none |
 | Channel state | tollgated | Loss costs unsettled channel balance, not stored value |
 

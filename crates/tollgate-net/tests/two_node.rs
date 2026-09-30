@@ -134,7 +134,7 @@ async fn spawn_node_with(
         identify: Identify::Claimed,
         // Unused here: these tests drive `LocalChannels`, so no mint is served
         // and nothing binds this.
-        mint_listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        mint_local: "http://127.0.0.1/unused".into(),
         mint_url: "http://127.0.0.1/unused".into(),
         channel_ttl_seconds: 3_600,
         peers,
@@ -576,7 +576,7 @@ async fn spawn_flaky_node(
         identify: Identify::Claimed,
         // Unused here: these tests drive `LocalChannels`, so no mint is served
         // and nothing binds this.
-        mint_listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        mint_local: "http://127.0.0.1/unused".into(),
         mint_url: "http://127.0.0.1/unused".into(),
         channel_ttl_seconds: 3_600,
         peers,

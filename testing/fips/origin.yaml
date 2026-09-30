@@ -8,7 +8,6 @@ identity:
   secret_key: "7a155d96e5659fa94216570b08f58530aa308aa8c967a1cfacd412b83e727278"
 mint:
   url: "http://[fd8b:b816:ee09:45b8:6f58:4e2c:2c2e:43b8]:3338"
-  listen: "[::]:3338"
   unit: "byte"
 forwarding:
   mode: fips

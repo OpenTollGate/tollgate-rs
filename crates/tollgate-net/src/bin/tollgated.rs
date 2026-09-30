@@ -13,7 +13,6 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tollgate_net::channel::{SpilmanChannels, SpilmanConfig};
 use tollgate_net::config::{File, ForwardingMode};
-use tollgate_net::mint::{self, MintConfig};
 use tollgate_net::node::Node;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -59,9 +58,10 @@ struct Args {
 
 /// Derive the wallet's seed from the node's identity.
 ///
-/// Same reasoning as the mint's, and a different domain string so the two are
-/// unrelated: a wallet derived from the node's key is restored by restoring the
-/// config, rather than being a second thing to back up.
+/// Hashed with a domain string rather than used directly, so the wallet's key
+/// material is not the node's signing key: a wallet derived from the node's key
+/// is restored by restoring the config, rather than being a second thing to
+/// back up.
 fn wallet_seed(secret_hex: &str) -> Result<[u8; 64]> {
     use sha2::{Digest, Sha512};
     let secret = hex::decode(secret_hex).context("identity key is not hex")?;
@@ -69,20 +69,6 @@ fn wallet_seed(secret_hex: &str) -> Result<[u8; 64]> {
     hasher.update(b"tollgate-wallet-seed");
     hasher.update(&secret);
     Ok(hasher.finalize().into())
-}
-
-/// Derive the mint's keyset seed from the node's identity.
-///
-/// Deterministic, so a restart keeps issuing against the same keys and the
-/// vouchers a peer already holds stay redeemable. Hashed rather than used
-/// directly so the mint's key material is not the node's signing key.
-fn mint_seed(secret_hex: &str) -> Result<Vec<u8>> {
-    use sha2::{Digest, Sha256};
-    let secret = hex::decode(secret_hex).context("identity key is not hex")?;
-    let mut hasher = Sha256::new();
-    hasher.update(b"tollgate-mint-seed");
-    hasher.update(&secret);
-    Ok(hasher.finalize().to_vec())
 }
 
 #[tokio::main]
@@ -158,65 +144,9 @@ async fn main() -> Result<()> {
         });
     }
 
-    let mint_path = if file.mint.file.is_empty() {
-        mint::default_path()
-    } else {
-        file.mint.file.clone().into()
-    };
-
-    // The mint comes up first. A peer funds its channel against *our* mint, so
-    // nothing can be paid for until it is serving.
-    let mint = Arc::new(
-        mint::build(&MintConfig {
-            url: config.mint_url.clone(),
-            unit: config.policy.unit.clone(),
-            // Derived from the identity so a restart keeps issuing against the
-            // same keys, and two nodes never share a keyset.
-            seed: mint_seed(&config.identity.secret_hex())?,
-            // And the spent-proof set on disk, for the same reason: keys that
-            // survive a restart without it are keys against which every
-            // voucher already redeemed validates again.
-            file: mint_path.clone(),
-            // A peer funds its channel to us with our vouchers, and a peering
-            // that has proven itself grows to the largest channel we open.
-            max_amount: config.policy.max_channel_capacity.max(1),
-            auto_accept: file.mint.auto_accept,
-            issue_limit: file.mint.issue_limit(),
-        })
-        .await
-        .context("bring up this node's mint")?,
-    );
-    if file.mint.auto_accept {
-        // Said once at startup because it is the most consequential setting in
-        // the file: until there is a market, it is what makes this node usable
-        // at all, and it is also what makes its service free.
-        tracing::warn!("the mint issues vouchers to anyone who asks, so service here is free");
-    }
-
-    {
-        let market = tollgate_net::market::router(
-            Arc::clone(&mint),
-            config.policy.unit.clone(),
-            config.mint_url.clone(),
-            prices.clone(),
-            wallet.clone(),
-            config.policy.max_channel_capacity.max(1),
-        );
-        let mint = Arc::clone(&mint);
-        let listen = config.mint_listen;
-        tokio::spawn(async move {
-            if let Err(e) = mint::serve(mint, market, listen, std::future::pending()).await {
-                tracing::error!(error = %e, "the mint stopped");
-            }
-        });
-    }
-    info!(
-        url = %config.mint_url,
-        listen = %config.mint_listen,
-        unit = %config.policy.unit,
-        db = %mint_path.display(),
-        "mint serving"
-    );
+    // The mint is `mintd`, its own daemon: this node only advertises it and
+    // settles at it. Nothing it issues is decided here.
+    info!(url = %config.mint_url, local = %config.mint_local, "mint at");
 
     for accepted in prices.listed() {
         info!(
@@ -225,11 +155,6 @@ async fn main() -> Result<()> {
             bytes_per_unit = accepted.bytes_per_unit,
             "taking payment in"
         );
-    }
-    // Only worth saying when nothing else hands out vouchers either: a mint
-    // that auto-accepts is how peers get them while the market is dormant.
-    if !prices.is_selling() && !file.mint.auto_accept {
-        tracing::warn!("this node takes no paper as payment, so nobody can buy its vouchers here");
     }
 
     // A byte source on the mesh. Off unless asked for: it is an instrument, and
@@ -256,8 +181,8 @@ async fn main() -> Result<()> {
 
     let channels = Arc::new(
         SpilmanChannels::new(SpilmanConfig {
-            mint: Arc::clone(&mint),
             mint_url: config.mint_url.clone(),
+            mint_local: config.mint_local.clone(),
             unit: config.policy.unit.clone(),
             accepted_mints: config.policy.accepted_mints.clone(),
             secret_key_hex: config.identity.secret_hex(),

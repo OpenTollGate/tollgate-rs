@@ -71,10 +71,10 @@ pub struct NodeConfig {
     /// Whether a peer's announced key has to agree with the address it
     /// connects from.
     pub identify: Identify,
-    /// Where this node serves its own mint.
-    pub mint_listen: SocketAddr,
-    /// The URL peers reach that mint on, advertised in our Offer.
+    /// The URL peers reach this node's mint on, advertised in our Offer.
     pub mint_url: String,
+    /// Where this node reaches that mint itself.
+    pub mint_local: String,
     /// How long a channel this node funds lives before the refund path opens,
     /// in seconds. The channel backend applies it; core only ever sees the
     /// expiry that results.

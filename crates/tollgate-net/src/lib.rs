@@ -13,8 +13,9 @@
 //!   to what was bought.
 //! - [`adapter`] — the delivery gate and the meters.
 //! - [`channel`] — payment channels behind a trait.
-//! - [`mint`] — this node's own mint, with a byte-denominated keyset, which
-//!   by default issues vouchers to anyone who asks.
+//! - [`mint`] — this node's own mint, with a byte-denominated keyset, served
+//!   by `mintd` on a public and a private listener.
+//! - [`mintd`] — `mint.yaml`, and what `mintd` publishes for `minttop`.
 //! - [`market`] — selling those vouchers. A separate protocol on its own path,
 //!   dormant while vouchers are minted for the asking.
 //! - [`speedtest`] — a byte source on the mesh, so a client can measure the
@@ -34,6 +35,7 @@ pub mod fips;
 pub mod identity;
 pub mod market;
 pub mod mint;
+pub mod mintd;
 pub mod node;
 pub mod settle;
 pub mod speedtest;
