@@ -13,6 +13,8 @@
 //!   to what was bought.
 //! - [`adapter`] — the delivery gate and the meters.
 //! - [`channel`] — payment channels behind a trait.
+//! - [`client`] — one buyer session, for a program that speaks TollGate on a
+//!   device's behalf.
 //! - [`mint`] — this node's own mint, with a byte-denominated keyset, served
 //!   by `mintd` on a public and a private listener.
 //! - [`mintd`] — `mint.yaml`, and what `mintd` publishes for `minttop`.
@@ -32,6 +34,7 @@
 
 pub mod adapter;
 pub mod channel;
+pub mod client;
 pub mod config;
 pub mod control;
 pub mod dataplane;

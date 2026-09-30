@@ -610,6 +610,7 @@ impl File {
             identify,
             mint_url: self.mint.url.clone(),
             mint_local: self.mint.local_url().to_owned(),
+            connector: None,
             channel_ttl_seconds: self.channels.ttl_seconds,
             peers,
         })
