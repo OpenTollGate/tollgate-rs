@@ -101,26 +101,13 @@ pub struct SpilmanConfig {
     pub accepted_mints: Vec<String>,
     /// Secret key this node signs channel state with, hex-encoded.
     pub secret_key_hex: String,
-    /// What this node holds, and what it pays peers out of. The vouchers it
-    /// mints at a peer pass through here on their way into a channel, so a
-    /// purchase interrupted between the two is not lost.
-    pub wallet: crate::wallet::Wallet,
+    /// Where the vouchers that fund a channel come from: `merchantd`, on a
+    /// node. This backend holds none of its own.
+    pub funding: std::sync::Arc<dyn super::Funding>,
     /// How long a channel we fund stays ours alone to spend, in seconds. Past
     /// it, the refund path opens and we can reclaim what the peer has not
     /// settled.
     pub ttl_seconds: u64,
-}
-
-/// Where a node's money is, and in what.
-///
-/// Not used to fund channels while vouchers are minted for the asking; kept
-/// for the wallet display and for the market when it returns.
-#[derive(Debug, Clone)]
-pub struct Money {
-    /// A mint that sells its paper for money.
-    pub mint: String,
-    /// The unit that mint's paper is denominated in.
-    pub unit: String,
 }
 
 type Client =
@@ -129,7 +116,7 @@ type Client =
 /// Cashu Spilman channels.
 pub struct SpilmanChannels {
     config: SpilmanConfig,
-    /// The wallet is async and this backend is not, so its calls are handed
+    /// Keyset refreshes are async and this backend is not, so they are handed
     /// back to the runtime rather than run on a worker.
     runtime: tokio::runtime::Handle,
     /// Our side of channels we fund to pay peers.
@@ -354,32 +341,14 @@ fn signature_from_hex(s: &str) -> Result<Signature> {
 }
 
 impl SpilmanChannels {
-    /// Get `capacity` of a peer's vouchers by minting them at its mint.
-    ///
-    /// The peer's mint issues to anyone who asks, so this is a NUT-04 quote and
-    /// a mint, with nothing paid. Whatever is already held of that peer's paper
-    /// is spent first — a purchase that minted and then failed to open its
-    /// channel leaves vouchers behind, and they are as good as new ones.
+    /// Get `capacity` of a peer's vouchers, from wherever this node's come
+    /// from ([`super::Funding`]).
     fn mint_vouchers(&self, mint_url: &str, capacity: u64) -> Result<String> {
-        let wallet = self.config.wallet.clone();
-        let unit = self.config.unit.clone();
-        let handle = self.runtime.clone();
-
-        tokio::task::block_in_place(|| {
-            handle.block_on(async move {
-                let held = wallet.balance_of(mint_url, &unit).await;
-                let short = capacity.saturating_sub(held);
-                if short > 0 {
-                    debug!(capacity, held, short, mint = %mint_url, "minting vouchers");
-                    wallet.issue(mint_url, &unit, short).await?;
-                }
-
-                wallet
-                    .spend(mint_url, &unit, capacity)
-                    .await
-                    .with_context(|| format!("take {capacity} {unit} from {mint_url} out to fund"))
-            })
-        })
+        debug!(capacity, mint = %mint_url, "asking for vouchers to fund with");
+        self.config
+            .funding
+            .vouchers(mint_url, &self.config.unit, capacity)
+            .with_context(|| format!("get {capacity} {} of {mint_url}", self.config.unit))
     }
 
     /// Open a channel to `peer` from a token of its vouchers, and describe the
@@ -789,7 +758,7 @@ mod tests {
         }
 
         /// A backend running `mint` at `mint_url` and taking payment in
-        /// `accepted_mints`, with a wallet it never uses.
+        /// `accepted_mints`, funding from a wallet of its own.
         pub(super) async fn backend(
             mint_url: &str,
             accepted_mints: Vec<String>,
@@ -806,7 +775,7 @@ mod tests {
                 unit: "byte".into(),
                 accepted_mints,
                 secret_key_hex: hex::encode(secret),
-                wallet,
+                funding: std::sync::Arc::new(crate::wallet::WalletFunding::new(wallet)),
                 ttl_seconds: 3_600,
             })
             .expect("build the backend");

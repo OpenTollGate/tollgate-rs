@@ -14,6 +14,8 @@ COPY --from=tollgate /usr/local/bin/tollgated /usr/local/bin/tollgated
 COPY --from=tollgate /usr/local/bin/tolltop /usr/local/bin/tolltop
 COPY --from=tollgate /usr/local/bin/mintd /usr/local/bin/mintd
 COPY --from=tollgate /usr/local/bin/minttop /usr/local/bin/minttop
+COPY --from=tollgate /usr/local/bin/merchantd /usr/local/bin/merchantd
+COPY --from=tollgate /usr/local/bin/merchanttop /usr/local/bin/merchanttop
 COPY --from=tollgate /usr/local/bin/tollgate-node /usr/local/bin/tollgate-node
 
 COPY fips-entrypoint.sh /usr/local/bin/fips-entrypoint.sh

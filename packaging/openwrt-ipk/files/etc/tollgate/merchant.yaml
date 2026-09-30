@@ -1,0 +1,38 @@
+# merchantd: this router's commercial side. Prices and sells its capacity,
+# buys what tollgated needs to pay its own upstream, and holds all the money.
+# Watch and change it with `merchanttop`.
+
+# The market endpoints buyers reach.
+listen: "0.0.0.0:3340"
+# tollgated's socket (must match merchant.socket in tollgate.yaml), and the
+# one merchanttop reads.
+socket: "/run/merchantd.sock"
+control: "/run/merchantd-control.sock"
+
+mint:
+  # This router's mint as peers see it, and mintd's private listener, where
+  # what is sold gets issued.
+  url: "http://192.168.1.1:3338"
+  private: "http://127.0.0.1:3337"
+  unit: "byte"
+
+# What a Mbit sells for, for accepted mints without a price of their own.
+# 0.007 sat a Mbit is about 18 MB to the sat — 1000 sat buys an hour at 5 MB/s.
+# In usd or eur instead, the BTC rate is fetched to convert.
+price:
+  unit: sat
+  per_mbit: 0.007
+
+# Whose tokens buy this router's capacity. Each may carry its own price.
+accepts:
+  - mint: "https://mint.minibits.cash/Bitcoin"
+    unit: sat
+
+wallet:
+  # Bearer tokens: this file *is* the money. Kept across a sysupgrade.
+  file: "/etc/tollgate/wallet.sqlite"
+  # The wallet's own secret, created on first start. Kept across a sysupgrade.
+  seed_file: "/etc/tollgate/wallet.seed"
+  # Where the wallet is topped up over Lightning, from merchanttop.
+  mint: "https://mint.minibits.cash/Bitcoin"
+  unit: sat

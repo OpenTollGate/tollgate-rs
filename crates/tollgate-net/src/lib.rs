@@ -17,7 +17,11 @@
 //!   by `mintd` on a public and a private listener.
 //! - [`mintd`] — `mint.yaml`, and what `mintd` publishes for `minttop`.
 //! - [`market`] — selling those vouchers. A separate protocol on its own path,
-//!   dormant while vouchers are minted for the asking.
+//!   served by `merchantd`.
+//! - [`merchant`] — `merchantd`: `merchant.yaml`, the funding socket
+//!   `tollgated` uses, and the control socket `merchanttop` reads.
+//! - [`pricing`] — a price per Mbit in usd, eur or sat, turned into bytes per
+//!   token through BTC rates.
 //! - [`speedtest`] — a byte source on the mesh, so a client can measure the
 //!   path it paid for rather than the path to somebody's CDN.
 //! - [`node`] — the driver that connects all of it to core.
@@ -34,9 +38,11 @@ pub mod dataplane;
 pub mod fips;
 pub mod identity;
 pub mod market;
+pub mod merchant;
 pub mod mint;
 pub mod mintd;
 pub mod node;
+pub mod pricing;
 pub mod settle;
 pub mod speedtest;
 pub mod wallet;

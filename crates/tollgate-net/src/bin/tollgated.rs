@@ -56,21 +56,6 @@ struct Args {
     control_socket: Option<PathBuf>,
 }
 
-/// Derive the wallet's seed from the node's identity.
-///
-/// Hashed with a domain string rather than used directly, so the wallet's key
-/// material is not the node's signing key: a wallet derived from the node's key
-/// is restored by restoring the config, rather than being a second thing to
-/// back up.
-fn wallet_seed(secret_hex: &str) -> Result<[u8; 64]> {
-    use sha2::{Digest, Sha512};
-    let secret = hex::decode(secret_hex).context("identity key is not hex")?;
-    let mut hasher = Sha512::new();
-    hasher.update(b"tollgate-wallet-seed");
-    hasher.update(&secret);
-    Ok(hasher.finalize().into())
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -100,62 +85,14 @@ async fn main() -> Result<()> {
         "starting"
     );
 
-    // What this node takes as payment, and at what price. Held here because
-    // three things share it: the market applies it, the control socket changes
-    // it while the node runs, and the display shows it.
-    let prices = tollgate_net::market::Prices::new(file.market.accepted());
-
-    // What it holds. The market pays into it, channels are funded out of it,
-    // and it is derived from the node's own secret so that restoring a config
-    // restores the balance with it.
-    let wallet_path = if file.wallet.file.is_empty() {
-        tollgate_net::wallet::default_path()
-    } else {
-        file.wallet.file.clone().into()
-    };
-    let wallet = tollgate_net::wallet::Wallet::open(
-        &wallet_path,
-        wallet_seed(&config.identity.secret_hex())?,
-        // What this node sells, so a holding denominated in it can be told
-        // apart from money: it is capacity bought from an upstream.
-        config.policy.unit.clone(),
-    )
-    .await
-    .context("open this node's wallet")?;
-    info!(wallet = %wallet_path.display(), "holding");
-
-    // Whatever the last run left half-done, finished or rolled back, and
-    // anything already paid for collected. A node killed mid-mint leaves its
-    // quote reserved, and the money behind it is only claimable once that is
-    // settled — so this is a startup step rather than something to discover
-    // later. It talks to a mint, so it happens off the critical path and its
-    // failure is a log line, not a refusal to start.
-    if !file.wallet.mint.is_empty() {
-        let wallet = wallet.clone();
-        let (mint, unit) = (file.wallet.mint.clone(), file.wallet.unit.clone());
-        tokio::spawn(async move {
-            match wallet.claim_pending(&mint, &unit).await {
-                Ok(0) => {}
-                Ok(claimed) => info!(claimed, %unit, "collected what was already paid for"),
-                Err(e) => {
-                    tracing::debug!(error = %format!("{e:#}"), "nothing collectable at startup")
-                }
-            }
-        });
-    }
-
     // The mint is `mintd`, its own daemon: this node only advertises it and
     // settles at it. Nothing it issues is decided here.
     info!(url = %config.mint_url, local = %config.mint_local, "mint at");
 
-    for accepted in prices.listed() {
-        info!(
-            mint = %accepted.mint,
-            unit = %accepted.unit,
-            bytes_per_unit = accepted.bytes_per_unit,
-            "taking payment in"
-        );
-    }
+    // What funds this node's channels: `merchantd`, which holds the money.
+    // This node holds none, and asks for exactly what each channel needs.
+    let merchant = file.merchant.socket_path();
+    info!(merchant = %merchant.display(), "funding from");
 
     // A byte source on the mesh. Off unless asked for: it is an instrument, and
     // an unauthenticated one, so a node that was never told to serve it should
@@ -186,7 +123,7 @@ async fn main() -> Result<()> {
             unit: config.policy.unit.clone(),
             accepted_mints: config.policy.accepted_mints.clone(),
             secret_key_hex: config.identity.secret_hex(),
-            wallet: wallet.clone(),
+            funding: Arc::new(tollgate_net::merchant::MerchantClient::new(merchant)),
             ttl_seconds: config.channel_ttl_seconds,
         })
         .context("build the channel backend")?,
@@ -270,22 +207,9 @@ async fn main() -> Result<()> {
             .control_socket
             .clone()
             .unwrap_or_else(tollgate_net::control::default_socket_path);
-        let prices = prices.clone();
-        let wallet = wallet.clone();
-        let money = (!file.wallet.mint.is_empty()).then(|| tollgate_net::channel::Money {
-            mint: file.wallet.mint.clone(),
-            unit: file.wallet.unit.clone(),
-        });
         tokio::spawn(async move {
-            if let Err(e) = tollgate_net::control::serve(
-                &path,
-                published,
-                prices,
-                wallet,
-                money,
-                std::future::pending(),
-            )
-            .await
+            if let Err(e) =
+                tollgate_net::control::serve(&path, published, std::future::pending()).await
             {
                 tracing::warn!(error = %format!("{e:#}"), "the control socket stopped");
             }

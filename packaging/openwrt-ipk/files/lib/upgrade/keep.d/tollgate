@@ -4,6 +4,8 @@
 # And the wallet is the money. These are bearer tokens; there is no recovering
 # them from anywhere else.
 /etc/tollgate/wallet.sqlite
+/etc/tollgate/wallet.seed
+/etc/tollgate/merchant.yaml
 /etc/tollgate/mint.yaml
 # The mint's own seed: its keys are derived from it, so losing it retires
 # every voucher outstanding.

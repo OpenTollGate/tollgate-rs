@@ -14,13 +14,15 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-for svc in daemon mint; do
+for svc in daemon mint merchant; do
     launchctl bootout system "/Library/LaunchDaemons/com.tollgate.$svc.plist" 2>/dev/null || true
     rm -f "/Library/LaunchDaemons/com.tollgate.$svc.plist"
 done
-rm -f /usr/local/bin/tollgated /usr/local/bin/tolltop /usr/local/bin/mintd /usr/local/bin/minttop
+rm -f /usr/local/bin/tollgated /usr/local/bin/tolltop /usr/local/bin/mintd /usr/local/bin/minttop \
+    /usr/local/bin/merchantd /usr/local/bin/merchanttop
 rm -rf /usr/local/var/log/tollgate
-rm -f /usr/local/var/run/tollgate.sock /usr/local/var/run/mintd.sock
+rm -f /usr/local/var/run/tollgate.sock /usr/local/var/run/mintd.sock \
+    /usr/local/var/run/merchantd.sock /usr/local/var/run/merchantd-control.sock
 pkgutil --forget com.tollgate.pkg 2>/dev/null || true
 
 if [ "$PURGE" -eq 1 ]; then
