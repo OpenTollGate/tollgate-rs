@@ -46,12 +46,12 @@
   <rect width="760" height="560" rx="8" class="bg"/>
 
   <!-- Title -->
-  <text x="380" y="28" text-anchor="middle" class="title">Gate Protocol</text>
-  <text x="380" y="46" text-anchor="middle" class="subtitle">tollgated decides what is owed; the gate opens, shapes and counts</text>
+  <text x="380" y="28" text-anchor="middle" class="title">Enforcer Protocol</text>
+  <text x="380" y="46" text-anchor="middle" class="subtitle">tollgated decides what is owed; the enforcer opens, shapes and counts</text>
 
   <!-- Node headers -->
   <rect x="130" y="65" width="180" height="42" class="node" stroke="#40a060" stroke-width="2" rx="6"/>
-  <text x="220" y="85" text-anchor="middle" class="nlabel">gate</text>
+  <text x="220" y="85" text-anchor="middle" class="nlabel">enforcer</text>
   <text x="220" y="98" text-anchor="middle" class="nrole">server; owns the data plane</text>
 
   <rect x="450" y="65" width="180" height="42" class="node" stroke-width="2" rx="6"/>
@@ -83,7 +83,7 @@
 
   <line x1="530" y1="258" x2="232" y2="258" stroke="#5080c0" stroke-width="1.5" marker-end="url(#gsB)"/>
   <text x="380" y="251" text-anchor="middle" class="alabel" fill="#5080c0">bind + set, every payer</text>
-  <text x="380" y="274" text-anchor="middle" class="annot">the whole of what the gate knows</text>
+  <text x="380" y="274" text-anchor="middle" class="annot">the whole of what the enforcer knows</text>
 
   <line x1="70" y1="290" x2="700" y2="290" class="sep"/>
 
@@ -113,5 +113,5 @@
   <text x="550" y="484" class="annot">payer gone</text>
 
   <!-- Caption -->
-  <text x="380" y="542" text-anchor="middle" class="caption">The socket drops: the gate forgets everything and is closed again</text>
+  <text x="380" y="542" text-anchor="middle" class="caption">The socket drops: the enforcer forgets everything and is closed again</text>
 </svg>
