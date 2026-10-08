@@ -27,7 +27,7 @@ Three things, never conflated:
 | Term | What it is | Who knows it |
 |---|---|---|
 | **Payer** | The TollGate key that signs payments and owns the grant. `tollgated`'s ledger is keyed by it | `tollgated` |
-| **Subject** | What the gate's data plane matches to open or close: an IPv4 or IPv6 address, a MAC, a public key, a WireGuard key, anything | The gate |
+| **Subject** | What the gate's data plane matches to open or close. On the wire, bytes whose form the Identify mode fixes ([below](#what-a-subject-is)) | The gate |
 | **Binding** | What ties a payer to a subject | Both: `tollgated` states it, the gate enforces it |
 
 **A payer and its subject need not be the same party.** A proxy buying a
@@ -41,31 +41,33 @@ runs under, the key `ResourceAdapter` is called with. State and counters are
 per payer; a payer may hold several subjects, and a subject is held by at
 most one payer.
 
-### Subject kinds
+### What a subject is
 
-| Kind | Value | Example |
-|---|---|---|
-| `ipv4` | 4 bytes | `192.168.1.23` |
-| `ipv6` | 16 bytes | `2001:db8::5` |
-| `mac` | 6 bytes | `aa:bb:cc:00:11:22` |
-| `pubkey` | 32-byte x-only secp256k1 key | `3bf0c63f…aefa459d` |
-| `opaque` | a `u32` kind and up to 64 bytes | a WireGuard public key, under a kind the two ends agree |
+Each `tollgated` runs as a named instance — `tollgate-ip`, `tollgate-fips`,
+`tollgate-fips-exit` — paired with exactly one gate for one task, the two
+configured together out of band. The pairing already says what the gate
+matches, so the protocol does not: a subject on the wire is plain bytes, with
+no kind. Its form follows from the instance's Identify mode
+([Identify Coupling](#identify-coupling)):
 
-A `pubkey` is the key itself, not its bech32 display form (the npub a FIPS
-node shows).
+| Identify | Subject |
+|---|---|
+| `fips` | The peer's 32-byte x-only secp256k1 key — the key itself, not its bech32 display form (the npub a FIPS node shows) |
+| `claimed` | The control connection's source address, 16 bytes. An IPv4 address is written as its v4-mapped IPv6 form, `::ffff:a.b.c.d` |
+| delegated | Whatever the delegating client and the gate agreed, up to 64 bytes ([Delegated Bindings](#delegated-bindings)) |
 
-**A FIPS address is not a kind on the wire.** It is a hash of a key — `0xfd`
-and the first 15 bytes of SHA-256 of the x-only key
+**One encoding per address**, so two subjects are the same subject exactly
+when their bytes are equal: `192.168.1.23` never arrives once as four bytes
+and once as sixteen.
+
+**A FIPS address is never a subject.** It is a hash of a key — `0xfd` and the
+first 15 bytes of SHA-256 of the x-only key
 (`crates/tollgate-net/src/fips.rs`) — so it says less than the key, and
 `tollgated` never has one without the key it came from. `tollgated` binds the
-`pubkey`; a gate that matches FIPS traffic derives the address from it
-([Deriving Subjects](#deriving-subjects)) and matches it only on `fips0`. An
-`ipv6` subject in `fd00::/8` is just an address: a gate never takes it for a
-FIPS identity.
-
-`opaque` is for subjects this protocol has no name for yet. The kind number is
-agreed between whoever delegates the subject and the gate; `tollgated`
-neither interprets nor derives it, and can only pass one on as delegated.
+key; a gate that matches FIPS traffic derives the address from it
+([Deriving Subjects](#deriving-subjects)) and matches it only on `fips0`. A
+`claimed` subject in `fd00::/8` is just an address: a gate never takes it for
+a FIPS identity.
 
 ### Where the trust comes from
 
@@ -77,9 +79,10 @@ hops away it is. On a LAN it rests on
 the link: a source address or a neighbour-table entry is what this node saw,
 and any host on the segment can forge it. A **delegated** binding rests on the
 local client that asked for it — a proxy on the same machine saying a phone
-is paid for by one of its sessions. So the wire carries no grades of evidence.
-The gate learns the first two from the Identify mode it requires, and the
-third from one flag on the subject.
+is paid for by one of its sessions. So the wire carries no grades of evidence
+and no subject kinds. The Identify mode the gate requires tells it which of
+the first two it has and what form its subjects take; one flag on a subject
+tells it the third.
 
 ---
 
@@ -115,7 +118,7 @@ else of TollGate. Their normative schema is a CDDL file beside
 
 | Message | Direction | Meaning |
 |---|---|---|
-| `hello(version, kinds, identify, delegated, opaque_kinds)` | gate → tollgated | First message on every connection. The subject kinds this gate matches, the Identify mode it requires (`fips` or `claimed`), whether it accepts delegated bindings, and the `opaque` kinds it knows |
+| `hello(version, identify, delegated)` | gate → tollgated | First message on every connection. The Identify mode the gate requires (`fips` or `claimed`), which also fixes the form of its subjects, and whether it accepts delegated bindings |
 | `bind(peer, [subject, delegated])` | tollgated → gate | The complete set of subjects this payer holds, replacing any earlier set. Empty unbinds them all |
 | `set(peer, rate)` | tollgated → gate | The payer's state: `0` closed, a number open and shaped to that many bytes per second, `null` open and unshaped |
 | `remove(peer)` | tollgated → gate | Forget the payer: its subjects return to closed |
@@ -153,7 +156,7 @@ node's own addresses, a proxy serves its portal to anyone.
 gate                                   tollgated
   │  (listening; everyone closed)          │
   │◄────────────── connect ────────────────│
-  │── hello(1, kinds, identify, …) ───────►│  check against own Identify
+  │── hello(1, identify, delegated) ──────►│  check against own Identify
   │                                        │  (mismatch: startup error)
   │◄──── bind + set, every payer ──────────│  full state
   │                                        │
@@ -185,10 +188,11 @@ them, `received` what came from them. Because each connection starts from zero,
 connection — so the totals core sees never go backwards.
 
 **Protocol errors close the connection.** An unknown message type, a
-malformed message, a `bind` naming a kind the gate did not list, or a
-delegated subject sent to a gate that refuses them: the receiver closes the
-socket. Closing is the safe failure for both ends — the gate returns to
-closed, and `tollgated` stops selling (below).
+malformed message, a subject not delegated whose length is not the one the
+mode fixes (32 bytes under `fips`, 16 under `claimed`), or a delegated subject
+sent to a gate that refuses them: the receiver closes the socket. Closing is
+the safe failure for both ends — the gate returns to closed, and `tollgated`
+stops selling (below).
 
 ---
 
@@ -234,16 +238,18 @@ what `tollgated` can bind:
 
 | Identify | What `tollgated` has | What it binds |
 |---|---|---|
-| `Fips` | A connection from the FIPS address of the key announced, checked: the key itself is authenticated | `pubkey` |
-| `Claimed` | The connection's source address, unchecked | `ipv4` or `ipv6` |
-| either | A local trusted client's word | whatever it named, flagged delegated |
+| `Fips` | A connection from the FIPS address of the key announced, checked: the key itself is authenticated | The x-only key, 32 bytes |
+| `Claimed` | The connection's source address, unchecked | The address, 16 bytes |
+| either | A local trusted client's word | The bytes it named, flagged delegated |
 
 **So the gate states the mode it requires.** In `external` mode
 `forwarding.mode` cannot say which network carries the control plane, so the
-`hello` does. A gate that matches `pubkey` is trusting the subject to be
-the key at the other end of the traffic, which only the FIPS check makes
-true, so it requires `fips`; any other gate requires `claimed`. `tollgated` then runs in the mode
-the gate asked for.
+`hello` does. A gate that matches keys is trusting the subject to be the key
+at the other end of the traffic, which only the FIPS check makes true, so it
+requires `fips`; a gate that matches addresses requires `claimed`. `tollgated`
+then runs in the mode the gate asked for, and the gate reads every subject
+that is not delegated in that mode's form. With no kinds on the wire, this is
+the one check that the two ends of a pairing agree.
 
 **A mismatch is a startup error, not a silent hole.** `tollgated` refuses to
 start — or, on a reconnect, refuses that gate and stays in the not-selling
@@ -251,16 +257,17 @@ state above — when:
 
 - the operator pinned the mode (`forwarding.identify: fips` or `claimed`,
   optional in `external` mode) and the `hello` asks for the other one;
-- the `hello` contradicts itself: it matches `pubkey` but requires
-  `claimed`, or requires `fips` but does not match `pubkey`;
 - a reconnecting gate asks for a different mode from the one `tollgated` is
   running. Live sessions were identified under the old mode, and switching
   would either re-trust peers that were checked or strand peers that were not.
 
-The hole this closes: a gate that takes a `pubkey` as authenticated, fed by a
-`tollgated` that believes whatever key it is told, would open a paying peer's
-subject to anyone who claims its key. Running on regardless is never the
-answer; refusing is.
+The hole this closes: a FIPS gate paired by mistake with a `claimed`
+instance. The gate takes its subjects as authenticated keys; the instance
+believes whatever key a peer claims and binds source addresses. Left to run,
+the mistake would surface long after startup, if at all — as a stream of
+protocol errors, or as a gate taking for an authenticated key bytes that
+nobody authenticated. Running on regardless
+is never the answer; refusing at startup is.
 
 ---
 
@@ -269,18 +276,19 @@ answer; refusing is.
 **Deriving subjects is the gate's job.** `tollgated` passes only what it
 genuinely has, and the gate extends it with what its own data plane can see:
 
-- a LAN gate goes from an `ipv4` to its `mac` through the neighbour table,
-  and from the `mac` to the device's `ipv6` addresses
+- a LAN gate goes from an address to its MAC through the neighbour table,
+  and from the MAC to the device's other IPv6 addresses
   ([peering-ip.md](../network-peering/peering-ip.md#a-customers-ipv6));
-- a gate on a FIPS node goes from a `pubkey` to its FIPS address, and
-  matches that address on `fips0` only.
+- a gate on a FIPS node goes from a key to its FIPS address, and matches
+  that address on `fips0` only.
 
 A derived subject belongs to the payer of the one it came from, and falls
 under the same conflict rule as a bound one.
 
 This keeps `tollgated` free of every data plane's details. It never learns
 the neighbour table exists; a new gate that matches something new needs no
-new `tollgated`.
+new `tollgated`. It also means a gate cannot ask `tollgated` for several forms
+of one peer's subject: it gets the one its mode fixes, and derives the rest.
 
 ---
 
@@ -293,9 +301,12 @@ proxy buying a session per phone: its session's key is the payer, the phone's
 address the subject.
 
 The binding reaches the gate **through `tollgated`**, in the payer's next
-`bind`, with the subject flagged **delegated**. The client never talks to the
-gate: `tollgated` remains the one party that tells the gate who has paid, and
-the payer must be one `tollgated` tracks.
+`bind`, with the subject flagged **delegated**. A delegated subject is bytes
+in whatever form the client and the gate agreed, up to 64 of them;
+`tollgated` passes them through untouched and only ever compares them for
+equality. The client never talks to the gate: `tollgated` remains the one
+party that tells the gate who has paid, and the payer must be one
+`tollgated` tracks.
 
 **A gate may refuse delegated bindings**, and says so in its `hello`.
 `tollgated` then turns the client's request down itself, so no refused
@@ -347,23 +358,13 @@ sent to the wrong socket fails to decode rather than meaning something else.
 gate-message = hello / bind / set / remove / counters / conflict
 
 u8  = uint .size 1
-u32 = uint .size 4
 u64 = uint .size 8
 payer = bstr .size 33             ; compressed secp256k1 key
 
-subject-kind = &(
-  kind-ipv4:      0,
-  kind-ipv6:      1,
-  kind-mac:       2,
-  kind-pubkey:    3,
-  kind-opaque:    4,
-)
-
-subject = [0, bstr .size 4]       ; ipv4
-        / [1, bstr .size 16]      ; ipv6
-        / [2, bstr .size 6]       ; mac
-        / [3, bstr .size 32]      ; pubkey, x-only
-        / [4, u32, bstr .size (0..64)]   ; opaque: kind, value
+; Plain bytes; the Identify mode fixes the form. fips: the 32-byte
+; x-only key. claimed: the source address, 16 bytes, IPv4 v4-mapped.
+; Delegated: as the client and the gate agreed.
+subject = bstr .size (1..64)
 
 binding = [subject, delegated: bool]
 
@@ -376,10 +377,8 @@ identify = &(
 hello = {
   0: 0x20,
   1: u8,                          ; version; 1
-  2: [+ subject-kind],            ; kinds matched
-  3: identify,                    ; the mode tollgated must run
-  4: bool,                        ; accepts delegated bindings
-  ? 5: [* u32],                   ; opaque kinds matched; absent means none
+  2: identify,                    ; the mode tollgated must run
+  3: bool,                        ; accepts delegated bindings
   * uint => any,
 }
 
@@ -435,22 +434,25 @@ cross the socket.
 
 A router sells internet access on `br-lan`. Its gate is a firewall program
 that matches addresses and MACs, and takes no third party's word for them.
+It is paired with the instance `tollgate-ip`.
 
 ```
-hello(1, kinds: [ipv4, ipv6], identify: claimed, delegated: false)
+hello(1, identify: claimed, delegated: false)
 ```
 
 `tollgated` runs `Identify::Claimed` and sends full state — nothing yet.
 
 A laptop running TollGate with key `02ab…` connects to the control plane from
-`192.168.1.23`. The source address is all `tollgated` has, unchecked:
+`192.168.1.23`. The source address is all `tollgated` has, unchecked, and it
+binds it in the one form `claimed` uses, 16 bytes with IPv4 v4-mapped:
 
 ```
-tollgated → gate   bind(02ab…, [[ipv4 192.168.1.23, false]])
+tollgated → gate   bind(02ab…, [[::ffff:192.168.1.23, false]])
 tollgated → gate   set(02ab…, 0)           no allowance on this node
 ```
 
-The gate looks `192.168.1.23` up in the neighbour table, finds
+The gate sees the v4-mapped prefix, looks `192.168.1.23` up in the
+neighbour table, finds
 `aa:bb:cc:00:11:22`, and from that MAC the laptop's `2001:db8::5` and a
 privacy address. All four are the payer's, and all closed. The laptop can
 still reach the router itself, so it pays.
@@ -476,8 +478,8 @@ adapter. When the grant lapses, `set(02ab…, 0)` closes all four again.
 another machine behind a NAT router plugged into the LAN:
 
 ```
-tollgated → gate   bind(03cd…, [[ipv4 192.168.1.23, false]])
-gate → tollgated   conflict(03cd…, ipv4 192.168.1.23)
+tollgated → gate   bind(03cd…, [[::ffff:192.168.1.23, false]])
+gate → tollgated   conflict(03cd…, ::ffff:192.168.1.23)
 ```
 
 `02ab…` keeps the address. `tollgated` sells `03cd…` nothing and logs the
@@ -485,8 +487,9 @@ conflict; the operator decides what the NAT is doing there.
 
 **A delegated binding.** Had the gate said `delegated: true`, a proxy on the
 router could have its session key `02ef…` pay for a phone at
-`192.168.1.40`: it asks `tollgated` on the control socket, and `tollgated`
-sends `bind(02ef…, [[ipv4 192.168.1.40, true]])`. This gate refuses them, so
+`192.168.1.40`, in the same 16-byte form by agreement with the gate: it asks
+`tollgated` on the control socket, and `tollgated` sends
+`bind(02ef…, [[::ffff:192.168.1.40, true]])`. This gate refuses them, so
 `tollgated` turns the proxy down instead.
 
 ---
@@ -500,11 +503,12 @@ Nothing is sold per link here: the exit's traffic to the payer crosses
 whatever mesh path FIPS picks, and any paid peering along that path is a
 separate matter, on the built-in `fips` adapter.
 
-The gate is the proxy itself. FIPS tells it which address a connection came
-from; it wants to know which key.
+The gate is the proxy itself, paired with the instance `tollgate-fips-exit`.
+FIPS tells it which address a connection came from; it wants to know which
+key.
 
 ```
-hello(1, kinds: [pubkey], identify: fips, delegated: false)
+hello(1, identify: fips, delegated: false)
 ```
 
 `tollgated` runs `Identify::Fips`: a control connection that does not come
@@ -517,12 +521,14 @@ connects to the control plane from its FIPS address, the check passes, and so
 `tollgated` has authenticated the key itself. That is what it binds:
 
 ```
-tollgated → gate   bind(023bf0c63f…aefa459d, [[pubkey 3bf0c63f…aefa459d, false]])
+tollgated → gate   bind(023bf0c63f…aefa459d, [[3bf0c63f…aefa459d, false]])
 tollgated → gate   set(023bf0c63f…aefa459d, 0)
 ```
 
-Payer and subject are the same key here, but `tollgated` still says so
-explicitly; the gate infers nothing from the payer.
+The subject is the 32 bytes of the x-only key and nothing else; the gate
+reads them as a key because its mode is `fips`. Payer and subject are the same
+key here, but `tollgated` still says so explicitly; the gate infers nothing
+from the payer.
 
 The gate derives the address it will see that key's traffic from:
 
@@ -549,8 +555,10 @@ the sums as `counters`. A mesh node the operator does not charge would get
 
 **A mismatch.** The same gate, with `tollgated` configured to pin
 `forwarding.identify: claimed`: the `hello` asks for `fips`, and `tollgated`
-exits at startup naming both. Without the check it would bind whatever key a
-peer claimed, and the gate would open that key's address to the claimant.
+exits at startup naming both. Without the check the instance would believe
+whatever key a peer claimed and bind its source address, and the gate, which
+reads its subjects as authenticated keys, would be handed bytes that are
+neither.
 
 ---
 
@@ -562,7 +570,7 @@ peer claimed, and the gate would open that key's address to the claimant.
 | No positive bind acknowledgement | A refused `bind` is reported; an accepted one is silent. In practice the conflict arrives before any grant, but nothing guarantees it. Settled with conflict handling |
 | Outage cost | Closing on disconnect makes a paying peer lose the rest of its grant in force. A grace period would carry peers unmetered for as long as it lasts |
 | The delegating client's request | Its form on the control socket is left to the control socket |
-| Opaque kind numbers | Agreed per deployment between the delegating client and the gate. A registry, if kinds get common enough to need one |
+| Delegated subject forms | Agreed per deployment between the delegating client and the gate; `tollgated` never reads them |
 | Moving built-in adapters behind the socket | The `nftables` LAN gate could become a gate program. Not planned; nothing requires it |
 
 ---
@@ -573,6 +581,7 @@ peer claimed, and the gate would open that key's address to the claimant.
 |---|---|---|
 | Identity model | Payer, subject and binding kept apart; `peer` is always the payer | A proxy pays for a phone, an allowlist has no payer. Conflating them makes both impossible and lets a key stand in for an address it never proved |
 | Subject from payer | Never inferred; every subject arrives in a binding | Payer and subject need not be the same party |
+| Subject kinds | None on the wire. A subject is bytes whose form the Identify mode fixes: under `fips` the 32-byte x-only key, under `claimed` the source address in 16 bytes with IPv4 v4-mapped. Delegated subjects are bytes too, passed through and only compared for equality | Each `tollgated` is a named instance paired with one gate for one task, configured together out of band, so the pairing already says what a subject is and a kind would only restate it. One canonical address encoding makes equality byte equality. The trade-off: one gate cannot ask `tollgated` for several kinds of subject for the same peer; deriving the others — a MAC from an address, an `fd` address from a key — is the gate's job |
 | Trust on the wire | No evidence levels. `hello` states the Identify mode the gate requires and whether it accepts delegated bindings; a subject carries only a `delegated` flag | The deployment already fixes which trust exists: FIPS authenticates, a LAN is spoofable, a delegated binding is the local client's word. Per-subject grades would restate that without letting a gate do anything the mode and the flag do not, and a field nobody can act on invites a gate to trust it |
 | Payer state | One `set(peer, rate)`: `0` closed, a rate open and shaped, `null` open and unshaped. Access levels stay in `tollgated` | Open-or-closed and how fast is all a gate enforces, and core's rate already says both. One message means no moment open at an unbought rate |
 | Transport | Unix socket, gate as server, `tollgated` reconnects | The gate owns the data plane and may start first or outlive `tollgated`; socket permissions are the authentication |
@@ -582,8 +591,8 @@ peer claimed, and the gate would open that key's address to the claimant.
 | Startup | Gate closed until told otherwise | Nobody is carried before someone is metering them |
 | Disconnect | Gate returns to closed; `tollgated` resends full state; sells nothing meanwhile | Nothing to reconcile, and nothing carried that nobody meters. Costs a paying peer at most its grant in force |
 | Counters | Cumulative per payer per connection, every tick; `tollgated` rebases on reconnect | Cumulative counts survive a lost report; rebasing keeps core's totals monotonic |
-| Identify | Required by the gate's `hello`; a gate matching `pubkey` requires `fips`; a mismatch is a startup error | Believing a claimed key while the gate takes a `pubkey` as authenticated opens a paying peer's subject to anyone |
-| FIPS addresses | Not a wire kind. `tollgated` binds the `pubkey`; the gate derives the address and matches it on `fips0` | Under `Identify::Fips` what is authenticated is the key, and the address is a hash of it. `tollgated` never has an address without its key, so a second kind would only duplicate one the gate can compute |
+| Identify | Required by the gate's `hello`; a gate matching keys requires `fips`. A pinned mode the `hello` contradicts, or a reconnecting gate changing mode, is refused | With no kinds on the wire it is the one check that a pairing agrees. Believing a claimed key while the gate takes its subjects as authenticated keys opens a paying peer's traffic to anyone |
+| FIPS addresses | Never a subject. `tollgated` binds the key; the gate derives the address and matches it on `fips0` | Under `Identify::Fips` what is authenticated is the key, and the address is a hash of it. `tollgated` never has an address without its key, so binding the address too would only duplicate what the gate can compute |
 | Scope | Gates sell a service this node delivers; paid FIPS peer links stay on the built-in `fips` adapter | Transit between neighbours is enforced by the FIPS node itself, per neighbour. A gate sells what its own data plane delivers, to any payer that can reach this node |
 | Deriving subjects | The gate's job | `tollgated` stays free of every data plane's details |
 | Delegated bindings | Through `tollgated`, flagged, refusable in `hello` | One party tells the gate who has paid; a gate that takes no third party's word says so once |

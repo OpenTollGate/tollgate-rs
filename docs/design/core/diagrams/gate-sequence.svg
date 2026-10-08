@@ -71,7 +71,7 @@
   <text x="380" y="143" text-anchor="middle" class="alabel" fill="#5080c0">connect</text>
 
   <line x1="230" y1="180" x2="528" y2="180" stroke="#40a060" stroke-width="1.5" marker-end="url(#gsG)"/>
-  <text x="380" y="173" text-anchor="middle" class="alabel" fill="#40a060">hello(1, kinds, identify, delegated)</text>
+  <text x="380" y="173" text-anchor="middle" class="alabel" fill="#40a060">hello(1, identify, delegated)</text>
   <text x="550" y="197" class="annot">check against own Identify</text>
   <text x="550" y="211" class="annot">mismatch: startup error</text>
 
