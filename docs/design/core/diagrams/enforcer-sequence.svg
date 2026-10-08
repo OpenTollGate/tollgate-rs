@@ -52,7 +52,7 @@
   <!-- Node headers -->
   <rect x="130" y="65" width="180" height="42" class="node" stroke="#40a060" stroke-width="2" rx="6"/>
   <text x="220" y="85" text-anchor="middle" class="nlabel">enforcer</text>
-  <text x="220" y="98" text-anchor="middle" class="nrole">server; owns the data plane</text>
+  <text x="220" y="98" text-anchor="middle" class="nrole">server; owns the traffic</text>
 
   <rect x="450" y="65" width="180" height="42" class="node" stroke-width="2" rx="6"/>
   <text x="540" y="85" text-anchor="middle" class="nlabel">tollgated</text>
