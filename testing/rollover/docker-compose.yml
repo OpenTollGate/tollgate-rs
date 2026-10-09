@@ -17,7 +17,7 @@ services:
     volumes:
       - ../mint/mintd.toml:/etc/cdk/mintd.toml:ro
   gateway:
-    image: tollgate-test:latest
+    image: tollgate-test:${IMAGE_TAG:-latest}
     command: ["-c", "/etc/tollgate/gateway.yaml"]
     volumes:
       - ./gateway.yaml:/etc/tollgate/gateway.yaml:ro
@@ -25,7 +25,7 @@ services:
       RUST_LOG: "${RUST_LOG:-tollgate_net=debug,info}"
 
   client:
-    image: tollgate-test:latest
+    image: tollgate-test:${IMAGE_TAG:-latest}
     command: ["-c", "/etc/tollgate/client.yaml", "--demand", "2000000"]
     # For the test to slow the client's funding down with tc; see test.sh.
     cap_add: [NET_ADMIN]

@@ -18,7 +18,7 @@
 # bearer tokens: `down` without `-v` keeps whatever was not spent.
 services:
   gateway:
-    image: tollgate-test:latest
+    image: tollgate-test:${IMAGE_TAG:-latest}
     command: ["-c", "/etc/tollgate/gateway.yaml"]
     volumes:
       - ./gateway.yaml:/etc/tollgate/gateway.yaml:ro
@@ -27,7 +27,7 @@ services:
       RUST_LOG: "${RUST_LOG:-tollgate_net=debug,info}"
 
   client:
-    image: tollgate-test:latest
+    image: tollgate-test:${IMAGE_TAG:-latest}
     command: ["-c", "/etc/tollgate/client.yaml"]
     volumes:
       - ./client.yaml:/etc/tollgate/client.yaml:ro

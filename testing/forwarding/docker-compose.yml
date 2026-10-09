@@ -58,7 +58,7 @@ services:
         ipv6_address: fd00:29::10
 
   gateway:
-    image: tollgate-test:latest
+    image: tollgate-test:${IMAGE_TAG:-latest}
     entrypoint: ["/bin/sh", "-c"]
     # Masquerade toward the upstream segment before starting, so the origin
     # replies to the gateway rather than to a client it has no route to. This
@@ -101,7 +101,7 @@ services:
         ipv6_address: fd00:29::20
 
   client:
-    image: tollgate-test:latest
+    image: tollgate-test:${IMAGE_TAG:-latest}
     entrypoint: ["/bin/sh", "-c"]
     # A sequence with one element, so the whole script reaches `sh -c` as a
     # single argument rather than being split into words.
@@ -127,7 +127,7 @@ services:
   # routes to the origin's segment through the gateway in each, and nothing
   # running but the traffic the test sends from it.
   phone:
-    image: tollgate-test:latest
+    image: tollgate-test:${IMAGE_TAG:-latest}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >
@@ -148,7 +148,7 @@ services:
   # phone's IPv4 address and MAC. It buys nothing until the test recreates it
   # with PHONE_DEMAND set.
   phone-node:
-    image: tollgate-test:latest
+    image: tollgate-test:${IMAGE_TAG:-latest}
     network_mode: "service:phone"
     command:
       - -c

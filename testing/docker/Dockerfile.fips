@@ -6,9 +6,12 @@
 # builds. Build context is this directory (see scripts/build-fips.sh), which is
 # why nothing outside it is referenced.
 
-FROM tollgate-test:latest AS tollgate
+# The tag both are built under (scripts/build-fips.sh passes IMAGE_TAG).
+ARG TAG=latest
 
-FROM fips-node:latest
+FROM tollgate-test:${TAG} AS tollgate
+
+FROM fips-node:${TAG}
 
 COPY --from=tollgate /usr/local/bin/tollgated /usr/local/bin/tollgated
 COPY --from=tollgate /usr/local/bin/tolltop /usr/local/bin/tolltop

@@ -16,9 +16,10 @@ SKIP_BUILD=1 testing/purchase/test.sh
 ```
 
 `IMAGE_TAG=mine testing/scripts/build.sh` builds `tollgate-test:mine` instead,
-so two checkouts building at once do not overwrite each other's image; a
-topology whose compose file names `tollgate-test:${IMAGE_TAG:-latest}`, as
-`external/` does, then runs it.
+so two checkouts building at once do not overwrite each other's image; every
+topology's compose file names `tollgate-test:${IMAGE_TAG:-latest}`, so the same
+`IMAGE_TAG` then runs it. `build-fips.sh` takes it too, for all three of its
+images.
 
 ## What each one asserts
 
@@ -70,6 +71,9 @@ SKIP_BUILD=1 testing/fips/test.sh
 
 `fipsd` is built from a FIPS checkout at `reference/fips`, which is not part of
 this repository; point `FIPS_CHECKOUT` elsewhere if yours lives somewhere else.
+It needs the per-peer transit policy, which FIPS `master` does not have yet:
+`FIPS_REF=feat/per-peer-transit-policy` builds that branch whatever the
+checkout has checked out.
 The image is built from `git archive` rather than from the working tree, so
 only committed state reaches it — and docker is not asked to upload a
 multi-gigabyte `target/` as build context.

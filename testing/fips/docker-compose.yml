@@ -13,7 +13,7 @@
 # same distinction the kernel topology draws with a separate interface, here
 # drawn by the protocol.
 x-mesh-node: &mesh-node
-  image: tollgate-fips-test:latest
+  image: tollgate-fips-test:${IMAGE_TAG:-latest}
   # fipsd creates a TUN device and puts an address on it.
   cap_add: [NET_ADMIN]
   devices:
