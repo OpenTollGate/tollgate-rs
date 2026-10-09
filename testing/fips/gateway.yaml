@@ -17,11 +17,11 @@ access:
     bytes_per_second: 4096
 grants:
   window_range_ms: [200, 30000]
-forwarding:
+enforcer:
   # The real thing on a mesh: fipsd carries the packets and holds the policy.
-  # This also turns on the identity check on the control plane, because a mesh
+  # Its identity is pubkey: the control plane checks each peer key, because a mesh
   # address names the key that holds it.
-  mode: fips
+  kind: fips
 network:
   listen: "[::]:4747"
 peers:

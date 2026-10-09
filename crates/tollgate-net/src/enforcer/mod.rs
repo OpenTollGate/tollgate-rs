@@ -20,9 +20,10 @@
 //! - [`Fips`] sets the same two numbers on a FIPS node through its control
 //!   socket, and lets the mesh enforce them. The only one whose peers are
 //!   authenticated before this node hears of them.
-//! - [`External`] hands them to a gate: an enforcement program this node does
-//!   not contain, over a Unix socket (`tollgate-gate-protocol.md`). A new use
-//!   case is a new gate rather than a new enforcer.
+//! - [`External`] hands them to an external enforcer: a separate program that
+//!   owns the traffic, over the enforcer protocol on a Unix socket
+//!   (`tollgate-enforcer-protocol.md`). A new use case is a new external
+//!   enforcer rather than a new built-in one.
 
 use std::net::IpAddr;
 
@@ -39,7 +40,7 @@ mod ip;
 mod loopback;
 
 #[cfg(unix)]
-pub use external::{DelegateError, External, Refusal, check_hello};
+pub use external::{DelegateError, Expected, External, Refusal, check_hello};
 #[cfg(unix)]
 pub use fips::Fips;
 #[cfg(target_os = "linux")]

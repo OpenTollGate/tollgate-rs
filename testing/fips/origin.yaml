@@ -9,7 +9,7 @@ identity:
 mint:
   url: "http://[fd8b:b816:ee09:45b8:6f58:4e2c:2c2e:43b8]:3338"
   unit: "byte"
-forwarding:
-  mode: fips
+enforcer:
+  kind: fips
 network:
   listen: "[::]:4747"

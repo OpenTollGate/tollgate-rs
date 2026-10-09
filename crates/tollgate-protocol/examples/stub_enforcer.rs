@@ -1,20 +1,20 @@
-//! A stub gate: the smallest program that speaks the gate protocol.
+//! A stub enforcer: the smallest program that speaks the enforcer protocol.
 //!
-//! It owns no data plane. It listens on a Unix socket, says `hello`, keeps the
+//! It owns no traffic. It listens on a Unix socket, says `hello`, keeps the
 //! bindings and rates `tollgated` sends, refuses a subject another payer
 //! already holds, and — with `--carry` — pretends every open payer moved as
-//! much as its rate allows each second, so the counters it reports have
+//! many units as its rate allows each second, so the counters it reports have
 //! something in them. With `--state` it writes what it holds as JSON after
-//! every change, which is how the `testing/external` topology sees the gate's
-//! side.
+//! every change, which is how the `testing/external` topology sees the
+//! enforcer's side.
 //!
-//! It is also the reference for a gate written in Rust: all it needs of
-//! TollGate is this crate — `tollgate_protocol::gate` and the frame reader —
-//! and the standard library.
+//! It is also the reference for an enforcer written in Rust: all it needs of
+//! TollGate is this crate — `tollgate_protocol::enforcer` and the frame reader
+//! — and the standard library.
 //!
 //! ```text
-//! cargo run -p tollgate-protocol --example stub_gate -- \
-//!     --socket /tmp/gate.sock --kinds ipv4,ipv6 --identify claimed --carry
+//! cargo run -p tollgate-protocol --example stub_enforcer -- \
+//!     --socket /run/tollgate-ip/enforcer.sock --identity address --unit byte --carry
 //! ```
 
 use std::collections::HashMap;
@@ -24,9 +24,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tollgate_protocol::gate::{
-    self, Binding, Conflict, Counters, GATE_PROTOCOL_VERSION, GateMessage, Hello, Subject,
-    SubjectKind,
+use tollgate_protocol::enforcer::{
+    self, Binding, Conflict, Counters, EnforcerMessage, Hello, Identity, PROTOCOL_VERSION, Subject,
 };
 use tollgate_protocol::{FrameReader, PubKey};
 
@@ -40,16 +39,15 @@ struct Args {
     state: Option<PathBuf>,
 }
 
-const USAGE: &str = "usage: stub_gate --socket PATH [--kinds ipv4,ipv6,mac,pubkey,opaque] \
-[--identify claimed|fips] [--delegated] [--version N] [--carry] [--unshaped BYTES_PER_S] \
-[--state PATH]";
+const USAGE: &str = "usage: stub_enforcer --socket PATH --identity pubkey|address \
+[--unit UNIT] [--delegated] [--version N] [--carry] [--unshaped UNITS_PER_S] [--state PATH]";
 
 fn parse_args() -> Result<Args> {
     let mut socket = None;
-    let mut kinds = vec![SubjectKind::Ipv4, SubjectKind::Ipv6];
-    let mut identify = gate::Identify::Claimed;
+    let mut identity = None;
+    let mut unit = String::from("byte");
     let mut delegated = false;
-    let mut version = GATE_PROTOCOL_VERSION;
+    let mut version = PROTOCOL_VERSION;
     let mut carry = false;
     let mut unshaped = 1_000_000;
     let mut state = None;
@@ -59,26 +57,12 @@ fn parse_args() -> Result<Args> {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
             "--socket" => socket = Some(PathBuf::from(value()?)),
-            "--kinds" => {
-                kinds = value()?
-                    .split(',')
-                    .map(|k| match k {
-                        "ipv4" => Ok(SubjectKind::Ipv4),
-                        "ipv6" => Ok(SubjectKind::Ipv6),
-                        "mac" => Ok(SubjectKind::Mac),
-                        "pubkey" => Ok(SubjectKind::Pubkey),
-                        "opaque" => Ok(SubjectKind::Opaque),
-                        other => Err(format!("no subject kind {other:?}")),
-                    })
-                    .collect::<Result<_>>()?;
+            // Built for one identity: it is only stated, as a check.
+            "--identity" => {
+                let name = value()?;
+                identity = Some(Identity::from_name(&name).ok_or(format!("no identity {name:?}"))?);
             }
-            "--identify" => {
-                identify = match value()?.as_str() {
-                    "claimed" => gate::Identify::Claimed,
-                    "fips" => gate::Identify::Fips,
-                    other => return Err(format!("no identify mode {other:?}")),
-                }
-            }
+            "--unit" => unit = value()?,
             "--delegated" => delegated = true,
             "--version" => version = value()?.parse().map_err(|e| format!("--version: {e}"))?,
             "--carry" => carry = true,
@@ -93,10 +77,9 @@ fn parse_args() -> Result<Args> {
         socket: socket.ok_or(USAGE)?,
         hello: Hello {
             version,
-            kinds,
-            identify,
+            identity: identity.ok_or(USAGE)?,
             delegated,
-            opaque_kinds: vec![],
+            unit,
         },
         carry,
         unshaped,
@@ -104,7 +87,7 @@ fn parse_args() -> Result<Args> {
     })
 }
 
-/// One payer, as the gate holds it.
+/// One payer, as the enforcer holds it.
 #[derive(Debug, Default)]
 struct Payer {
     subjects: Vec<Binding>,
@@ -117,7 +100,7 @@ struct Payer {
 }
 
 #[derive(Debug, Default)]
-struct Gate {
+struct Enforcer {
     /// Which connection is current; an older one stops when it sees this move.
     generation: u64,
     connected: bool,
@@ -126,8 +109,8 @@ struct Gate {
     conflicts: Vec<(PubKey, Subject)>,
 }
 
-impl Gate {
-    /// Back to where a gate starts: every subject closed.
+impl Enforcer {
+    /// Back to where an enforcer starts: every subject closed.
     fn reset(&mut self) {
         self.connected = false;
         self.payers.clear();
@@ -141,7 +124,7 @@ impl Gate {
             .map(|(k, _)| *k)
     }
 
-    /// What the gate holds, as JSON. Written by hand: this crate is `no_std`
+    /// What the enforcer holds, as JSON. Written by hand: this crate is `no_std`
     /// and carries no JSON library, and the shape is small.
     fn json(&self) -> String {
         let hex = |k: &PubKey| k.0.iter().map(|b| format!("{b:02x}")).collect::<String>();
@@ -190,7 +173,7 @@ impl Gate {
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("stub_gate: {e}");
+        eprintln!("stub_enforcer: {e}");
         std::process::exit(1);
     }
 }
@@ -200,60 +183,65 @@ fn run() -> Result<()> {
     let _ = std::fs::remove_file(&args.socket);
     let listener = UnixListener::bind(&args.socket)
         .map_err(|e| format!("listen on {}: {e}", args.socket.display()))?;
-    // Reaching this socket is the power to open the gate.
+    // Reaching this socket is the power to open what the enforcer controls.
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&args.socket, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| format!("restrict {}: {e}", args.socket.display()))?;
     }
     eprintln!(
-        "stub_gate: listening on {}, {:?}",
+        "stub_enforcer: listening on {}, {:?}",
         args.socket.display(),
         args.hello
     );
 
-    let gate = Arc::new(Mutex::new(Gate::default()));
-    write_state(&args, &gate);
+    let state = Arc::new(Mutex::new(Enforcer::default()));
+    write_state(&args, &state);
 
     let mut current: Option<UnixStream> = None;
     for stream in listener.incoming() {
         let stream = stream.map_err(|e| format!("accept: {e}"))?;
-        // One connection at a time: a second replaces the first, and the gate
-        // resets to closed as if the first had dropped.
+        // One connection at a time: a second replaces the first, and the
+        // enforcer resets to closed as if the first had dropped.
         if let Some(old) = current.take() {
-            eprintln!("stub_gate: a new connection replaces the old one");
+            eprintln!("stub_enforcer: a new connection replaces the old one");
             let _ = old.shutdown(std::net::Shutdown::Both);
         }
         current = stream.try_clone().ok();
         let generation = {
-            let mut g = gate.lock().expect("not poisoned");
+            let mut g = state.lock().expect("not poisoned");
             g.reset();
             g.generation += 1;
             g.connected = true;
             g.connections += 1;
             g.generation
         };
-        write_state(&args, &gate);
+        write_state(&args, &state);
 
-        let (args, gate) = (Arc::clone(&args), Arc::clone(&gate));
+        let (args, state) = (Arc::clone(&args), Arc::clone(&state));
         std::thread::spawn(move || {
-            if let Err(e) = serve(stream, &args, &gate, generation) {
-                eprintln!("stub_gate: closing the connection: {e}");
+            if let Err(e) = serve(stream, &args, &state, generation) {
+                eprintln!("stub_enforcer: closing the connection: {e}");
             }
-            // Losing the connection closes the gate too.
-            let mut g = gate.lock().expect("not poisoned");
+            // Losing the connection closes everything too.
+            let mut g = state.lock().expect("not poisoned");
             if g.generation == generation {
                 g.reset();
                 drop(g);
-                write_state(&args, &gate);
+                write_state(&args, &state);
             }
         });
     }
     Ok(())
 }
 
-fn serve(mut stream: UnixStream, args: &Args, gate: &Mutex<Gate>, generation: u64) -> Result<()> {
-    send(&mut stream, &[GateMessage::Hello(args.hello.clone())])?;
+fn serve(
+    mut stream: UnixStream,
+    args: &Args,
+    state: &Mutex<Enforcer>,
+    generation: u64,
+) -> Result<()> {
+    send(&mut stream, &[EnforcerMessage::Hello(args.hello.clone())])?;
     stream
         .set_read_timeout(Some(Duration::from_millis(200)))
         .map_err(|e| e.to_string())?;
@@ -262,7 +250,7 @@ fn serve(mut stream: UnixStream, args: &Args, gate: &Mutex<Gate>, generation: u6
     let mut buf = [0u8; 8192];
     let mut last_tick = Instant::now();
     loop {
-        if gate.lock().expect("not poisoned").generation != generation {
+        if state.lock().expect("not poisoned").generation != generation {
             return Err("replaced by a newer connection".into());
         }
         match stream.read(&mut buf) {
@@ -270,12 +258,12 @@ fn serve(mut stream: UnixStream, args: &Args, gate: &Mutex<Gate>, generation: u6
             Ok(n) => {
                 reader.push(&buf[..n]);
                 let mut replies = Vec::new();
-                while let Some(msg) = reader.next_gate_message() {
+                while let Some(msg) = reader.next_enforcer_message() {
                     let msg = msg.map_err(|e| format!("malformed message: {e}"))?;
-                    eprintln!("stub_gate: <- {msg:?}");
-                    replies.extend(handle(msg, &args.hello, gate)?);
+                    eprintln!("stub_enforcer: <- {msg:?}");
+                    replies.extend(handle(msg, &args.hello, state)?);
                 }
-                write_state(args, gate);
+                write_state(args, state);
                 send(&mut stream, &replies)?;
             }
             Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
@@ -283,43 +271,50 @@ fn serve(mut stream: UnixStream, args: &Args, gate: &Mutex<Gate>, generation: u6
         }
         if last_tick.elapsed() >= Duration::from_secs(1) {
             last_tick = Instant::now();
-            let reports = report(args, gate);
+            let reports = report(args, state);
             if !reports.is_empty() {
-                write_state(args, gate);
+                write_state(args, state);
                 send(&mut stream, &reports)?;
             }
         }
     }
 }
 
-fn send(stream: &mut UnixStream, msgs: &[GateMessage]) -> Result<()> {
+fn send(stream: &mut UnixStream, msgs: &[EnforcerMessage]) -> Result<()> {
     let mut out = Vec::new();
     for msg in msgs {
-        gate::encode_frame(msg, &mut out).map_err(|e| e.to_string())?;
+        enforcer::encode_frame(msg, &mut out).map_err(|e| e.to_string())?;
     }
     stream.write_all(&out).map_err(|e| e.to_string())
 }
 
 /// Apply one message from `tollgated`, returning anything to say back.
 ///
-/// Anything this gate did not ask for is a protocol error, and the caller
-/// closes the connection over it.
-fn handle(msg: GateMessage, hello: &Hello, gate: &Mutex<Gate>) -> Result<Vec<GateMessage>> {
-    let mut g = gate.lock().expect("not poisoned");
+/// A subject of the wrong length for the identity, a delegated one when this
+/// enforcer refuses them, or a message only an enforcer sends is a protocol
+/// error, and the caller closes the connection over it.
+fn handle(
+    msg: EnforcerMessage,
+    hello: &Hello,
+    state: &Mutex<Enforcer>,
+) -> Result<Vec<EnforcerMessage>> {
+    let mut g = state.lock().expect("not poisoned");
     let mut replies = Vec::new();
     match msg {
-        GateMessage::Bind(bind) => {
-            if let Some(b) = bind.bindings.iter().find(|b| !hello.accepts(b)) {
-                return Err(format!("a binding this gate did not ask for: {b:?}"));
+        EnforcerMessage::Bind(bind) => {
+            for b in &bind.bindings {
+                hello
+                    .check(b)
+                    .map_err(|e| format!("a binding this enforcer cannot take: {e}"))?;
             }
             let mut accepted = Vec::new();
             for binding in bind.bindings {
                 // Never last-wins: the first payer keeps the subject.
                 match g.holder(&binding.subject) {
                     Some(holder) if holder != bind.peer => {
-                        eprintln!("stub_gate: conflict over {}", binding.subject);
+                        eprintln!("stub_enforcer: conflict over {}", binding.subject);
                         g.conflicts.push((bind.peer, binding.subject.clone()));
-                        replies.push(GateMessage::Conflict(Conflict {
+                        replies.push(EnforcerMessage::Conflict(Conflict {
                             peer: bind.peer,
                             subject: binding.subject,
                         }));
@@ -329,13 +324,13 @@ fn handle(msg: GateMessage, hello: &Hello, gate: &Mutex<Gate>) -> Result<Vec<Gat
             }
             g.payers.entry(bind.peer).or_default().subjects = accepted;
         }
-        GateMessage::Set(set) => g.payers.entry(set.peer).or_default().rate = Some(set.rate),
-        GateMessage::Remove(remove) => {
+        EnforcerMessage::Set(set) => g.payers.entry(set.peer).or_default().rate = Some(set.rate),
+        EnforcerMessage::Remove(remove) => {
             g.payers.remove(&remove.peer);
         }
         other => {
             return Err(format!(
-                "tollgated sent {:?}, which only a gate sends",
+                "tollgated sent {:?}, which only an enforcer sends",
                 other.msg_type()
             ));
         }
@@ -344,8 +339,8 @@ fn handle(msg: GateMessage, hello: &Hello, gate: &Mutex<Gate>) -> Result<Vec<Gat
 }
 
 /// Pretend a second passed, and report whatever changed.
-fn report(args: &Args, gate: &Mutex<Gate>) -> Vec<GateMessage> {
-    let mut g = gate.lock().expect("not poisoned");
+fn report(args: &Args, state: &Mutex<Enforcer>) -> Vec<EnforcerMessage> {
+    let mut g = state.lock().expect("not poisoned");
     let mut reports = Vec::new();
     for (key, payer) in g.payers.iter_mut() {
         if args.carry && !payer.subjects.is_empty() {
@@ -362,7 +357,7 @@ fn report(args: &Args, gate: &Mutex<Gate>) -> Vec<GateMessage> {
         }
         if payer.dirty {
             payer.dirty = false;
-            reports.push(GateMessage::Counters(Counters {
+            reports.push(EnforcerMessage::Counters(Counters {
                 peer: *key,
                 delivered: payer.delivered,
                 received: payer.received,
@@ -372,11 +367,11 @@ fn report(args: &Args, gate: &Mutex<Gate>) -> Vec<GateMessage> {
     reports
 }
 
-fn write_state(args: &Args, gate: &Mutex<Gate>) {
+fn write_state(args: &Args, state: &Mutex<Enforcer>) {
     let Some(path) = &args.state else {
         return;
     };
-    let json = gate.lock().expect("not poisoned").json();
+    let json = state.lock().expect("not poisoned").json();
     // Written aside and renamed, so a reader never sees half of it.
     let tmp = path.with_extension("tmp");
     if std::fs::write(&tmp, json).is_ok() {

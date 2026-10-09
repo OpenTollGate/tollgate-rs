@@ -22,34 +22,51 @@ Nothing has been released yet. Everything below is on `master` and will ship as
   `/run/tollgate-default/control.sock`; `control_socket:` moves it, and
   tollgated's `--control-socket` flag is gone. `tolltop` finds the one running
   instance by listing `tollgate-*/control.sock`, or the one named with
-  `--instance`. Every log line starts with the instance's name. The packages,
-  the demo and the test topologies follow.
+  `--instance`. Every log line starts with the instance's name. The packages
+  and the test topologies follow.
 
-- `forwarding.mode: external`: a node whose enforcement is a separate program,
-  a **gate**, reached over the Unix socket at `forwarding.gate_socket`
-  (`docs/design/core/tollgate-gate-protocol.md`). A new use case is a new gate
-  rather than a new `tollgated`. The messages are in
-  `tollgate_protocol::gate`, `no_std` like the rest of the crate and
-  normatively described by `crates/tollgate-protocol/gate.cddl`, in the wire
-  protocol's CBOR and framing; `cargo run -p tollgate-protocol --example
-  stub_gate` is a gate that enforces nothing, for tests and as a reference.
-  `tollgated` binds each payer to what it has about it — the key itself under
-  `Identify::Fips`, the address it came from under `Identify::Claimed` — and
-  sends one rate per payer, `0` closed and `null` unshaped; the gate reports
-  counts, and conflicts over a subject another payer holds. The gate's `hello`
-  names the Identify mode, which `tollgated` then runs in: it waits for that
-  hello before listening, and refuses to start behind a gate that contradicts
-  itself or `forwarding.identify`, an optional pin. While the gate is
-  unreachable, before its first hello, or for a payer it reported a conflict
-  for, the node sells nothing: TopUps are refused with a ceiling of 0, a new
-  channel's funding is held until the gate is back, and none is funded
-  toward the payer (core asks again after its 30 s funding timeout); sessions and channels already running are kept, and every
-  reconnect sends the gate the full state. `ResourceAdapter` gains
-  `selling`, true for the built-in adapters. `External::delegate` adds a
-  subject a local trusted client vouches for, refused when the gate refuses
-  delegated bindings; nothing on the control socket calls it yet.
-  `testing/external` runs a gateway behind the stub gate, in CI too, and
+- `enforcer.kind: external`: a node whose enforcement is a separate program,
+  an **external enforcer**, reached over the **enforcer protocol** on a Unix
+  socket — by default `enforcer.sock` in the instance's runtime directory,
+  `enforcer.socket` to move it (`docs/design/core/tollgate-enforcer-protocol.md`).
+  A new use case is a new enforcer rather than a new `tollgated`. The messages
+  are in `tollgate_protocol::enforcer`, `no_std` like the rest of the crate and
+  normatively described by `crates/tollgate-protocol/enforcer.cddl`, in the
+  wire protocol's CBOR and framing; `cargo run -p tollgate-protocol --example
+  stub_enforcer` is an enforcer that enforces nothing, for tests and as a
+  reference. A subject is plain bytes, with no kinds on the wire: under
+  `identity: pubkey` the payer's 32-byte x-only key, under `address` the
+  16-byte source address (IPv4 written IPv4-mapped), and a delegated one
+  whatever the client and the enforcer agreed, up to 64 bytes; one that is not
+  delegated and has the wrong length for the identity is a protocol error.
+  `tollgated` sends one rate per payer, `0` closed and `null` unshaped; the
+  enforcer reports counts, and conflicts over a subject another payer holds.
+  The enforcer's `hello` states the identity it was built for and the unit it
+  counts in, and both are only checked: `tollgated` waits for a `hello` before
+  listening, and refuses to start — naming both — behind one whose identity
+  differs from `enforcer.identity` or whose unit differs from `mint.unit`; an
+  enforcer that reconnects saying something different is refused the same way.
+  While the enforcer is unreachable, before its first accepted hello, or for a
+  payer it reported a conflict for, the node sells nothing: TopUps are refused
+  with a ceiling of 0, a new channel's funding is held until the enforcer is
+  back, and none is funded toward the payer (core asks again after its 30 s
+  funding timeout); sessions and channels already running are kept, and every
+  reconnect sends the enforcer the full state. `Enforcer` gains `selling`, true
+  for the built-in enforcers. `External::delegate` adds a subject a local
+  trusted client vouches for, refused when the enforcer refuses delegated
+  bindings; nothing on the control socket calls it yet. `testing/external`
+  runs a gateway behind the stub enforcer, in CI too, and
   `testing/scripts/build.sh` takes `IMAGE_TAG` to build under another tag.
+
+- `enforcer.identity: pubkey | address` says who a connecting peer is:
+  `pubkey`, its key, proven by the network it came over — today only FIPS,
+  so every connection must come from the FIPS address of the key it
+  announces; `address`, the address it came from, the announced key only
+  naming its account. It defaults to `address` for `ip` and `loopback` and
+  `pubkey` for `fips`; `external` has no default and must set it. `tollgated`
+  refuses to start with `pubkey` unless `network.listen` is where mesh peers
+  reach (`[::]`, or an address in `fd00::/8`) and, for any kind but `fips`, the
+  machine runs FIPS.
 
 - A quiet link is kept alive: a node that has sent a peer nothing for a third
   of its stale timeout sends it the last Offer again, byte for byte, so a
@@ -260,6 +277,14 @@ Nothing has been released yet. Everything below is on `master` and will ship as
   redesign.
 
 ### Changed
+
+- What enforces delivery is an **enforcer**. The config section `forwarding:`
+  is now `enforcer:`, its `mode` is `kind`, and `nftables` is `ip`, named for
+  what it enforces: `kind: loopback | ip | fips | external`. The trait every
+  enforcer implements, `ResourceAdapter`, is now `Enforcer`, in
+  `tollgate_net::enforcer`, and the kernel enforcer's type `Nftables` is `Ip`.
+  `wire::Identify` gives way to `enforcer.identity` (`PeerIdentity`). No
+  aliases: a config still saying `forwarding:` does not parse.
 
 - The protocol is redesigned around **vouchers**. A voucher is a claim on one
   unit of a node's capacity, issued by that node's own mint; delivery has no

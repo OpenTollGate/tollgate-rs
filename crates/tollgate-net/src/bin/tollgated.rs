@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use tollgate_net::channel::{SpilmanChannels, SpilmanConfig};
-use tollgate_net::config::{File, ForwardingMode};
+use tollgate_net::config::{EnforcerKind, File};
 use tollgate_net::node::Node;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
         })
         .init();
 
-    let mut config = file.resolve().context("resolve configuration")?;
+    let config = file.resolve().context("resolve configuration")?;
 
     if args.show_identity {
         println!("pubkey:     {}", hex::encode(config.identity.pubkey().0));
@@ -124,6 +124,19 @@ async fn main() -> Result<()> {
         pubkey = %hex::encode(config.identity.pubkey().0),
         "starting"
     );
+
+    // `pubkey` means the network proved each peer's key, and today only FIPS
+    // does. The `fips` enforcer reaches the FIPS node itself; any other kind
+    // has to find one here, or this node would be believing announced keys.
+    if config.peer_identity == tollgate_net::wire::PeerIdentity::Pubkey
+        && file.enforcer.kind != EnforcerKind::Fips
+        && !tollgate_net::fips::running()
+    {
+        anyhow::bail!(
+            "enforcer.identity is pubkey, but this node runs no FIPS, the only network \
+             that proves a peer's key today; use identity: address, or run FIPS"
+        );
+    }
 
     // The mint is `mintd`, its own daemon: this node only advertises it and
     // settles at it. Nothing it issues is decided here.
@@ -182,8 +195,8 @@ async fn main() -> Result<()> {
     // Which thing actually delivers. The loopback shaper carries a socket of
     // its own and forwards nobody's traffic; the kernel enforcer gates and
     // shapes the real forwarding path.
-    let enforcer: Arc<dyn tollgate_net::enforcer::Enforcer> = match file.forwarding.mode {
-        ForwardingMode::Loopback => {
+    let enforcer: Arc<dyn tollgate_net::enforcer::Enforcer> = match file.enforcer.kind {
+        EnforcerKind::Loopback => {
             let loopback = Arc::new(tollgate_net::enforcer::Loopback::new());
 
             // The loopback data plane belongs to the loopback enforcer, so it is
@@ -208,8 +221,8 @@ async fn main() -> Result<()> {
             loopback
         }
         #[cfg(target_os = "linux")]
-        ForwardingMode::Nftables => {
-            let interface = file.forwarding.interface.clone();
+        EnforcerKind::Ip => {
+            let interface = file.enforcer.interface.clone();
             let enforcer = tollgate_net::enforcer::Ip::new(&interface).with_context(|| {
                 format!("set up nftables and tc on {interface}; CAP_NET_ADMIN is required")
             })?;
@@ -217,15 +230,15 @@ async fn main() -> Result<()> {
             Arc::new(enforcer)
         }
         #[cfg(not(target_os = "linux"))]
-        ForwardingMode::Nftables => {
-            anyhow::bail!("forwarding.mode: nftables needs Linux")
+        EnforcerKind::Ip => {
+            anyhow::bail!("enforcer.kind: ip needs Linux")
         }
         #[cfg(unix)]
-        ForwardingMode::Fips => {
-            let socket = if file.forwarding.fips_socket.is_empty() {
+        EnforcerKind::Fips => {
+            let socket = if file.enforcer.fips_socket.is_empty() {
                 tollgate_net::enforcer::Fips::default_socket_path()
             } else {
-                file.forwarding.fips_socket.clone().into()
+                file.enforcer.fips_socket.clone().into()
             };
             let enforcer = tollgate_net::enforcer::Fips::new(&socket, config.policy.minimum_flow)
                 .with_context(|| {
@@ -242,28 +255,35 @@ async fn main() -> Result<()> {
             Arc::new(enforcer)
         }
         #[cfg(not(unix))]
-        ForwardingMode::Fips => {
-            anyhow::bail!("forwarding.mode: fips needs a Unix control socket")
+        EnforcerKind::Fips => {
+            anyhow::bail!("enforcer.kind: fips needs a Unix control socket")
         }
-        // A gate: a program of its own enforces, and this node tells it who has
-        // paid for what. Nothing listens until the gate has said hello,
-        // because the hello decides whether a peer's key is checked or
-        // believed; a gate asking for what the operator pinned against, or for
-        // something that contradicts itself, is a reason not to start at all.
+        // A program of its own enforces, and this node tells it who has paid
+        // for what. Nothing listens until it has said hello: an enforcer built
+        // for another identity, or counting in another unit, is a reason not
+        // to start at all.
         #[cfg(unix)]
-        ForwardingMode::External => {
-            let socket = PathBuf::from(&file.forwarding.gate_socket);
-            info!(socket = %socket.display(), "waiting for the gate to say hello");
-            let (enforcer, identify) =
-                tollgate_net::enforcer::External::connect(&socket, file.forwarding.identify)
-                    .await?;
-            config.identify = identify;
-            info!(socket = %socket.display(), ?identify, "enforcing through the gate");
+        EnforcerKind::External => {
+            let socket = file.enforcer.socket_path(&runtime_dir);
+            info!(socket = %socket.display(), "waiting for the enforcer to say hello");
+            let enforcer = tollgate_net::enforcer::External::connect(
+                &socket,
+                tollgate_net::enforcer::Expected {
+                    identity: config.peer_identity,
+                    unit: config.policy.unit.clone(),
+                },
+            )
+            .await?;
+            info!(
+                socket = %socket.display(),
+                identity = %config.peer_identity,
+                "enforcing through the external enforcer"
+            );
             Arc::new(enforcer)
         }
         #[cfg(not(unix))]
-        ForwardingMode::External => {
-            anyhow::bail!("forwarding.mode: external needs a Unix socket")
+        EnforcerKind::External => {
+            anyhow::bail!("enforcer.kind: external needs a Unix socket")
         }
     };
 

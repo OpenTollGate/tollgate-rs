@@ -61,13 +61,13 @@ impl FrameReader {
         self.next_with(crate::codec::decode)
     }
 
-    /// The same, for the gate socket: take the next complete
-    /// [`GateMessage`](crate::gate::GateMessage). Same framing, different
-    /// messages.
-    pub fn next_gate_message(
+    /// The same, for the enforcer socket: take the next complete
+    /// [`EnforcerMessage`](crate::enforcer::EnforcerMessage). Same framing,
+    /// different messages.
+    pub fn next_enforcer_message(
         &mut self,
-    ) -> Option<Result<crate::gate::GateMessage, crate::gate::Error>> {
-        self.next_with(crate::gate::decode)
+    ) -> Option<Result<crate::enforcer::EnforcerMessage, crate::enforcer::Error>> {
+        self.next_with(crate::enforcer::decode)
     }
 
     fn next_with<T, E>(

@@ -10,7 +10,7 @@
 //! the connection as it sees fit.
 //!
 //! What the transport can do is say whether a peer is who it claims to be — see
-//! [`Identify`].
+//! [`PeerIdentity`].
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -50,65 +50,56 @@ pub enum Wire {
     },
 }
 
-/// Whether the address a peer connects from has to agree with the key it
-/// announces.
+/// Who a connecting peer is: `enforcer.identity`, `pubkey` or `address`.
 ///
 /// An Announce is unauthenticated: it is the first thing a stranger says. What
 /// makes it costly to lie about is the address it was said from, and whether
 /// that address means anything depends on the network underneath.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Identify {
-    /// Take the peer at its word.
-    ///
-    /// On plain IP an address commits to nothing, so there is nothing to check
-    /// against. A peer that claims a paying peer's key gets that peer's session
-    /// — which is why an enforcer that gates by address should not be run on an
-    /// unwrapped network.
-    #[default]
-    Claimed,
-    /// The connection has to come from the mesh address of the key announced.
-    ///
-    /// A FIPS address *is* a key: the mesh routes to it only for the node that
-    /// completed a Noise IK handshake for it, so an impostor cannot receive at
-    /// the address it would have to claim. Checking is local arithmetic — see
-    /// [`crate::fips::address`] — and needs nothing from the FIPS daemon.
-    Fips,
-}
+///
+/// - [`PeerIdentity::Pubkey`]: the peer is its key, and the connection has to
+///   come from the mesh address of the key announced. A FIPS address *is* a
+///   key: the mesh routes to it only for the node that completed a Noise IK
+///   handshake for it, so an impostor cannot receive at the address it would
+///   have to claim. Checking is local arithmetic — see
+///   [`crate::fips::address`] — and needs nothing from the FIPS daemon.
+/// - [`PeerIdentity::Address`]: the peer is the address it came from, and the
+///   key it announces is not checked; it only names the account. On plain IP
+///   an address commits to nothing, so there is nothing to check against.
+///
+/// The same type, and the same words, as the enforcer protocol's identity.
+pub use tollgate_protocol::enforcer::Identity as PeerIdentity;
 
-impl Identify {
-    /// Refuse a peer that cannot be who it says it is.
-    fn check(self, peer: PubKey, addr: SocketAddr) -> Result<()> {
-        let Self::Fips = self else {
-            return Ok(());
-        };
+/// Refuse a peer that cannot be who it says it is.
+fn verify(identity: PeerIdentity, peer: PubKey, addr: SocketAddr) -> Result<()> {
+    let PeerIdentity::Pubkey = identity else {
+        return Ok(());
+    };
 
-        let expected = crate::fips::address(peer);
-        let IpAddr::V6(actual) = addr.ip() else {
-            bail!("a mesh peer has to reach us over fips0, and {addr} is not a mesh address");
-        };
-        if actual != expected {
-            bail!("the key announced belongs at {expected}, not at {actual}");
-        }
-        Ok(())
+    let expected = crate::fips::address(peer);
+    let IpAddr::V6(actual) = addr.ip() else {
+        bail!("a mesh peer has to reach us over fips0, and {addr} is not a mesh address");
+    };
+    if actual != expected {
+        bail!("the key announced belongs at {expected}, not at {actual}");
     }
+    Ok(())
 }
 
 /// Accept control-plane connections forever.
 ///
 /// A listener does not know who is calling until they say so, so it reads the
 /// first frame — which the protocol requires to be an Announce — and takes the
-/// peer's identity from it, subject to `identify`.
+/// peer's identity from it, subject to `identity`.
 pub async fn listen(
     listener: TcpListener,
     node: mpsc::Sender<Wire>,
-    identify: Identify,
+    identity: PeerIdentity,
 ) -> Result<()> {
     loop {
         let (stream, addr) = listener.accept().await.context("accept")?;
         let node = node.clone();
         tokio::spawn(async move {
-            if let Err(e) = accept_one(stream, node, identify).await {
+            if let Err(e) = accept_one(stream, node, identity).await {
                 debug!(%addr, error = %e, "control connection ended");
             }
         });
@@ -118,10 +109,10 @@ pub async fn listen(
 async fn accept_one(
     mut stream: TcpStream,
     node: mpsc::Sender<Wire>,
-    identify: Identify,
+    identity: PeerIdentity,
 ) -> Result<()> {
     let (peer, pending, reader) = read_announce(&mut stream).await?;
-    run(stream, peer, pending, reader, node, identify).await
+    run(stream, peer, pending, reader, node, identity).await
 }
 
 /// Read until the Announce turns up, and take the peer's identity from it.
@@ -191,7 +182,7 @@ pub async fn dial(
     addr: &str,
     peer: PubKey,
     node: mpsc::Sender<Wire>,
-    identify: Identify,
+    identity: PeerIdentity,
     connector: Option<&Connector>,
 ) -> Result<()> {
     let stream = match connector {
@@ -199,7 +190,7 @@ pub async fn dial(
         None => TcpStream::connect(addr).await,
     }
     .with_context(|| format!("dial {addr}"))?;
-    run(stream, peer, Vec::new(), FrameReader::new(), node, identify).await
+    run(stream, peer, Vec::new(), FrameReader::new(), node, identity).await
 }
 
 /// Pump one established connection until either side stops.
@@ -209,7 +200,7 @@ async fn run(
     pending: Vec<Message>,
     reader: FrameReader,
     node: mpsc::Sender<Wire>,
-    identify: Identify,
+    identity: PeerIdentity,
 ) -> Result<()> {
     stream.set_nodelay(true).ok();
     let addr = stream
@@ -219,7 +210,7 @@ async fn run(
     // Before the session exists, because a session is what a stolen key would
     // be stealing. On a dialled connection the same check reads as configuration
     // sanity: an endpoint that is not the key's own address is the wrong node.
-    if let Err(e) = identify.check(peer, addr) {
+    if let Err(e) = verify(identity, peer, addr) {
         warn!(%peer, %addr, error = %e, "refusing a peer whose address does not name its key");
         return Err(e);
     }
@@ -318,7 +309,7 @@ mod tests {
     #[test]
     fn a_mesh_peer_at_its_own_address_is_accepted() {
         let peer = key(1);
-        assert!(Identify::Fips.check(peer, on_mesh(peer, 4747)).is_ok());
+        assert!(verify(PeerIdentity::Pubkey, peer, on_mesh(peer, 4747)).is_ok());
     }
 
     #[test]
@@ -328,11 +319,7 @@ mod tests {
         // the one thing an impostor cannot make true.
         let victim = key(1);
         let impostor = key(2);
-        assert!(
-            Identify::Fips
-                .check(victim, on_mesh(impostor, 4747))
-                .is_err()
-        );
+        assert!(verify(PeerIdentity::Pubkey, victim, on_mesh(impostor, 4747)).is_err());
     }
 
     #[test]
@@ -341,14 +328,14 @@ mod tests {
         // have a way in that skips the handshake entirely.
         let peer = key(1);
         let plain: SocketAddr = "10.0.0.7:4747".parse().unwrap();
-        assert!(Identify::Fips.check(peer, plain).is_err());
+        assert!(verify(PeerIdentity::Pubkey, peer, plain).is_err());
     }
 
     #[test]
     fn without_a_mesh_underneath_any_address_will_do() {
         let peer = key(1);
         let plain: SocketAddr = "10.0.0.7:4747".parse().unwrap();
-        assert!(Identify::Claimed.check(peer, plain).is_ok());
-        assert!(Identify::Claimed.check(peer, on_mesh(key(2), 4747)).is_ok());
+        assert!(verify(PeerIdentity::Address, peer, plain).is_ok());
+        assert!(verify(PeerIdentity::Address, peer, on_mesh(key(2), 4747)).is_ok());
     }
 }

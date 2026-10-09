@@ -40,9 +40,9 @@ merchant:
   # this node funds its channels with. This node holds none itself.
   socket: "/run/merchantd.sock"
 
-forwarding:
+enforcer:
   # The real thing on a router: the kernel forwards, nftables gates, tc shapes.
-  mode: nftables
+  kind: ip
   # The interface facing the peers being sold to. `br-lan` on a stock OpenWrt
   # router; change it if you are selling on something else.
   interface: br-lan

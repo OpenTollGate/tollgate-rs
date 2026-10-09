@@ -21,7 +21,7 @@ make -C packaging clean
 | Mint database | `/etc/tollgate/mint.sqlite` | `/usr/local/var/lib/tollgate/mint.sqlite` |
 | Service | procd, `/etc/init.d/tollgate` | launchd, `com.tollgate.daemon` |
 | Control socket | `/run/tollgate-default/control.sock` | `/usr/local/var/run/tollgate-default/control.sock` |
-| Forwarding mode | `nftables` — the real thing | `loopback` — a socket of its own |
+| Enforcer | `ip` — the real thing | `loopback` — a socket of its own |
 
 `tolltop` finds the socket without being told where it is, on both.
 
@@ -87,7 +87,7 @@ tolltop
 sudo packaging/macos/uninstall.sh          # --purge to drop the identity too
 ```
 
-The forwarding mode is `loopback`, because macOS has neither nftables nor tc
+The enforcer is `loopback`, because macOS has neither nftables nor tc
 and the kernel forwarding path cannot be gated the way it is on a router. The
 protocol, the payments and the shaping are all real; the traffic is the node's
 own rather than somebody else's. That makes it right for developing against,

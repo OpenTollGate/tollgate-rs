@@ -23,7 +23,7 @@ use tollgate_net::enforcer::{Enforcer, Loopback};
 use tollgate_net::identity::Identity;
 use tollgate_net::node::{Node, NodeConfig, PeerConfig};
 use tollgate_net::settle::Backoff;
-use tollgate_net::wire::Identify;
+use tollgate_net::wire::PeerIdentity;
 use tollgate_protocol::{ChannelId, PubKey, Signature};
 
 /// How long to wait for something the protocol does on its own: a peering, a
@@ -131,7 +131,7 @@ async fn spawn_node_with(
         listen,
         // These tests talk plain IP on loopback, where an address commits to
         // nothing there is to check.
-        identify: Identify::Claimed,
+        peer_identity: PeerIdentity::Address,
         // Unused here: these tests drive `LocalChannels`, so no mint is served
         // and nothing binds this.
         mint_local: "http://127.0.0.1/unused".into(),
@@ -574,7 +574,7 @@ async fn spawn_flaky_node(
         policy,
         buyer: buyer_policy(),
         listen,
-        identify: Identify::Claimed,
+        peer_identity: PeerIdentity::Address,
         // Unused here: these tests drive `LocalChannels`, so no mint is served
         // and nothing binds this.
         mint_local: "http://127.0.0.1/unused".into(),

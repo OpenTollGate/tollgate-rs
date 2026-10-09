@@ -1,0 +1,136 @@
+; TollGate enforcer protocol, version 1 -- CDDL schema (RFC 8610)
+;
+; NORMATIVE. This file is the definition of what passes between `tollgated`
+; and an external enforcer -- a program that owns the traffic it controls --
+; on the enforcer socket (docs/design/core/tollgate-enforcer-protocol.md).
+; `src/enforcer.rs` implements it and `tests/enforcer_schema.rs` checks every
+; message the codec emits against it. When the code and this schema disagree,
+; the code is wrong -- or both change, in the same PR.
+;
+; ---------------------------------------------------------------------------
+; Transport and framing (not CBOR, so not expressible below)
+; ---------------------------------------------------------------------------
+;
+; A Unix socket, by default /run/tollgate-<instance>/enforcer.sock. The
+; enforcer listens; `tollgated` connects, and reconnects whenever the
+; connection drops. Each message is preceded by its length as a 2-byte
+; little-endian unsigned integer, exactly as on the TollGate wire
+; (tollgate.cddl), so a message is at most 65535 bytes.
+;
+; The first message on every connection is the enforcer's `hello`.
+; `tollgated` sends nothing before it, then the full state: a `bind` and a
+; `set` for every payer it tracks. After that everything is incremental.
+;
+; A message that does not validate, a message type the receiver does not
+; expect, a subject that is not delegated and has the wrong length for the
+; identity (32 bytes under "pubkey", 16 under "address"), or a delegated
+; binding sent to an enforcer that refuses them is a protocol error: the
+; receiver closes the connection.
+;
+; ---------------------------------------------------------------------------
+; Encoding rules CDDL cannot state
+; ---------------------------------------------------------------------------
+;
+; The wire protocol's, unchanged: every message is a DEFINITE-length map;
+; key 0 carries the message type and may appear anywhere in the map; map
+; keys are unsigned integers 0..255; unknown keys are skipped, which the
+; catch-all `* uint => any` says; a known key whose value has the wrong type
+; makes the message invalid; integers accept any encoding whose value fits,
+; and senders use the shortest form.
+;
+; Type tags are 0x20..0x25, disjoint from the wire protocol's, so a frame
+; sent to the wrong socket fails to decode rather than meaning something
+; else.
+
+; Listed from the last tag to the first. The order means nothing to the
+; protocol; it spares the validator the tests use (the `cddl` crate) from
+; checking a conflict's subject, a bstr, against hello's identity, a text
+; literal, which it cannot do without panicking.
+enforcer-message = conflict
+                 / counters
+                 / remove
+                 / set
+                 / bind
+                 / hello
+
+; ---------------------------------------------------------------------------
+; Scalars
+; ---------------------------------------------------------------------------
+
+u8  = uint .size 1
+u64 = uint .size 8
+
+; The payer: the TollGate key a session runs under, compressed. `peer` in
+; every message is always the payer, never a subject.
+payer = bstr .size 33
+
+; Plain bytes; the identity setting fixes the form. pubkey: the 32-byte
+; x-only key. address: the source address, 16 bytes, IPv4 v4-mapped.
+; Delegated: as the client and the enforcer agreed.
+subject = bstr .size (1..64)
+
+; A subject a payer holds, and whether a local trusted client delegated it.
+binding = [subject, delegated: bool]
+
+; The same words as enforcer.identity in tollgated's config.
+identity = "pubkey" / "address"
+
+; The instance's unit, as mint.unit in tollgated's config: "byte", "wh",
+; "ml". Compared as plain text.
+unit = tstr
+
+; ---------------------------------------------------------------------------
+; Messages
+; ---------------------------------------------------------------------------
+
+; 0x20 -- enforcer -> tollgated. First message on every connection.
+hello = {
+  0: 0x20,
+  1: u8,                          ; version; 1
+  2: identity,                    ; must equal tollgated's enforcer.identity
+  3: bool,                        ; accepts delegated bindings
+  4: unit,                        ; must equal tollgated's own unit
+  * uint => any,
+}
+
+; 0x21 -- tollgated -> enforcer. Every subject the payer holds; replaces.
+bind = {
+  0: 0x21,
+  1: payer,
+  2: [0*8 binding],               ; empty unbinds everything
+  * uint => any,
+}
+
+; 0x22 -- tollgated -> enforcer. The payer's whole state.
+set = {
+  0: 0x22,
+  1: payer,
+  2: u64 / null,                  ; 0 closed, n units/s shaped, null unshaped
+  * uint => any,
+}
+
+; 0x23 -- tollgated -> enforcer. The payer and its subjects are forgotten.
+remove = {
+  0: 0x23,
+  1: payer,
+  * uint => any,
+}
+
+; 0x24 -- enforcer -> tollgated. Cumulative on this connection, summed over
+; all the payer's subjects.
+counters = {
+  0: 0x24,
+  1: payer,
+  2: u64,                         ; delivered: units to the payer's subjects
+  3: u64,                         ; received: units from them
+  * uint => any,
+}
+
+; 0x25 -- enforcer -> tollgated. A binding refused because another payer
+; holds the subject. PLACEHOLDER semantics, see the design doc's Conflicts.
+conflict = {
+  0: 0x25,
+  1: payer,                       ; the payer refused
+  2: subject,
+  * uint => any,
+}

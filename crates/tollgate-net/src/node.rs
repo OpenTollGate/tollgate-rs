@@ -26,7 +26,7 @@ use crate::control;
 use crate::enforcer::Enforcer;
 use crate::identity::Identity;
 use crate::settle::{Backoff, Settler};
-use crate::wire::{self, Identify, Wire};
+use crate::wire::{self, PeerIdentity, Wire};
 
 /// How often the node samples its meters and ticks core.
 ///
@@ -77,9 +77,9 @@ pub struct NodeConfig {
     pub buyer: BuyerPolicy,
     /// Control-plane listen address.
     pub listen: SocketAddr,
-    /// Whether a peer's announced key has to agree with the address it
-    /// connects from.
-    pub identify: Identify,
+    /// Who a connecting peer is: its proven key, or the address it connects
+    /// from. `enforcer.identity`.
+    pub peer_identity: PeerIdentity,
     /// The URL peers reach this node's mint on, advertised in our Offer.
     pub mint_url: String,
     /// Where this node reaches that mint itself.
@@ -222,26 +222,26 @@ impl Node {
         info!(
             pubkey = %self.identity.pubkey(),
             control = %local,
-            identify = ?config.identify,
+            identity = %config.peer_identity,
             "node listening"
         );
 
         // Refusing every connection is the correct behaviour here and a baffling
         // one to debug, so say it once at startup rather than once per peer.
-        if config.identify == Identify::Fips && local.is_ipv4() {
+        if config.peer_identity == PeerIdentity::Pubkey && local.is_ipv4() {
             warn!(
                 control = %local,
                 "listening on IPv4 while checking mesh identity: no peer on fips0 can reach this"
             );
         }
 
-        tokio::spawn(wire::listen(control, wire_tx.clone(), config.identify));
+        tokio::spawn(wire::listen(control, wire_tx.clone(), config.peer_identity));
 
         for peer in &config.peers {
             spawn_dialer(
                 peer.clone(),
                 wire_tx.clone(),
-                config.identify,
+                config.peer_identity,
                 config.connector.clone(),
             );
         }
@@ -698,7 +698,7 @@ fn log_refusal(peer: PubKey, reject: &TopUpReject, side: Side) {
 fn spawn_dialer(
     peer: PeerConfig,
     wire_tx: mpsc::Sender<Wire>,
-    identify: Identify,
+    identity: PeerIdentity,
     connector: Option<wire::Connector>,
 ) {
     let Some(endpoint) = peer.endpoint.clone() else {
@@ -710,7 +710,7 @@ fn spawn_dialer(
                 &endpoint,
                 peer.pubkey,
                 wire_tx.clone(),
-                identify,
+                identity,
                 connector.as_ref(),
             );
             if let Err(e) = dialed.await {
