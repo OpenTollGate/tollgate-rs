@@ -77,7 +77,7 @@ connecting peer is ([Identity](#identity)).
 
 | Identity | Subject |
 |---|---|
-| `pubkey` | The peer's public key as 32 bytes, in the short form that leaves out the parity byte (an "x-only" secp256k1 key). It is the key itself, not the `npub` text a FIPS node displays |
+| `pubkey` | The peer's public key as 32 bytes, in the short form that leaves out the parity byte (an "x-only" secp256k1 key). It is the key itself, not its `npub` text form |
 | `address` | The source address of the peer's connection to `tollgated`, as 16 bytes. An IPv4 address is written in its IPv6 form, `::ffff:a.b.c.d` (an "IPv4-mapped" address), so it fits the same 16 bytes |
 | delegated | Whatever the client that asked for the binding and the enforcer agreed on, up to 64 bytes ([Delegated Bindings](#delegated-bindings)) |
 
@@ -85,14 +85,36 @@ connecting peer is ([Identity](#identity)).
 same subject exactly when their bytes are equal. `192.168.1.23` never arrives
 once as four bytes and once as sixteen.
 
-**A FIPS address is never a subject.** A FIPS address is derived from a key:
-the byte `0xfd` followed by the first 15 bytes of the SHA-256 hash of the
-32-byte key (`crates/tollgate-net/src/fips.rs`). So it carries less than the
-key does, and `tollgated` never has one without the key it came from.
-`tollgated` binds the key. An enforcer that matches FIPS traffic works out the
-address from the key ([Deriving Subjects](#deriving-subjects)), and matches it
-only on the FIPS interface, `fips0`. An `address` subject that happens to
-start with `fd` is just an address. An enforcer never takes it for a FIPS identity.
+### Beyond Network Traffic
+
+Nothing here needs the thing being sold to be network traffic. An enforcer
+turns something on for a payer, limits how fast it flows, and counts how much
+went through. The messages ([below](#messages)) work the same whatever that
+something is. Two examples, each with its own `tollgated` instance:
+
+| | Electricity | A beer tap |
+|---|---|---|
+| The enforcer | The controller of a charge point for electric cars, or of a smart plug: a relay that switches the outlet on and off, a power limit, and an energy meter | A tap controller: a valve on each tap, and a flow meter |
+| The payer | The customer's phone, running a TollGate client. It reaches `tollgated` over FIPS, which proves its key | A session key held by a kiosk on the premises, which takes the customer's money, as the proxy in [Delegated Bindings](#delegated-bindings) holds one per phone |
+| `enforcer.identity` | `pubkey` | `address`; the kiosk is on the same machine or LAN, and nothing needs proving |
+| The subject | The phone's 32-byte key. The instance serves one charge point, so a key bound here is a customer at this charge point | Delegated: the kiosk is a trusted local client, and asks for a binding that names the tap the customer is standing at, say the bytes `tap-3`. The enforcer says `delegated: true` in its `hello`, and acts only on delegated subjects |
+| `set(peer, rate)` | A rate switches the outlet on and caps its power. `0` switches it off. `null` switches it on with no cap | A rate opens the valve and limits the flow. `0` closes it. `null` opens it with no limit |
+| `counters` | The energy the meter recorded | The volume the flow meter recorded |
+| The grant runs out | `tollgated` sends `set(peer, 0)`, and the outlet switches off | `tollgated` sends `set(peer, 0)`, and the valve closes |
+
+The rules already set out apply unchanged. A subject belongs to at most one
+payer, so `tap-3` pours for one customer at a time: a second customer bound to
+it is refused as a [conflict](#conflicts). And if the socket drops, the outlet
+switches off and every valve closes, as any enforcer goes back to closed.
+
+**Only one direction flows here.** Power and beer go to the customer, so what
+the meter records is `delivered`, and `received` stays `0`.
+
+**Both examples need a unit other than the byte, and this protocol has none
+yet.** `set` carries bytes per second, `counters` carry bytes, and the vouchers
+a node sells today are in the unit `byte`. Electricity is sold in watt-hours
+(Wh), and beer in millilitres (ml). How an enforcer would say which unit it
+counts in is an [open problem](#open-problems).
 
 ### Where the Trust Comes From
 
@@ -667,7 +689,10 @@ them as a key because its identity is `pubkey`. Payer and subject are the same k
 here, but `tollgated` still says so explicitly: the enforcer infers nothing
 from the payer.
 
-The enforcer works out the address it will see that key's traffic come from:
+`tollgated` binds the key, not the key's FIPS address. Working out the address
+is the enforcer's own job ([Deriving Subjects](#deriving-subjects)): the byte
+`0xfd`, then the first 15 bytes of the SHA-256 hash of the key. That is the
+address it will see the key's traffic come from:
 
 ```
 SHA-256(3bf0c63f…aefa459d) = 10 93 b2 85 86 60 46 e4 2d c0 89 32 28 cc ff …
@@ -714,6 +739,7 @@ handed bytes that are neither.
 | Counters after `remove` | Whether a payer's counts start again from zero when it is removed and later bound again on the same connection. The implementation assumes they do |
 | A `hello` version `tollgated` does not speak | Whether this is a startup refusal, like an identity mismatch, or a closed connection that `tollgated` retries. The implementation retries |
 | Who sets the counters interval | `counters` are sent once a second by default. Whether the enforcer picks the interval, or `tollgated` asks for one, is not yet settled |
+| Units other than bytes | `set` rates are bytes per second, `counters` are bytes, and vouchers are in the unit `byte`. An enforcer that sells something else, such as electricity or beer ([Beyond Network Traffic](#beyond-network-traffic)), would need to declare its unit; vouchers would be in that unit, and rates per second in it: Wh per second for power (1 Wh/s is 3.6 kW), ml per second for flow. How the unit is declared, and checked against the node's own, is not settled |
 
 ---
 
@@ -738,7 +764,6 @@ handed bytes that are neither.
 | Identity | One setting, `enforcer.identity: pubkey \| address`. Defaults: `address` for `ip` and `loopback`, `pubkey` for `fips`; `external` must write it. `pubkey` needs a network that proves keys, today FIPS, or `tollgated` refuses to start | Who a peer is decides what is bound, so it belongs in the config with the rest of the pairing. An external enforcer could match either, so it gets no default. Believing an announced key while the enforcer takes its subjects as proven keys opens a paying peer's traffic to anyone; so `pubkey` never means an announced key |
 | Identity names | `pubkey` and `address`, not `fips` and `claimed` | Named for what a peer is. FIPS is the only network that proves keys today, but a tunnel keyed by the TollGate key could too, and should not need a setting named after FIPS. `address` says what is actually trusted, where `claimed` said only what was not |
 | The `hello` identity | A check only. If it differs from the config, `tollgated` refuses to start and names both; a reconnecting enforcer that changes it is refused | With no kinds on the wire, it is the one check that the two ends of a pairing agree. It replaces an earlier design where the enforcer chose the identity and the operator could optionally pin it. Two places deciding one thing meant reading both to know which applied, and an unpinned instance trusted whatever the enforcer asked for. Now nothing is negotiated |
-| FIPS addresses | Never a subject. `tollgated` binds the key; the enforcer works out the address and matches it on `fips0` | Under `pubkey` what is proven is the key, and the address is a hash of it. `tollgated` never has an address without its key, so binding the address too would only repeat what the enforcer can compute |
 | Scope | External enforcers sell a service this node delivers; paid FIPS peer links stay on the built-in `fips` enforcer | Traffic passing between neighbors is controlled by the FIPS node itself, neighbor by neighbor. An enforcer sells what its own traffic delivers, to any payer that can reach this node |
 | Deriving subjects | The enforcer's job | `tollgated` stays free of the details of every kind of traffic |
 | Delegated bindings | Through `tollgated`, flagged, refusable in `hello` | One party tells the enforcer who has paid. An enforcer that takes no third party's word says so once |
