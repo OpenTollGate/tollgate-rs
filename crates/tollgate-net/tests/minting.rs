@@ -39,10 +39,20 @@ async fn seller_limited(max_amount: u64, limit: IssueLimit) -> Seller {
 }
 
 async fn serve_seller(auto_accept: bool, max_amount: u64, issue_limit: IssueLimit) -> Seller {
+    serve_seller_on("127.0.0.1", auto_accept, max_amount, issue_limit).await
+}
+
+/// A seller on `host`, an address literal: IPv6 too, as a mint on a FIPS mesh is.
+async fn serve_seller_on(
+    host: &str,
+    auto_accept: bool,
+    max_amount: u64,
+    issue_limit: IssueLimit,
+) -> Seller {
     // Bound and released to learn a free port. Something else could take it in
     // between, but on a test machine that is not worth more machinery.
     let free = || -> SocketAddr {
-        let probe = TcpListener::bind("127.0.0.1:0").expect("find a free port");
+        let probe = TcpListener::bind((host, 0)).expect("find a free port");
         probe.local_addr().expect("its address")
     };
     let (listen, private) = (free(), free());
@@ -138,6 +148,22 @@ async fn a_buyer_mints_capacity_at_a_mint_that_auto_accepts() {
         .await
         .expect("spend what was minted");
     assert_eq!(wallet.balance_of(&seller.url, UNIT).await, 700_000);
+}
+
+/// A mint named by an IPv6 literal, `http://[addr]:port`, as every mint on a
+/// FIPS mesh is: the brackets are URL syntax, not part of the address.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_buyer_mints_at_a_mint_named_by_an_ipv6_address() {
+    let seller = serve_seller_on("::1", true, 1 << 30, IssueLimit::default()).await;
+    assert!(seller.url.starts_with("http://[::1]:"), "{}", seller.url);
+    let dir = TempDir::new();
+    let wallet = buyer_wallet(&dir, 1).await;
+
+    let minted = wallet
+        .issue(&seller.url, UNIT, 1_000)
+        .await
+        .expect("a mint at an IPv6 address is reached like any other");
+    assert_eq!(minted, 1_000);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -75,6 +75,11 @@ cdk-common = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.18.1", pac
 cdk-fake-wallet = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.18.1", package = "cdk-fake-wallet" }
 cdk-sqlite = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.18.1", package = "cdk-sqlite", default-features = false, features = ["mint", "wallet"] }
 cashu = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.18.1", package = "cashu", default-features = false }
+# Only for its `reqwest` backend, which cdk's wallet then talks to every mint
+# through. The default, bitreq, looks up an IPv6 literal's host with its
+# brackets on and so cannot reach `http://[addr]:port` — every mint on a FIPS
+# mesh.
+cdk-http-client = { git = "https://github.com/cashubtc/cdk.git", tag = "v0.18.1", package = "cdk-http-client", features = ["reqwest"] }
 axum = { version = "0.8" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 serde_json = { version = "1" }

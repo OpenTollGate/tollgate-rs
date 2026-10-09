@@ -361,6 +361,11 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 ### Fixed
 
+- A node reaches a mint named by an IPv6 address, `http://[addr]:port`, as
+  every mint on a FIPS mesh is. cdk's default HTTP client, bitreq, looked the
+  host up with its brackets on and failed, so no channel toward a mesh peer was
+  ever funded; cdk now talks to mints through its `reqwest` backend.
+
 - `mintd` applies `max_amount` (and its URL, name and methods) from its config
   at every start: cdk kept serving the copy of its info saved on first start,
   so a raised limit never took effect. The default `max_amount` for `mintd`
