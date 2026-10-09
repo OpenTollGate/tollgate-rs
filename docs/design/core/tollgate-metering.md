@@ -58,12 +58,12 @@ This replaces the two-sided reconciliation of the metered-settlement model, wher
 
 ---
 
-## ResourceAdapter Trait (Metering Members)
+## Enforcer Trait (Metering Members)
 
-The `ResourceAdapter` trait spans both access control and metering. It belongs to the host (`tollgate-net`), not to `tollgate-core`: core never does I/O, so the host reads the adapter and hands core what it found. The metering-related members:
+The `Enforcer` trait (`ResourceAdapter` in the code today) spans both access control and metering. It belongs to the host (`tollgate-net`), not to `tollgate-core`: core never does I/O, so the host reads the enforcer and hands core what it found. The metering-related members:
 
 ```rust
-pub trait ResourceAdapter: Send + Sync {
+pub trait Enforcer: Send + Sync {
     /// Cumulative units delivered to and received from a peer. The host reads
     /// these every tick and core draws the peer's grant down against them.
     fn counters(&self, peer: PubKey) -> Counters;
@@ -74,7 +74,7 @@ pub trait ResourceAdapter: Send + Sync {
     /// The rate a peer is currently shaped to.
     fn shaping_rate(&self, peer: PubKey) -> u64;
 
-    /// Every peer the adapter is tracking, and forgetting one that has gone.
+    /// Every peer the enforcer is tracking, and forgetting one that has gone.
     fn peers(&self) -> Vec<PubKey>;
     fn remove(&self, peer: PubKey);
 
@@ -99,7 +99,7 @@ Counters are read, not pushed: reading them once per tick is enough to draw a gr
 
 ### PeerMetrics
 
-Available from FIPS MMP or equivalent. Not used for pricing or access control — delivery has no price and metrics are peer-reported, so letting them set a price would let the peer set its own. Exposed for operator visibility and capacity decisions. Opaque to core; each adapter provides what's relevant for its resource type.
+Available from FIPS MMP or equivalent. Not used for pricing or access control — delivery has no price and metrics are peer-reported, so letting them set a price would let the peer set its own. Exposed for operator visibility and capacity decisions. Opaque to core; each enforcer provides what's relevant for its resource type.
 
 ```rust
 pub enum MetricValue {

@@ -4,7 +4,7 @@ This document specifies how TollGate gates delivery per-peer based on payment st
 
 ## Overview
 
-TollGate controls delivery at the peer level. Each peer has an **access level** determined by their payment status. The implementation (FIPS, IP stack, etc.) enforces access control on the delivery path — `tollgate-core` decides *what* to enforce, the resource adapter enforces *how*.
+TollGate controls delivery at the peer level. Each peer has an **access level** determined by their payment status. The implementation (FIPS, IP stack, etc.) enforces access control on the delivery path — `tollgate-core` decides *what* to enforce, the enforcer enforces *how*.
 
 The core principle: **no pay, no delivery** — beyond the minimum flow allowance. A peer that hasn't paid gets at most the allowance: a small, free rate of delivery that lets it reach what it needs to start paying ([tollgate-vouchers.md](tollgate-vouchers.md)). If the node gives no allowance, an unpaid peer gets no delivery at all. Either way it can always exchange TollGate protocol messages with this node (Announce, Offer, Accept) to establish payment.
 
@@ -116,12 +116,12 @@ This requires a FIPS modification — the ability to selectively include/exclude
 
 ---
 
-## ResourceAdapter Trait (Access Control Members)
+## Enforcer Trait (Access Control Members)
 
-`tollgate-core` never enforces anything itself: it decides, and the host applies the decision through a `ResourceAdapter`. The trait belongs to the host (`tollgate-net`), not to core, so core stays free of I/O. Its access-control members:
+`tollgate-core` never enforces anything itself: it decides, and the host applies the decision through an **enforcer**. Some enforcers are built into `tollgated` (`ip`, `fips`, `loopback`); an external one is a separate program, reached over the [enforcer protocol](tollgate-enforcer-protocol.md). All of them sit behind one trait, `Enforcer` (the code still calls it `ResourceAdapter`). The trait belongs to the host (`tollgate-net`), not to core, so core stays free of I/O. Its access-control members:
 
 ```rust
-pub trait ResourceAdapter: Send + Sync {
+pub trait Enforcer: Send + Sync {
     /// Apply an access level decided by core. The implementation enforces
     /// delivery rules AND infers bloom filter visibility (FIPS): a peer whose
     /// traffic is carried, even only at the allowance, is visible; a blocked
@@ -145,9 +145,9 @@ pub enum AccessLevel {
 }
 ```
 
-An adapter enforces two numbers per peer — the access level and the shaping rate — because a grant buys a rate: a gate alone cannot express what was sold.
+An enforcer applies two numbers per peer — the access level and the shaping rate — because a grant buys a rate: a gate alone cannot express what was sold.
 
-Peers are always identified by public key. A delivery path that knows peers by some other address — an IP address, for a firewall — binds the key to that address itself, on the host side; one already keyed by public key, as FIPS is, needs no binding at all.
+Peers are always identified by public key. A delivery path that knows peers by some other address — an IP address, for a firewall — binds the key to that address itself, on the host side; one already keyed by public key, as FIPS is, needs no binding at all. Which of the two a node does is its `enforcer.identity`, `address` or `pubkey` ([tollgate-configuration.md](tollgate-configuration.md#identity-of-a-peer)).
 
 Counting units delivered and peer metrics are documented in [tollgate-metering.md](tollgate-metering.md).
 

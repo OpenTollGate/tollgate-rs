@@ -1,30 +1,40 @@
 # TollGate Enforcer Protocol
 
 This document specifies how `tollgated` controls delivery through a separate
-program, over a local socket. The resource adapters built into `tollgated`
-are covered in [tollgate-access-control.md](tollgate-access-control.md).
+program, over a local socket. The enforcers built into `tollgated` are covered
+in [tollgate-access-control.md](tollgate-access-control.md).
 
 ## Overview
 
 `tollgated` decides who has paid and how much they may use. Something else has
 to act on that: let a peer's traffic through, slow it to the rate it bought,
-and count what it used. Normally that is one of `tollgated`'s own resource
-adapters, such as the `nftables` firewall adapter or the `fips` adapter.
+and count what it used. Whatever does that is an **enforcer**.
 
-An **enforcer** is a program outside `tollgated` that does the same job. It
-owns the traffic it controls — a firewall, a proxy, a tunnel — and for each
-paying peer it opens that traffic, shapes it, and counts it, as `tollgated`
-tells it. `tollgated` still decides what is owed. The enforcer applies the
-decision and reports back what it carried.
+Three enforcers are **built into** `tollgated`, and the operator picks one with
+`enforcer.kind` ([tollgate-configuration.md](tollgate-configuration.md#enforcer)):
+
+- `ip` gates and shapes the kernel's forwarding path, using the firewall
+  (nftables) and traffic control (`tc`)
+- `fips` hands the job to a FIPS node, over its control socket
+- `loopback` shapes and counts a socket of its own, for demos and tests
+
+An **external enforcer** (`enforcer.kind: external`) is a separate program that
+does the same job. It owns the traffic it controls — a firewall, a proxy, a
+tunnel — and for each paying peer it opens that traffic, shapes it, and counts
+it, as `tollgated` tells it. `tollgated` still decides what is owed. The
+enforcer applies the decision and reports back what it carried. This document
+specifies the **enforcer protocol** the two speak. From here on, "the enforcer"
+means the external one.
 
 **A new use case is then a new enforcer, not a new `tollgated`.** The built-in
-adapters stay. Setting `forwarding.mode: external` puts an enforcer behind the
-same `ResourceAdapter` trait instead, reached over a local socket.
+enforcers stay. An external one sits behind the same `Enforcer` trait they
+implement (the code still calls it `ResourceAdapter`), reached over a local
+socket.
 
-**An enforcer sells a service this node delivers, to whoever pays for it.**
-That is a different thing from a paid peer link, where a direct neighbor pays
-this node to forward its traffic. Over FIPS, paid peer links stay on the
-built-in `fips` adapter (`forwarding.mode: fips`). There the FIPS node itself
+**An external enforcer sells a service this node delivers, to whoever pays for
+it.** That is a different thing from a paid peer link, where a direct neighbor
+pays this node to forward its traffic. Over FIPS, paid peer links stay on the
+built-in `fips` enforcer (`enforcer.kind: fips`). There the FIPS node itself
 enforces who may send traffic through it, neighbor by neighbor, and the
 enforcer socket is never used
 ([peering-fips.md](../network-peering/peering-fips.md)).
@@ -38,7 +48,7 @@ The protocol keeps three ideas apart:
 | Term | What it is | Who knows it |
 |---|---|---|
 | **Payer** | The TollGate key that signs payments and owns the grant. `tollgated` keeps its accounts by this key | `tollgated` |
-| **Subject** | The thing the enforcer recognizes in traffic, such as an address or a key, so it can let that traffic through or stop it. On the wire it is plain bytes, and the Identify mode fixes their form ([below](#what-a-subject-is)) | The enforcer |
+| **Subject** | The thing the enforcer recognizes in traffic, such as an address or a key, so it can let that traffic through or stop it. On the wire it is plain bytes, and the identity setting fixes their form ([below](#what-a-subject-is)) | The enforcer |
 | **Binding** | The link that says "this subject's traffic is paid for by this payer" | Both: `tollgated` states it, the enforcer applies it |
 
 **A payer and its subject need not be the same party.** A proxy can buy a
@@ -48,7 +58,7 @@ So the protocol never guesses a subject from a payer's key. Every subject the
 enforcer opens for a payer arrives in a binding.
 
 In the messages below, `peer` always means the payer. It is the key a
-TollGate session runs under, and the key `ResourceAdapter` is called with.
+TollGate session runs under, and the key the `Enforcer` trait is called with.
 State and counters are kept per payer. One payer may hold several subjects,
 but a subject belongs to at most one payer.
 
@@ -62,13 +72,13 @@ this protocol.
 That pairing already says what the enforcer looks for in traffic, so the
 protocol does not repeat it. A subject on the wire is plain bytes, with no
 field saying what kind of thing it is. Its form follows from the instance's
-**Identify mode**: the setting that decides how `tollgated` tells who a
-connecting peer is ([Identify Coupling](#identify-coupling)).
+**identity** setting, `enforcer.identity`: the setting that says who a
+connecting peer is ([Identity](#identity)).
 
-| Identify mode | Subject |
+| Identity | Subject |
 |---|---|
-| `fips` | The peer's key as 32 bytes, in the short form that leaves out the parity byte (an "x-only" secp256k1 key). It is the key itself, not the `npub` text a FIPS node displays |
-| `claimed` | The source address of the peer's connection to `tollgated`, as 16 bytes. An IPv4 address is written in its IPv6 form, `::ffff:a.b.c.d` (an "IPv4-mapped" address), so it fits the same 16 bytes |
+| `pubkey` | The peer's public key as 32 bytes, in the short form that leaves out the parity byte (an "x-only" secp256k1 key). It is the key itself, not the `npub` text a FIPS node displays |
+| `address` | The source address of the peer's connection to `tollgated`, as 16 bytes. An IPv4 address is written in its IPv6 form, `::ffff:a.b.c.d` (an "IPv4-mapped" address), so it fits the same 16 bytes |
 | delegated | Whatever the client that asked for the binding and the enforcer agreed on, up to 64 bytes ([Delegated Bindings](#delegated-bindings)) |
 
 **Every address has exactly one encoding.** Two subjects are therefore the
@@ -81,8 +91,8 @@ the byte `0xfd` followed by the first 15 bytes of the SHA-256 hash of the
 key does, and `tollgated` never has one without the key it came from.
 `tollgated` binds the key. An enforcer that matches FIPS traffic works out the
 address from the key ([Deriving Subjects](#deriving-subjects)), and matches it
-only on the FIPS interface, `fips0`. A `claimed` subject that happens to start
-with `fd` is just an address. An enforcer never takes it for a FIPS identity.
+only on the FIPS interface, `fips0`. An `address` subject that happens to
+start with `fd` is just an address. An enforcer never takes it for a FIPS identity.
 
 ### Where the Trust Comes From
 
@@ -99,9 +109,9 @@ The deployment decides that, not the message. There are three cases:
   example, a proxy on the same machine saying a phone is paid for by one of
   its sessions.
 
-So the wire carries no grades of trust and no subject kinds. The Identify mode
-tells the enforcer which of the first two cases it is in, and what form its
-subjects take. A single flag on a subject tells it the third.
+So the wire carries no grades of trust and no subject kinds. The identity
+setting says which of the first two cases a pairing is in, and so what form its
+subjects take. A single flag on a subject tells the enforcer the third.
 
 ---
 
@@ -111,7 +121,7 @@ subjects take. A single flag on a subject tells it the third.
 `tollgated` reconnects whenever the connection drops. The enforcer is the
 server because it owns the traffic: it may start before `tollgated`, and it
 keeps running when `tollgated` restarts. `tollgated` needs only the socket's
-path, `forwarding.enforcer_socket`.
+path, `enforcer.socket`.
 
 **Whoever can open the socket can open the traffic.** The socket's file
 permissions must therefore admit `tollgated` alone. The enforcer serves one
@@ -147,20 +157,21 @@ what that file will say.
 
 | Message | Direction | Meaning |
 |---|---|---|
-| `hello(version, identify, delegated)` | enforcer → tollgated | The first message on every connection. It names the Identify mode the enforcer requires (`fips` or `claimed`), which also fixes the form of its subjects, and says whether it accepts delegated bindings |
+| `hello(version, identity, delegated)` | enforcer → tollgated | The first message on every connection. It states the identity the enforcer was built for (`pubkey` or `address`), and says whether it accepts delegated bindings. `tollgated` only checks the identity against its own `enforcer.identity` ([Identity](#identity)) |
 | `bind(peer, [subject, delegated])` | tollgated → enforcer | Every subject this payer holds. It replaces any earlier set; an empty list unbinds them all |
 | `set(peer, rate)` | tollgated → enforcer | The payer's state: `0` is closed; a number is open and shaped to that many bytes per second; `null` is open and unshaped |
 | `remove(peer)` | tollgated → enforcer | Forget the payer. Its subjects go back to closed |
 | `counters(peer, delivered, received)` | enforcer → tollgated | Bytes carried to and from the payer's subjects, counted from the start of this connection |
 | `conflict(peer, subject)` | enforcer → tollgated | The enforcer refused to bind `subject` to `peer`. See [Conflicts](#conflicts) |
 
-The messages from `tollgated` stand in for the calls on `ResourceAdapter`, the
-trait `tollgated` uses to enforce and count:
+The messages from `tollgated` stand in for the calls on `Enforcer`, the trait
+every built-in enforcer implements, and the one `tollgated` uses to enforce and
+count:
 
-| `ResourceAdapter` call | What `tollgated` sends |
+| `Enforcer` call | What `tollgated` sends |
 |---|---|
-| `register(peer, addr)` | A `bind` of what `tollgated` knows about `addr` ([Identify Coupling](#identify-coupling)) |
-| `set_shaping_rate` | A `set`. Core's `u64::MAX`, meaning a peer it does not meter, is written as `null`, as the FIPS adapter already does |
+| `register(peer, addr)` | A `bind` of what `tollgated` knows about `addr` ([Identity](#identity)) |
+| `set_shaping_rate` | A `set`. Core's `u64::MAX`, meaning a peer it does not meter, is written as `null`, as the built-in `fips` enforcer already does |
 | `set_access` | Nothing |
 | `remove` | A `remove` |
 | `counters()` | Nothing: it returns the last `counters` the enforcer reported |
@@ -193,8 +204,8 @@ node's own addresses; a proxy serves its payment page to anyone.
 enforcer                               tollgated
   │  (listening; everyone closed)          │
   │◄────────────── connect ────────────────│
-  │── hello(1, identify, delegated) ──────►│  check against own Identify
-  │                                        │  (mismatch: startup error)
+  │── hello(1, identity, delegated) ──────►│  check against enforcer.identity
+  │                                        │  (differs: startup error)
   │◄──── bind + set, every payer ──────────│  full state
   │                                        │
   │◄──────── bind(peer, subjects) ─────────│  a payer connects
@@ -232,8 +243,8 @@ any of these:
 
 - an unknown message type
 - a malformed message
-- a subject that is not delegated and has the wrong length for the mode: 32
-  bytes under `fips`, 16 under `claimed`
+- a subject that is not delegated and has the wrong length for the identity:
+  32 bytes under `pubkey`, 16 under `address`
 - a delegated subject sent to an enforcer that refuses them
 
 Closing is the safe outcome for both ends. The enforcer goes back to closed,
@@ -268,8 +279,8 @@ trying to reconnect, about once a second. Meanwhile:
 - it keeps the sessions and channels already running, so peers pick up where
   they left off once the enforcer is back
 
-The same holds before the first connection. A `tollgated` in `external` mode
-starts selling when it has a `hello` it accepts, not when it starts.
+The same holds before the first connection. A `tollgated` with an external
+enforcer starts selling when it has a `hello` it accepts, not when it starts.
 
 What an outage costs a payer is the rest of its current grant: it paid for a
 window the enforcer stopped carrying. That loss is bounded by one grant, and
@@ -279,54 +290,76 @@ carrying traffic that nobody is metering.
 
 ---
 
-## Identify Coupling
+## Identity
 
-Before any binding exists, `tollgated` has already decided who a peer is. The
-setting that decides how is the **Identify mode**, `wire::Identify`, and it
-has two values:
+Before any binding exists, `tollgated` has already decided who a peer is. One
+setting says how: **`enforcer.identity`**, in the configuration
+([tollgate-configuration.md](tollgate-configuration.md#identity-of-a-peer)).
+It has two values:
 
-- **`Identify::Fips`**: the peer's connection to `tollgated` must come from
-  the FIPS address of the key the peer announces
+- **`pubkey`**: the peer is its public key, and the network the connection
+  came over proves the key: only whoever holds the key could have made that
+  connection. Today only FIPS proves keys. A connection to `tollgated` must
+  come from the FIPS address of the key the peer announces, or it is dropped
+  before a session exists
   ([peering-fips.md](../network-peering/peering-fips.md#verifying-the-peer)).
-  The key is checked.
-- **`Identify::Claimed`**: the key the peer announces is taken at its word.
-  Nothing is checked.
+  `pubkey` never means "the key the peer announced".
+- **`address`**: the peer is the address its connection came from. Whoever
+  uses that address is that payer. The key the peer announces is not checked;
+  it only names the account `tollgated` keeps.
+
+**`pubkey` is named for what a peer is, not for FIPS.** FIPS is the only
+network that proves keys today, but it need not stay the only one. A tunnel
+whose key is the peer's TollGate key would prove it too
+([peering-ip.md](../network-peering/peering-ip.md#peer-authentication)). Such
+a network can then use `pubkey` with no new setting.
+
+Each kind of enforcer has a default, so most configs never write the setting:
+
+| `enforcer.kind` | Default identity | Why |
+|---|---|---|
+| `ip` | `address` | A firewall knows peers by address, and plain IP proves no keys |
+| `fips` | `pubkey` | FIPS proves the key behind every connection |
+| `loopback` | `address` | For demos and tests; nothing is proven |
+| `external` | None: it must be written in the config | `tollgated` cannot tell what an external enforcer matches, or which network its peers arrive over. Any default would be wrong for some enforcer |
 
 That decides what `tollgated` has to bind:
 
-| Identify mode | What `tollgated` has | What it binds |
+| Identity | What `tollgated` has | What it binds |
 |---|---|---|
-| `Fips` | A connection from the FIPS address of the announced key, checked. The key itself is proven | The 32-byte key |
-| `Claimed` | The connection's source address, unchecked | The address, 16 bytes |
+| `pubkey` | A connection from the FIPS address of the announced key, checked. The key itself is proven | The 32-byte key |
+| `address` | The connection's source address | The address, 16 bytes |
 | either | The word of a trusted local program | The bytes it named, flagged delegated |
 
-**So the enforcer states the mode it requires.** In `external` mode,
-`forwarding.mode` cannot say which network the TollGate messages arrive over,
-so the `hello` says it instead. An enforcer that matches keys trusts each
-subject to be the key at the other end of the traffic. Only the FIPS check
-makes that true, so such an enforcer requires `fips`. An enforcer that matches
-addresses requires `claimed`.
-
-`tollgated` then runs in the mode the enforcer asked for. The enforcer reads
-every subject that is not delegated in that mode's form. Since the wire
-carries no subject kinds, this is the one check that the two ends of a pairing
-agree.
+**The enforcer's `hello` is a check, not a choice.** An external enforcer is
+built for one identity. One that matches keys trusts each subject to be the key
+at the other end of the traffic, so it is built for `pubkey`. One that matches
+addresses is built for `address`. It states which in its `hello`, and
+`tollgated` compares that with `enforcer.identity`. Nothing is negotiated: the
+config is the one place the identity is decided. Since the wire carries no
+subject kinds, this is the one check that the two ends of a pairing agree.
 
 **A mismatch is a startup error, not a silent hole.** `tollgated` refuses to
-start in either of these cases. If it happens on a reconnect instead,
-`tollgated` refuses that enforcer and stays in the not-selling state described
-under [Failure Rules](#failure-rules).
+start in either of these cases, and says why:
 
-- The operator pinned the mode (`forwarding.identify: fips` or `claimed`,
-  which is optional in `external` mode), and the `hello` asks for the other
-  one.
-- A reconnecting enforcer asks for a different mode from the one `tollgated`
-  is running. The live sessions were identified under the old mode. Switching
-  would either trust peers that were never checked, or strand peers that were.
+- The `hello` states a different identity from `enforcer.identity`. The error
+  names both.
+- `enforcer.identity` is `pubkey`, but peers do not reach `tollgated` over a
+  network that proves keys. Today that means the node runs no FIPS, or
+  `network.listen` is not an address mesh peers reach (the node's `fips0`
+  address, or `[::]`). Believing announced keys instead is never an option.
 
-The hole this closes is a FIPS enforcer paired by mistake with a `claimed`
-instance. The enforcer takes its subjects to be proven keys. The instance
-believes whatever key a peer claims, and binds source addresses. Left to run,
+**A reconnecting enforcer may not change its identity either.** If an enforcer
+reconnects and its `hello` states a different identity from before, it no
+longer matches the config. `tollgated` is already running by then, so it
+refuses that enforcer, logs both identities, and stays in the not-selling state
+described under [Failure Rules](#failure-rules). The live sessions were
+identified under the configured identity. Going along with the change would
+either trust peers that were never checked, or strand peers that were.
+
+The hole this closes is an enforcer that matches keys, paired by mistake with
+an instance set to `address`. The enforcer takes its subjects to be proven
+keys. The instance checks no keys, and binds source addresses. Left to run,
 the mistake would show up long after startup, if at all: as a stream of
 protocol errors, or as an enforcer treating bytes nobody checked as a proven
 key. Running on regardless is never the answer; refusing at startup is.
@@ -352,7 +385,7 @@ This keeps `tollgated` free of the details of every kind of traffic. It never
 learns that a neighbor table exists, and an enforcer that matches something
 new needs no new `tollgated`. The trade-off: an enforcer cannot ask
 `tollgated` for several forms of one peer's subject. It gets the one form its
-mode fixes, and derives the rest.
+identity fixes, and derives the rest.
 
 ---
 
@@ -439,23 +472,21 @@ u8  = uint .size 1
 u64 = uint .size 8
 payer = bstr .size 33             ; compressed secp256k1 key
 
-; Plain bytes; the Identify mode fixes the form. fips: the 32-byte
-; x-only key. claimed: the source address, 16 bytes, IPv4 v4-mapped.
+; Plain bytes; the identity setting fixes the form. pubkey: the 32-byte
+; x-only key. address: the source address, 16 bytes, IPv4 v4-mapped.
 ; Delegated: as the client and the enforcer agreed.
 subject = bstr .size (1..64)
 
 binding = [subject, delegated: bool]
 
-identify = &(
-  identify-claimed: 0,
-  identify-fips:    1,
-)
+; The same words as enforcer.identity in tollgated's config.
+identity = "pubkey" / "address"
 
 ; 0x20 -- enforcer -> tollgated. First message on every connection.
 hello = {
   0: 0x20,
   1: u8,                          ; version; 1
-  2: identify,                    ; the mode tollgated must run
+  2: identity,                    ; must equal tollgated's enforcer.identity
   3: bool,                        ; accepts delegated bindings
   * uint => any,
 }
@@ -513,20 +544,27 @@ A `bind` carries at most eight subjects, which keeps the largest message under
 A router sells internet access to devices on its LAN, `br-lan`. Its enforcer
 is a firewall program that matches addresses and hardware (MAC) addresses, and
 takes no third party's word for them. It is paired with the instance
-`tollgate-ip`.
+`tollgate-ip`, whose config says:
 
-The enforcer starts and says what it needs:
+```yaml
+enforcer:
+  kind: external
+  socket: "/run/tollgate-ip/enforcer.sock"
+  identity: address
+```
+
+The enforcer starts and says what it was built for:
 
 ```
-hello(1, identify: claimed, delegated: false)
+hello(1, identity: address, delegated: false)
 ```
 
-`tollgated` runs in `Identify::Claimed` mode and sends its full state, which
-is empty so far.
+That matches the config, so `tollgated` sends its full state, which is empty
+so far.
 
 A laptop running TollGate, with key `02ab…`, connects to `tollgated` from
 `192.168.1.23`. That source address is all `tollgated` has, and it is
-unchecked. `tollgated` binds it in the one form `claimed` uses: 16 bytes, with
+unchecked. `tollgated` binds it in the one form `address` uses: 16 bytes, with
 the IPv4 address written in IPv6 form.
 
 ```
@@ -557,7 +595,7 @@ enforcer → tollgated   counters(02ab…, 5102337, 188400)
 ```
 
 `tollgated` draws the grant down by the difference between reports, as it
-would with its own adapter. When the grant runs out, `set(02ab…, 0)` closes
+would with a built-in enforcer. When the grant runs out, `set(02ab…, 0)` closes
 all four again.
 
 **A conflict.** A second key, `03cd…`, also connects from `192.168.1.23`. It
@@ -589,19 +627,29 @@ It is an **exit**: other mesh nodes reach the internet through it.
 direct neighbor or many hops away. It is not a neighbor paying for forwarding.
 Nothing is sold per link here. The exit's traffic to the payer crosses
 whatever mesh path FIPS picks, and any paid peering along that path is a
-separate matter, handled by the built-in `fips` adapter.
+separate matter, handled by the built-in `fips` enforcer.
 
 The enforcer is the proxy itself, paired with the instance
 `tollgate-fips-exit`. FIPS tells the proxy which address a connection came
-from. The proxy wants to know which key.
+from. The proxy wants to know which key. The instance's config says:
+
+```yaml
+enforcer:
+  kind: external
+  socket: "/run/tollgate-fips-exit/enforcer.sock"
+  identity: pubkey
+```
+
+The node runs FIPS and `tollgated` listens on its `fips0` address, so `pubkey`
+is allowed. The enforcer connects and agrees:
 
 ```
-hello(1, identify: fips, delegated: false)
+hello(1, identity: pubkey, delegated: false)
 ```
 
-`tollgated` runs in `Identify::Fips` mode. A peer whose connection does not
-come from the FIPS address of the key it announces is dropped before a session
-exists. `tollgated` sends its full state.
+A peer whose connection does not come from the FIPS address of the key it
+announces is dropped before a session exists. `tollgated` sends its full
+state.
 
 A mesh node holds a key whose 32-byte form is `3bf0c63f…aefa459d`. As a payer,
 the key travels in its 33-byte form, with the parity byte in front:
@@ -615,7 +663,7 @@ tollgated → enforcer   set(023bf0c63f…aefa459d, 0)
 ```
 
 The subject is the 32 bytes of the key and nothing else. The enforcer reads
-them as a key because its mode is `fips`. Payer and subject are the same key
+them as a key because its identity is `pubkey`. Payer and subject are the same key
 here, but `tollgated` still says so explicitly: the enforcer infers nothing
 from the payer.
 
@@ -643,12 +691,12 @@ the bytes each one carries, and reports the sums as `counters`. A mesh node
 the operator does not charge would get `set(…, null)`: open, unshaped, and
 still counted.
 
-**A mismatch.** Take the same enforcer, but with `tollgated` configured to pin
-`forwarding.identify: claimed`. The `hello` asks for `fips`, so `tollgated`
-exits at startup and names both modes. Without that check, the instance would
-believe whatever key a peer claimed and bind its source address. The
-enforcer, which reads its subjects as proven keys, would be handed bytes that
-are neither.
+**A mismatch.** Take the same enforcer, but with the instance's config saying
+`identity: address`. The `hello` states `pubkey`, so `tollgated` exits at
+startup and names both: the config says `address`, the enforcer says
+`pubkey`. Without that check, the instance would check no keys and bind source
+addresses. The enforcer, which reads its subjects as proven keys, would be
+handed bytes that are neither.
 
 ---
 
@@ -661,7 +709,11 @@ are neither.
 | Outage cost | Closing everything on disconnect makes a paying peer lose the rest of its current grant. A grace period would instead carry peers unmetered for as long as it lasts |
 | The delegating client's request | Its form on the control socket is left to the control socket |
 | Delegated subject forms | Agreed per deployment between the delegating client and the enforcer; `tollgated` never reads them |
-| Moving built-in adapters behind the socket | The built-in `nftables` LAN adapter could become an enforcer program. Not planned; nothing requires it |
+| Moving built-in enforcers behind the socket | The built-in `ip` enforcer could become an external one. Not planned; nothing requires it |
+| Keys above 255 | The encoding rules say message keys are integers `0..255`, but every message in the schema ends in `* uint => any`, which admits any unsigned key. Either the rule or the schema has to give way: is a key above 255 a protocol error, or skipped like any unknown key? |
+| Counters after `remove` | Whether a payer's counts start again from zero when it is removed and later bound again on the same connection. The implementation assumes they do |
+| A `hello` version `tollgated` does not speak | Whether this is a startup refusal, like an identity mismatch, or a closed connection that `tollgated` retries. The implementation retries |
+| Who sets the counters interval | `counters` are sent once a second by default. Whether the enforcer picks the interval, or `tollgated` asks for one, is not yet settled |
 
 ---
 
@@ -669,11 +721,12 @@ are neither.
 
 | Decision | Resolution | Rationale |
 |---|---|---|
-| Name | The enforcer protocol; the external program is the **enforcer** | It names the role. `tollgated` decides who has paid and at what rate; the enforcer applies that to its own traffic and reports the counts. The first name, "gate", clashed with the product name TollGate |
+| Name | Whatever applies `tollgated`'s decisions is an **enforcer**: built into `tollgated` (`ip`, `fips`, `loopback`) or a separate program (`external`) speaking the **enforcer protocol**. The trait they share is `Enforcer` (`ResourceAdapter` in the code today) | It names the role. `tollgated` decides who has paid and at what rate; the enforcer applies that to its own traffic and reports the counts. One word for built-in and external alike, because they do the same job. The first name, "gate", clashed with the product name TollGate, and "resource adapter" said nothing about what it does |
+| Config section | `enforcer:`, with `kind: ip \| fips \| external \| loopback`, replacing `forwarding:` and its `mode` | The section configures what enforces, so it is named for that. `forwarding` named one resource. `nftables` became `ip`: named for what it enforces, not for the tool it uses |
 | Who is who | Payer, subject and binding kept apart; `peer` always means the payer | A proxy pays for a phone, and an allowlist has no payer. Treating payer and subject as one makes both impossible, and lets a key stand in for an address it never proved |
 | Subject from payer | Never guessed; every subject arrives in a binding | Payer and subject need not be the same party |
-| Subject kinds | None on the wire. A subject is bytes whose form the Identify mode fixes: under `fips` the 32-byte key, under `claimed` the source address in 16 bytes, with IPv4 in its IPv6 form. Delegated subjects are bytes too, passed on untouched and only compared for equality | Each `tollgated` is a named instance paired with one enforcer for one task, configured together by the operator, so the pairing already says what a subject is. A kind field would only repeat it. One encoding per address makes equal subjects equal bytes. The trade-off: one enforcer cannot ask `tollgated` for several kinds of subject for the same peer. Working out the others — a MAC from an address, an `fd` address from a key — is the enforcer's job |
-| Trust on the wire | No trust grades. `hello` states the Identify mode the enforcer requires and whether it accepts delegated bindings; a subject carries only a `delegated` flag | The deployment already fixes what trust there is: FIPS checks keys, a LAN address can be faked, a delegated binding is the local client's word. Per-subject grades would repeat that without letting an enforcer do anything the mode and the flag do not. A field nobody can act on invites an enforcer to trust it |
+| Subject kinds | None on the wire. A subject is bytes whose form the identity setting fixes: under `pubkey` the 32-byte key, under `address` the source address in 16 bytes, with IPv4 in its IPv6 form. Delegated subjects are bytes too, passed on untouched and only compared for equality | Each `tollgated` is a named instance paired with one enforcer for one task, configured together by the operator, so the pairing already says what a subject is. A kind field would only repeat it. One encoding per address makes equal subjects equal bytes. The trade-off: one enforcer cannot ask `tollgated` for several kinds of subject for the same peer. Working out the others — a MAC from an address, an `fd` address from a key — is the enforcer's job |
+| Trust on the wire | No trust grades. `hello` states the identity the enforcer was built for and whether it accepts delegated bindings; a subject carries only a `delegated` flag | The deployment already fixes what trust there is: FIPS checks keys, a LAN address can be faked, a delegated binding is the local client's word. Per-subject grades would repeat that without letting an enforcer do anything the identity and the flag do not. A field nobody can act on invites an enforcer to trust it |
 | Payer state | One `set(peer, rate)`: `0` closed, a rate open and shaped, `null` open and unshaped. Access levels stay in `tollgated` | Open or closed, and how fast, is all an enforcer applies, and core's rate already says both. One message means no moment open at a rate nobody bought |
 | Transport | Unix socket; the enforcer listens, `tollgated` connects and reconnects | The enforcer owns the traffic and may start first or outlive `tollgated`. The socket's file permissions decide who may connect |
 | Encoding | CBOR with the wire protocol's 2-byte framing; types in `tollgate-protocol` | One codec and one framing in the codebase. A Rust enforcer links the types, even without the standard library; others get a CDDL schema |
@@ -682,9 +735,11 @@ are neither.
 | Startup | The enforcer is closed until told otherwise | Nobody is carried before someone is metering them |
 | Disconnect | The enforcer goes back to closed; `tollgated` resends the full state, and sells nothing in the meantime | Nothing to reconcile, and nothing carried that nobody meters. Costs a paying peer at most its current grant |
 | Counters | Running totals per payer for the life of the connection, sent every tick. On a reconnect `tollgated` adds the previous connection's last totals | A running total survives a lost report. Carrying totals across a reconnect keeps core's totals from going backwards |
-| Identify | Required by the enforcer's `hello`; an enforcer that matches keys requires `fips`. A pinned mode the `hello` contradicts, or a reconnecting enforcer changing mode, is refused | With no kinds on the wire, it is the one check that the two ends of a pairing agree. Believing a claimed key while the enforcer takes its subjects as proven keys opens a paying peer's traffic to anyone |
-| FIPS addresses | Never a subject. `tollgated` binds the key; the enforcer works out the address and matches it on `fips0` | Under `Identify::Fips` what is proven is the key, and the address is a hash of it. `tollgated` never has an address without its key, so binding the address too would only repeat what the enforcer can compute |
-| Scope | Enforcers sell a service this node delivers; paid FIPS peer links stay on the built-in `fips` adapter | Traffic passing between neighbors is controlled by the FIPS node itself, neighbor by neighbor. An enforcer sells what its own traffic delivers, to any payer that can reach this node |
+| Identity | One setting, `enforcer.identity: pubkey \| address`. Defaults: `address` for `ip` and `loopback`, `pubkey` for `fips`; `external` must write it. `pubkey` needs a network that proves keys, today FIPS, or `tollgated` refuses to start | Who a peer is decides what is bound, so it belongs in the config with the rest of the pairing. An external enforcer could match either, so it gets no default. Believing an announced key while the enforcer takes its subjects as proven keys opens a paying peer's traffic to anyone; so `pubkey` never means an announced key |
+| Identity names | `pubkey` and `address`, not `fips` and `claimed` | Named for what a peer is. FIPS is the only network that proves keys today, but a tunnel keyed by the TollGate key could too, and should not need a setting named after FIPS. `address` says what is actually trusted, where `claimed` said only what was not |
+| The `hello` identity | A check only. If it differs from the config, `tollgated` refuses to start and names both; a reconnecting enforcer that changes it is refused | With no kinds on the wire, it is the one check that the two ends of a pairing agree. It replaces an earlier design where the enforcer chose the identity and the operator could optionally pin it. Two places deciding one thing meant reading both to know which applied, and an unpinned instance trusted whatever the enforcer asked for. Now nothing is negotiated |
+| FIPS addresses | Never a subject. `tollgated` binds the key; the enforcer works out the address and matches it on `fips0` | Under `pubkey` what is proven is the key, and the address is a hash of it. `tollgated` never has an address without its key, so binding the address too would only repeat what the enforcer can compute |
+| Scope | External enforcers sell a service this node delivers; paid FIPS peer links stay on the built-in `fips` enforcer | Traffic passing between neighbors is controlled by the FIPS node itself, neighbor by neighbor. An enforcer sells what its own traffic delivers, to any payer that can reach this node |
 | Deriving subjects | The enforcer's job | `tollgated` stays free of the details of every kind of traffic |
 | Delegated bindings | Through `tollgated`, flagged, refusable in `hello` | One party tells the enforcer who has paid. An enforcer that takes no third party's word says so once |
 | Conflicts | Placeholder: refuse the second binding, keep it closed, report it | If the latest binding won, one party could ride on another's payment. The full rule is open |

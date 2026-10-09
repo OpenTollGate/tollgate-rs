@@ -63,7 +63,7 @@ private one.
 
 ## tollgated
 
-The protocol daemon: `tollgate-core` plus a `ResourceAdapter` and a Spilman
+The protocol daemon: `tollgate-core` plus an enforcer and a Spilman
 `ChannelBackend` ([tollgate-intro.md](tollgate-intro.md#architecture)).
 
 **It holds no money and no stock of vouchers.** What it keeps on disk is

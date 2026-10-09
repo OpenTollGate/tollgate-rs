@@ -53,7 +53,7 @@ On OpenWrt, the primary config path is `/etc/tollgate/tollgate.yaml`. UCI integr
 ```yaml
 identity:    # Node identity (keypair)
 network:     # Where the TollGate protocol listens
-forwarding:  # What actually delivers the resource: loopback, nftables or fips
+enforcer:    # What enforces delivery: loopback, ip, fips or external
 mint:        # Where this node's mint (mintd) is, and what it issues
 merchant:    # Where merchantd is: upstream funding and foreign proceeds
 vouchers:    # Which mints this node takes payment in, and per-peer traffic terms
@@ -90,28 +90,52 @@ network:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `listen` | `"0.0.0.0:4747"` | Control-plane listen address. The data plane listens on the next port up. Under `forwarding.mode: fips` this must be somewhere mesh peers reach — the node's own `fips0` address, or `[::]` — because a connection from anywhere else cannot prove whose key it announces and is refused |
+| `listen` | `"0.0.0.0:4747"` | Control-plane listen address. The data plane listens on the next port up. Under `enforcer.identity: pubkey` this must be somewhere mesh peers reach — the node's own `fips0` address, or `[::]` — because a connection from anywhere else cannot prove whose key it announces and is refused |
 
 ---
 
-## Forwarding
+## Enforcer
 
-What actually delivers the resource, and so where access and rate are enforced ([peering-ip.md](../network-peering/peering-ip.md), [peering-fips.md](../network-peering/peering-fips.md)).
+The **enforcer** is what applies `tollgated`'s decisions to real traffic: it lets a paying peer's traffic through, shapes it to the rate it bought, and counts what it carried. Three enforcers are built into `tollgated`. The fourth kind, `external`, is a separate program that `tollgated` drives over a local socket ([tollgate-enforcer-protocol.md](tollgate-enforcer-protocol.md)). For the built-in ones, see [peering-ip.md](../network-peering/peering-ip.md) and [peering-fips.md](../network-peering/peering-fips.md).
 
 ```yaml
-forwarding:
-  mode: loopback              # loopback, nftables or fips
-  interface: "eth0"           # nftables only: the interface facing the peers
+enforcer:
+  kind: loopback              # loopback, ip, fips or external
+  interface: "eth0"           # ip only: the interface facing the peers
   fips_socket: ""             # fips only: the FIPS control socket; empty = FIPS's own default
+  socket: ""                  # external only: the enforcer's Unix socket (required there)
+  identity: null              # pubkey or address; null = the kind's default
 ```
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `mode` | `loopback` | `loopback` shapes and meters a socket of its own and forwards nobody's traffic — for demos and tests, and it runs anywhere. `nftables` gates and shapes the kernel's forwarding path, which is what sells transit; it needs Linux with `CAP_NET_ADMIN`. `fips` sells transit across a FIPS mesh, leaving enforcement to the FIPS node over its control socket — and, because a mesh address names a key, it is the only mode that checks a peer's announced identity rather than believing it |
-| `interface` | `"eth0"` | Where the peers' `tc` classes live. Only `nftables` uses it |
+| `kind` | `loopback` | `loopback` shapes and meters a socket of its own and forwards nobody's traffic — for demos and tests, and it runs anywhere. `ip` gates and shapes the kernel's forwarding path with nftables and `tc`, which is what sells transit; it needs Linux with `CAP_NET_ADMIN`. `fips` sells transit across a FIPS mesh, leaving enforcement to the FIPS node over its control socket. `external` hands enforcement to a separate program, over the enforcer protocol |
+| `interface` | `"eth0"` | Where the peers' `tc` classes live. Only `ip` uses it |
 | `fips_socket` | *(FIPS's default path)* | Only `fips` uses it |
+| `socket` | *(none)* | The Unix socket the external enforcer listens on. Only `external` uses it, and there it is required |
+| `identity` | *(by kind, below)* | Who a connecting peer is: `pubkey` or `address` |
 
 The default is `loopback` because it runs everywhere and gates nothing it does not own: a node that installed firewall rules because a config line was missing would be a nasty surprise.
+
+### Identity of a Peer
+
+Every peer announces a public key when it connects. `identity` decides what that key is worth, and so who the peer is:
+
+- **`pubkey`**: the peer is its public key, and the network the connection came over proves it — only whoever holds the key could have made that connection. Today only FIPS proves keys. `tollgated` refuses to start with `pubkey` unless its peers arrive over FIPS, and drops any connection that does not come from the FIPS address of the key it announces. `pubkey` never means "the key the peer announced".
+- **`address`**: the peer is the address its connection came from. Whoever uses that address is that payer. The key it announces is not checked; it only names the payer's account.
+
+The name `pubkey` is not tied to FIPS on purpose. Another network that proves keys, such as a tunnel keyed by the TollGate key, could use it later.
+
+| `kind` | Default `identity` |
+|--------|--------------------|
+| `ip` | `address` |
+| `fips` | `pubkey` |
+| `loopback` | `address` |
+| `external` | *(none: it must be written)* |
+
+`external` has no default because `tollgated` cannot tell what the external enforcer matches, or which network its peers arrive over. The enforcer states the identity it was built for when it connects. That is only a check: if it differs from this setting, `tollgated` refuses to start and names both ([tollgate-enforcer-protocol.md](tollgate-enforcer-protocol.md#identity)).
+
+This is not the top-level [`identity`](#identity) block, which holds this node's own key.
 
 ---
 

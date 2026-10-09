@@ -1,6 +1,6 @@
 # TollGate Peering: Traditional IP Networks
 
-This document describes how `tollgate-net` is realized on a traditional IP network: the topology assumptions, how peers discover each other, the authentication choices available to the operator, and the IP-specific `ResourceAdapter` implementation (firewall rules and traffic accounting). The wire-level TollGate protocol and the resource-agnostic core logic are unchanged from any other deployment — this document covers only what is IP-specific.
+This document describes how `tollgate-net` is realized on a traditional IP network: the topology assumptions, how peers discover each other, the authentication choices available to the operator, and the built-in `ip` enforcer (firewall rules and traffic accounting). The wire-level TollGate protocol and the resource-agnostic core logic are unchanged from any other deployment — this document covers only what is IP-specific.
 
 ---
 
@@ -109,7 +109,7 @@ peers:
 
 Static peers are attempted on startup and reconnected on failure. This is the right answer for fixed infrastructure peering (a relay that always pays a known upstream gateway) and for multi-hop topologies where dynamic probing on a local subnet wouldn't reach the intended peer.
 
-Each peer relationship is independent. There is no concept of "upstream" or "downstream" at the TollGate level — each side pays for what it receives, and which way the money mostly flows follows from who receives more. The one place the distinction exists is the kernel adapter's counters (see [Per-Peer Metering Counters](#per-peer-metering-counters)), and it reads it from the routing table rather than from the protocol.
+Each peer relationship is independent. There is no concept of "upstream" or "downstream" at the TollGate level — each side pays for what it receives, and which way the money mostly flows follows from who receives more. The one place the distinction exists is the `ip` enforcer's counters (see [Per-Peer Metering Counters](#per-peer-metering-counters)), and it reads it from the routing table rather than from the protocol.
 
 ---
 
@@ -120,17 +120,17 @@ TollGate identifies peers by pubkey. The Announce message carries the peer's com
 **Authenticating that pubkey** — proving the peer holds the matching private key — is platform-dependent:
 
 - **On FIPS** (for reference): the pubkey is authenticated by the Noise IK handshake before TollGate sees the peer. Identity is cryptographically tied to the pubkey by the network layer; the peer cannot connect without it.
-- **On IP**: the pubkey in the Announce is self-declared, and the delivery path gates by IP address. **Impersonation cannot be reliably prevented on a plain IP network.**
+- **On IP**: the pubkey in the Announce is self-declared, and the delivery path gates by IP address. **Impersonation cannot be reliably prevented on a plain IP network.** This is why the `ip` enforcer's identity is `address` ([tollgate-configuration.md](../core/tollgate-configuration.md#identity-of-a-peer)): the peer is the address its connection came from, and the key it announces only names its account.
 
 What that exposes: an attacker that announces a paying peer's pubkey, or takes over its IP address, can draw on the service that peer paid for. What it does not expose: the attacker cannot spend or redirect the victim's money, because every balance update needs the channel funder's private-key signature. The loss is bounded by the grant in force — service stolen, not funds. Two sessions claiming the same pubkey collide, and an implementation should refuse the second.
 
-For open-hotspot deployments, where every peer is anonymous and the only requirement is "they paid," that bound is the protection. Where it matters who the peer is, the deployment should run over a network that authenticates peers — FIPS does, and so do WireGuard or mTLS tunnels. Binding the TollGate pubkey to such a layer (challenge-response at session setup, or the TollGate key doubling as the tunnel key) is **future work**.
+For open-hotspot deployments, where every peer is anonymous and the only requirement is "they paid," that bound is the protection. Where it matters who the peer is, the deployment should run over a network that authenticates peers — FIPS does, and so do WireGuard or mTLS tunnels. Binding the TollGate pubkey to such a layer (challenge-response at session setup, or the TollGate key doubling as the tunnel key) is **future work**. Once it exists, such a deployment can use `identity: pubkey`, which is why that setting is not named after FIPS.
 
 ### MAC spoofing on IP
 
 On a shared L2 segment (Ethernet, WiFi without WPA), MAC addresses are trivially spoofable. This is hard to prevent without an authentication layer below — WPA-PSK / WPA-EAP at L2, or WireGuard / IPsec at L3. For TollGate this matters mostly during *discovery and probing*: a spoofed MAC can make a host look like a "new device" to ARP-watch hooks, causing repeated probe attempts. It does not weaken peer identity itself (pubkey-bound, not MAC-bound).
 
-It does reach metering. An upstream's received bytes are counted by its MAC, so a host on the same segment that forges that MAC has what it sends through us counted as delivered by the upstream: the node over-reads what it drew and buys more than it needed. A customer cannot escape its own metering this way, since it is still counted by its IP; forging the IP as well is the address takeover above. The adapter trusts the segment's link addresses exactly as far as it trusts its IP addresses, and the same remedies (WPA, or a tunnel per peer) apply.
+It does reach metering. An upstream's received bytes are counted by its MAC, so a host on the same segment that forges that MAC has what it sends through us counted as delivered by the upstream: the node over-reads what it drew and buys more than it needed. A customer cannot escape its own metering this way, since it is still counted by its IP; forging the IP as well is the address takeover above. The `ip` enforcer trusts the segment's link addresses exactly as far as it trusts its IP addresses, and the same remedies (WPA, or a tunnel per peer) apply.
 
 ---
 
@@ -149,9 +149,9 @@ For open hotspots, plain TCP is functional but leaves every payment visible to a
 
 ---
 
-## ResourceAdapter Implementation
+## The `ip` Enforcer
 
-`tollgate-net` provides a `ResourceAdapter` implementation that hooks `tollgate-core` into the kernel networking stack. It has four responsibilities: gate forwarding via firewall rules, **shape each peer to the rate it bought**, expose per-peer traffic counters, and (optionally) supply peer metrics for operator visibility.
+`tollgate-net` provides a built-in enforcer, `enforcer.kind: ip`, that hooks `tollgate-core` into the kernel networking stack. It has four responsibilities: gate forwarding via firewall rules, **shape each peer to the rate it bought**, expose per-peer traffic counters, and (optionally) supply peer metrics for operator visibility.
 
 Access and rate are **both per peer, and orthogonal**. A grant buys a rate, so a binary gate cannot express what was sold; and an unpaid peer is not simply blocked, because the minimum flow allowance is itself a rate. Every peer therefore carries two settings at all times.
 
@@ -186,8 +186,8 @@ tc filter replace dev eth0 parent 1: protocol ip prio 1 \
 Four properties the shaper has to have, each of which follows from the payment model rather than from networking practice:
 
 - **The rate changes often.** A payer may buy as often as `min_window_ms` allows — 200 ms by default — and a grant takes effect on arrival with no acknowledgement. Updating a class is cheap; tearing down and rebuilding one is not, so the class is created once per peer and only its rate is replaced.
-- **Burst stays tiny — about 10 ms of the rate.** Capacity left unused early is *not* banked: a peer that idles and then bursts is precisely what grants exist to prevent. Burst is also permission to spend the grant ahead of its window, so a generous one makes the grant lapse early and the transfer it carries stall. It must still pass at least one full-sized packet per timer tick. This figure is for the kernel path (`nftables` + `tc`). The `loopback` adapter, which shapes TollGate's own generated traffic in userspace rather than forwarded packets, holds 250 ms instead: its writer is a task that can wake tens of milliseconds late, and a 10 ms bucket would under-deliver what was bought.
-- **The allowance is the floor.** A peer with no live grant falls to the minimum flow allowance. The floor is applied by `tollgate-core` before the adapter sees the number, so the adapter always receives a rate it can simply apply. With the allowance at zero the peer's forwarding is blocked instead — and the TopUp that revives it still gets through, because traffic to the node itself is never shaped or blocked.
+- **Burst stays tiny — about 10 ms of the rate.** Capacity left unused early is *not* banked: a peer that idles and then bursts is precisely what grants exist to prevent. Burst is also permission to spend the grant ahead of its window, so a generous one makes the grant lapse early and the transfer it carries stall. It must still pass at least one full-sized packet per timer tick. This figure is for the kernel path (`nftables` + `tc`). The `loopback` enforcer, which shapes TollGate's own generated traffic in userspace rather than forwarded packets, holds 250 ms instead: its writer is a task that can wake tens of milliseconds late, and a 10 ms bucket would under-deliver what was bought.
+- **The allowance is the floor.** A peer with no live grant falls to the minimum flow allowance. The floor is applied by `tollgate-core` before the enforcer sees the number, so the enforcer always receives a rate it can simply apply. With the allowance at zero the peer's forwarding is blocked instead — and the TopUp that revives it still gets through, because traffic to the node itself is never shaped or blocked.
 - **Only the peer's download is shaped.** Its upload is charged through the `received_multiplier`, which drains that peer's own grant faster rather than capping its ingress. A peer that pushes harder exhausts its grant sooner and falls to the allowance — no ingress policer is involved.
 
 ### Per-Peer Metering Counters
@@ -221,7 +221,7 @@ A peer is counted as an upstream exactly when some route (any table, including e
 
 A peer is registered by the IPv4 address its session comes from. A customer on the LAN, though, is a *device*, and a dual-stack device sends much of its traffic over IPv6, from addresses it chooses itself — a stable one and one or more privacy addresses per prefix, the latter replaced daily. Gated, shaped and counted by the IPv4 address alone, all of that would be forwarded free: an unpaid device would route around the gate, and a paying one would be neither shaped nor metered on half its traffic.
 
-So a customer that is **on the link** is tied to its **MAC**, and through the MAC to its IPv6 addresses — and its IPv6 is charged to the same grant, the same class and the same two counters as its IPv4. The adapter learns all of it from the kernel on the refresh that already tells customers from upstreams; **the host registers the IPv4 address as before and no new interface is needed**:
+So a customer that is **on the link** is tied to its **MAC**, and through the MAC to its IPv6 addresses — and its IPv6 is charged to the same grant, the same class and the same two counters as its IPv4. The enforcer learns all of it from the kernel on the refresh that already tells customers from upstreams; **the host registers the IPv4 address as before and no new interface is needed**:
 
 1. The MAC is the IPv4 neighbour entry of the peer's registered address. No entry — a peer that is not on the link — means no link, and nothing below applies. An upstream never gets one: its MAC is the source of everything it forwards to us.
 2. The IPv6 addresses are the IPv6 neighbour entries with that MAC, global and unique-local only (link-local is never forwarded), at most 16 per peer so a device inventing addresses cannot grow the sets without bound.

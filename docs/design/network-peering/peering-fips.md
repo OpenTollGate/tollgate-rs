@@ -1,6 +1,6 @@
 # TollGate Peering: FIPS Mesh Networks
 
-This document describes how `tollgate-net` integrates with [FIPS](https://github.com/jmcorgan/fips) (Free Internetworking Peering System) — the **ideal** deployment target. FIPS provides everything TollGate wants from a network layer: cryptographic peer authentication, encrypted forwarding, self-organizing mesh routing, and rich per-link metrics. The doc covers the FIPS-specific `ResourceAdapter` implementation, how `tollgate-net` hooks into FIPS internals, and what FIPS modifications are required.
+This document describes how `tollgate-net` integrates with [FIPS](https://github.com/jmcorgan/fips) (Free Internetworking Peering System) — the **ideal** deployment target. FIPS provides everything TollGate wants from a network layer: cryptographic peer authentication, encrypted forwarding, self-organizing mesh routing, and rich per-link metrics. The doc covers the built-in `fips` enforcer, how `tollgate-net` hooks into FIPS internals, and what FIPS modifications are required.
 
 ## Overview
 
@@ -33,7 +33,7 @@ TollGate hooks into FIPS at five points:
   │  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  │
   │       ①│              ②│             ③│        │
   │  ┌─────┴───────────────┴──────────────┴─────┐  │
-  │  │       TollGate FIPS Adapter              │  │
+  │  │       TollGate FIPS Enforcer             │  │
   │  └─────┬────────────────────────────┬───────┘  │
   │       ④│                           ⑤│          │
   │  ┌─────┴─────┐              ┌──────┴──────┐   │
@@ -94,7 +94,7 @@ TollGate exposes FIPS MMP metrics through `peer_metrics()`. They are **not** inp
 | `jitter` | Service quality indicator |
 | Trend indicators | Predict near-future conditions |
 
-The adapter subscribes to MMP metric updates over the FIPS control socket and exposes them via `peer_metrics()`. The subscription pushes per-peer state changes; `tollgate-net` reads the latest cached value when the operator's tools ask.
+The `fips` enforcer subscribes to MMP metric updates over the FIPS control socket and exposes them via `peer_metrics()`. The subscription pushes per-peer state changes; `tollgate-net` reads the latest cached value when the operator's tools ask.
 
 ### 4. Peer Lifecycle Events
 
@@ -117,14 +117,14 @@ This approach works today without any FIPS modifications to the session layer.
 
 ---
 
-## ResourceAdapter Implementation
+## The `fips` Enforcer
 
 ### set_peer_access()
 
 Maps TollGate access levels to FIPS forwarding policy and bloom filter state. The level alone does not decide it: a peer is admitted exactly when core carries it — `AccessLevel::carried(rate)`, the level together with the rate core shaped it to — so a `None` peer on the allowance is admitted at that rate, and only a zero allowance restricts it:
 
 ```rust
-fn set_peer_access(&self, peer: &Pubkey, access: AccessLevel, rate: u64) -> Result<(), AdapterError> {
+fn set_peer_access(&self, peer: &Pubkey, access: AccessLevel, rate: u64) -> Result<(), EnforcerError> {
     let node_addr = NodeAddr::from_pubkey(peer);
 
     if access.carried(rate) {
@@ -144,10 +144,10 @@ FIPS enforces the policy in its existing forwarding path. `LocalOnly` means only
 
 ### subscribe_meter()
 
-FIPS livestreams per-peer rx/tx byte counters over the control socket. The adapter subscribes once per peer and wraps the stream as a `MeterStream`:
+FIPS livestreams per-peer rx/tx byte counters over the control socket. The enforcer subscribes once per peer and wraps the stream as a `MeterStream`:
 
 ```rust
-fn subscribe_meter(&self, peer: &Pubkey) -> Result<MeterStream, AdapterError> {
+fn subscribe_meter(&self, peer: &Pubkey) -> Result<MeterStream, EnforcerError> {
     let node_addr = NodeAddr::from_pubkey(peer);
 
     // Subscribe to FIPS's per-peer counter livestream over the control socket.
@@ -192,17 +192,17 @@ FIPS peers are identified by:
 - **node_addr**: SHA-256 hash of public key, truncated to 16 bytes — used in packet headers and bloom filters
 - **FIPS address**: `0xfd` followed by the first 15 bytes of the node_addr — the peer's IPv6 address on `fips0`
 
-The adapter maps between them as needed. TollGate protocol uses pubkey; FIPS forwarding uses node_addr; the control plane arrives from the FIPS address. All three mappings are deterministic and derived locally (`crates/tollgate-net/src/fips.rs`), so nothing has to be asked of the daemon.
+The enforcer maps between them as needed. TollGate protocol uses pubkey; FIPS forwarding uses node_addr; the control plane arrives from the FIPS address. All three mappings are deterministic and derived locally (`crates/tollgate-net/src/fips.rs`), so nothing has to be asked of the daemon.
 
 ### Verifying the peer
 
-An `Announce` is unauthenticated — it is the first thing a stranger says. On plain IP there is nothing to check it against, and an adapter that binds pubkey to address does so on the peer's own say-so: claim a paying peer's key and your address rides their grant.
+An `Announce` is unauthenticated — it is the first thing a stranger says. On plain IP there is nothing to check it against, and an enforcer that binds pubkey to address does so on the peer's own say-so: claim a paying peer's key and your address rides their grant.
 
-A FIPS address is a commitment to a key. The mesh routes to it only for the node that completed the Noise IK handshake for that key, so an impostor cannot receive at the address it would have to claim. `forwarding.mode: fips` therefore turns on the check (`wire::Identify::Fips`): every control connection, accepted or dialled, must come from the FIPS address of the key it announces, or it is dropped before a session exists.
+A FIPS address is a commitment to a key. The mesh routes to it only for the node that completed the Noise IK handshake for that key, so an impostor cannot receive at the address it would have to claim. `enforcer.identity: pubkey`, the default under `enforcer.kind: fips`, therefore turns on the check: every control connection, accepted or dialled, must come from the FIPS address of the key it announces, or it is dropped before a session exists.
 
 Two consequences worth stating:
 
-- The control plane has to be bound where mesh peers reach it — `network.listen` on the node's `fips0` address, or on `[::]`. A connection arriving on plain IPv4 is refused under this mode rather than waved through, which is the point: otherwise a node that also answered on its uplink would have a way in that skips the handshake.
+- The control plane has to be bound where mesh peers reach it — `network.listen` on the node's `fips0` address, or on `[::]`. A connection arriving on plain IPv4 is refused under `pubkey` rather than waved through, which is the point: otherwise a node that also answered on its uplink would have a way in that skips the handshake.
 - `tollgated` and `fipsd` on the same node must run the same key. The check compares a TollGate pubkey against a FIPS address; if the two daemons hold different identities, every peer's derived address is somebody else's.
 
 ---
@@ -262,7 +262,7 @@ The following FIPS modifications are required for TollGate integration. Full det
 | Metrics | MMP (SRTT, loss, ETX, goodput, jitter) — control-socket subscription | None / coarse |
 | Peer discovery | Automatic (FIPS mesh protocol) | Dynamic probing / static |
 | Authentication | Noise IK (automatic) | Unauthenticated (default) |
-| Announced identity | Checked against the address it arrives from | Taken on trust |
+| Announced identity | Checked against the address it arrives from (`identity: pubkey`) | Taken on trust; the peer is its address (`identity: address`) |
 | Message transport | Raw TCP over IPv6 adapter (initially), FSP port (future) | Raw TCP |
 | Control plane overhead | Negligible; livestreamed counters | Per-peer firewall rule installs/removes |
 
