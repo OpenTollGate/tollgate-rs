@@ -67,7 +67,7 @@ A peer arrives already holding vouchers for the node it wants service from, or i
 
 2. **Buying capacity**: The payer sends a **TopUp** — a signed channel update carrying a cumulative total, and a **window** to spend the new units in. Whatever is left at the end of the window is forfeit. What else the TopUp does depends on the provider's **accounting mode**, which the provider names in its Offer ([tollgate-vouchers.md](tollgate-vouchers.md#two-accounting-modes)):
    - **Superseding**, the default: the rate is the units divided by the window. A new grant replaces the one in force, so raising the rate mid-window forfeits the remainder; that is what makes the product bandwidth rather than a stored quantity of bytes. Windows are seconds long. Selling time — an hour at a fixed speed — is this mode with the rate held steady.
-   - **Accumulative**: the units add to what is left, a running budget that only traffic draws down, and the window — weeks long here — restarts from the new purchase. Units not used today are still there tomorrow, until the deadline. The provider caps each peer's speed and how much it may hold, because this mode lets a buyer stockpile ([tollgate-hazards.md](tollgate-hazards.md#when-the-window-can-be-long)).
+   - **Accumulative**: the units add to what is left, a running budget that only traffic draws down, and the window — weeks long here — restarts from the new purchase. Units not used today are still there tomorrow, until the deadline. The provider caps each peer's speed, because this mode lets a buyer stockpile ([tollgate-hazards.md](tollgate-hazards.md#when-the-window-can-be-long)).
 
    Nothing is acknowledged, so a payer can buy and use what it bought in the same breath.
 
@@ -219,7 +219,7 @@ The three daemons normally run on one machine and talk over local sockets; why t
 
 ## What a Node Advertises
 
-A node's offer is short: the mints whose vouchers it will take, most preferred first; the unit it denominates in; the range of grant windows it will accept; its accounting mode, with the speed and budget limits it applies in accumulative mode; and one unsigned multiplier saying how welcome the peer's uploads are.
+A node's offer is short: the mints whose vouchers it will take, most preferred first; the unit it denominates in; the range of grant windows it will accept; its accounting mode, with the speed limit and the shortest gap between purchases it applies in accumulative mode; and one unsigned multiplier saying how welcome the peer's uploads are.
 
 There are no products, no rate tables, and no price anywhere. Delivery costs one voucher per unit, and the peer already holds the vouchers.
 
@@ -245,7 +245,7 @@ TollGate assumes that peers are authenticated by the underlying network (FIPS No
 
 **Under-delivery**: A provider takes a grant and delivers less than it sold. The payer detects this on its own — it knows what it bought and what arrived, both from local counters — and feeds it into which peers it buys from and how large a grant it risks. What it cannot do is prove it to a third party, so a provider skimming from every peer stays invisible outside those peerings. Bounded by the size of one grant.
 
-**Rugpull (receiver)**: The receiver takes a grant and provides nothing. Bounded by the window the payer chose — maximum exposure is one grant's worth, and short windows make it small. In accumulative mode the exposure is the payer's unspent budget, bounded by the provider's `max_budget`.
+**Rugpull (receiver)**: The receiver takes a grant and provides nothing. Bounded by the window the payer chose — maximum exposure is one grant's worth, and short windows make it small. In accumulative mode the exposure is the payer's unspent budget, as large as the payer chose to make it.
 
 **Rugpull (sender)**: The sender stops paying and expects continued service. Mitigated by access control — delivery stops when payment stops.
 

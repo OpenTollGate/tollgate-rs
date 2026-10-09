@@ -291,7 +291,6 @@ peer's outgoing traffic is.
   7: [                             // array, optional — accumulative terms;
                                    //   present exactly when field 6 is
        <min_topup_gap_ms>,         //   u64 — shortest time between two TopUps
-       <max_budget>,               //   u64 | null — most units you may hold unspent
        <rate_cap>                  //   u64 | null — fastest I carry you, units/second
      ],
 }
@@ -319,13 +318,12 @@ mode it is offered buys nothing, or sends Disconnect.
 Field 7 carries what accumulative mode needs and superseding does not. An
 Offer with field 6 and no field 7, or field 7 and no field 6, is malformed.
 
-- `min_topup_gap_ms` caps how often a TopUp may arrive. In superseding mode a
-  payer that buys too often throws away what it bought, so `min_window_ms` is
-  enough to bound the signature checks it imposes. In accumulative mode it
-  loses nothing, so only this bound stops it.
-- `max_budget` is the most the payer may hold unspent at once. `null` means no
-  limit. It bounds both what one peer can present at the provider's busiest
-  hour and what the provider owes it.
+- `min_topup_gap_ms` caps how often a TopUp may arrive. Every TopUp makes the
+  provider verify signatures and write state, so the provider has to bound how
+  often a peer can make it do that. In superseding mode `min_window_ms` does
+  this job: a payer that buys too often throws away what it bought. In
+  accumulative mode nothing is forfeit, so a payer would lose nothing by
+  buying every millisecond, and only this gap stops it.
 - `rate_cap` is the speed the provider shapes this peer to while it has
   budget. `null` means the link is the only limit. The payer cannot buy a
   higher one: in this mode the window sets how long a budget lasts, not how
@@ -562,7 +560,6 @@ And in **accumulative** mode:
 
 ```
 require now - last_topup >= min_topup_gap_ms
-require (authorized - consumed) + grant <= max_budget    // unless null
 
 for each update: signed[channel] = cumulative
 authorized = authorized + grant          // what was left is kept
@@ -653,9 +650,9 @@ and is back at its rate cap with the next TopUp.
 
 Sent when the provider will not honor a grant — in superseding mode most often
 because the rate would oversubscribe capacity it has already committed to other
-peers; in accumulative mode because the budget would pass `max_budget`, or the
-TopUp came sooner than `min_topup_gap_ms` after the last. A grant that fails
-verification is not declined but rejected, with Reject (0x06); see TopUp above.
+peers; in accumulative mode because the TopUp came sooner than
+`min_topup_gap_ms` after the last. A grant that fails verification is not
+declined but rejected, with Reject (0x06); see TopUp above.
 
 ```cbor
 {
@@ -665,19 +662,16 @@ verification is not declined but rejected, with Reject (0x06); see TopUp above.
         <cumulative>],             //   u64
        ...
      ],
-  2: <max_rate_available>,         // u64 — units per second we would accept.
-                                   //   Superseding mode only
+  2: <max_rate_available>,         // u64, optional — units per second we
+                                   //   would accept. Superseding mode only
   3: <reason>,                     // u8 — see Reject reason codes
-  4: <max_grant_available>,        // u64 — the most units we would add now.
-                                   //   Accumulative mode only
 }
 ```
 
-Field 2 or field 4 is present, following the mode, never both. In
-accumulative mode `max_grant_available` is `max_budget` less the budget the
-payer still holds, so a payer can re-buy at once with a grant that fits. A
-TopUp refused for coming too soon (reason 0x0A) carries the same number; the
-payer sends it again once the gap has passed.
+Field 2 is present in superseding mode and absent in accumulative mode, which
+has no rate to offer instead. There the only reason is a TopUp that came too
+soon (reason 0x0A), and the payer sends it again once `min_topup_gap_ms` has
+passed.
 
 The refused states are echoed in full because a purchase may span several
 channels, so one channel id no longer identifies which purchase was refused.
@@ -695,10 +689,10 @@ rate it wants up front for a bounded horizon. The provider can sum committed
 rates across peers and refuse before taking the money.
 
 Accumulative mode has no committed rate to sum, so it has no admission control
-of this kind. What stands in for it is static: each peer's `rate_cap`, and its
-`max_budget`. A node that sells to some peers in each mode counts only
-superseding grants against `grants.max_rate`, and its operator leaves room
-under it for the accumulative peers' caps.
+of this kind. What stands in for it is static: each peer's `rate_cap`. A node
+that sells to some peers in each mode counts only superseding grants against
+`grants.max_rate`, and its operator leaves room under it for the accumulative
+peers' caps.
 
 ### 0x06 RolloverInit
 
@@ -775,7 +769,6 @@ General-purpose rejection for any proposal.
 | 0x08 | Grant exceeds remaining channel capacity |
 | 0x09 | Protocol version unsupported |
 | 0x0A | TopUp too soon after the last (accumulative: inside `min_topup_gap_ms`) |
-| 0x0B | Budget would exceed `max_budget` |
 | 0xFF | Other (see reason_text) |
 
 ### 0x0B Disconnect
@@ -887,10 +880,10 @@ service. There is no pre-channel phase.
 
 ```
   B sells to A in accumulative mode: windows up to a year, rate cap
-  10 M/s, max budget 1 G, min gap 1 s. A has nothing carried over.
+  10 M/s, min gap 1 s. A has nothing carried over.
 
   B → A: Offer (field 3: [60000, 31536000000], field 6: 1,
-                field 7: [1000, 1G, 10M])
+                field 7: [1000, 10M])
   B → A: Balance (0, 0)
 
   day 0   A → B: TopUp (cumulative 1G, window 30 days)
@@ -988,7 +981,7 @@ Typical message sizes (CBOR encoded):
 | Announce | ~40 bytes |
 | Offer (one mint) | ~80 bytes |
 | Offer (3 accepted mints) | ~180 bytes |
-| Offer (accumulative, one mint) | ~110 bytes |
+| Offer (accumulative, one mint) | ~100 bytes |
 | Accept | ~350 bytes + ~104 per funding proof past the first (Spilman funding) |
 | ChannelReady | ~40 bytes |
 | TopUp | ~120 bytes (dominated by the signature) |
@@ -1023,9 +1016,10 @@ Plus 2 bytes of length prefix per message. Setup messages are one-time. TopUp is
 | Payment message | One — TopUp, which is the Spilman update and the purchase at once | Settlement, metering exchange and balance acknowledgment all collapse into it |
 | Channels per purchase | An array of updates, capped at 8; the grant is their combined increase, applied atomically | A cumulative total only means anything against the channel it was signed on, so spanning a rollover — or spending from several accepted mints — needs several ratchets in one message. Splitting them across messages would leave the provider unable to tell one purchase from two, and a partial application would make the grant size ambiguous |
 | Accounting mode | Chosen by the provider per peer; one window model in both modes. The Offer always carries the window range; field 6 names accumulative mode (absent means superseding) and field 7 carries its terms; fixed for the session | One grant shape and one TopUp shape, so the mode is two switches — what a new grant does to the old one, and where the speed comes from — rather than a second protocol. Every grant still expires at its deadline. The payer has nothing to choose, so nothing is negotiated |
-| Grant semantics | Superseding: a grant replaces the previous one and the remainder burns. Accumulative: a grant adds to what is left and moves the deadline to now plus its window | Superseding sells a rate rather than a stored quantity; without forfeiture a buyer could accumulate off-peak claims and spend them at peak. Accumulative sells volume on purpose, bounded by a per-peer rate cap and budget limit, and still by a deadline |
+| Grant semantics | Superseding: a grant replaces the previous one and the remainder burns. Accumulative: a grant adds to what is left and moves the deadline to now plus its window | Superseding sells a rate rather than a stored quantity; without forfeiture a buyer could accumulate off-peak claims and spend them at peak. Accumulative sells volume on purpose, bounded by a per-peer rate cap, and still by a deadline |
 | TopUp window | Required in both modes; milliseconds in a u64 | One message shape. A month or a year has to fit |
-| TopUp rate in accumulative mode | `min_topup_gap_ms` between TopUps, enforced by the provider | In superseding mode buying too often wastes the buyer's own money; in accumulative mode it costs nothing, so the provider's signature checks need an explicit bound |
+| TopUp rate in accumulative mode | `min_topup_gap_ms` between TopUps, enforced by the provider | Each TopUp costs the provider signature checks and a state write. In superseding mode buying too often wastes the buyer's own money, so `min_window_ms` bounds it; in accumulative mode nothing is forfeit, so the gap has to be stated |
+| Accumulative budget size | No limit on how much a payer may hold unspent | The payer chooses how much to prepay and carries that risk: unspent units expire at the deadline, and a provider that fails loses what it holds. How much a peer can draw at the busiest hour is bounded by `rate_cap`, its speed, not by the size of its budget. And the provider already holds the money |
 | Accumulative budget across sessions | Kept in the provider's state, written to disk, and restored at the next session until its deadline; untouched by rollover and settlement | It is already paid for. A reconnect is not a reason to take it, and settlement only collects the money that bought it |
 | Balance message | Provider → payer, accumulative only, with what is left and the time to the deadline: after the Offer on every connection, after each accepted TopUp, and at zero | A payer that reconnects cannot otherwise know what it left behind. Informational, so nothing waits on it and the no-acknowledgment property of TopUp stands |
 | Grant state | Cumulative authorized, never decreasing | Satisfies the Spilman ratchet and makes TopUp idempotent, so lost and reordered messages are harmless and no acknowledgment is needed |

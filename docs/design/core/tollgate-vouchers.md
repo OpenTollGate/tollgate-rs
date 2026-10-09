@@ -250,24 +250,19 @@ Besides at its deadline, a budget is also lost when:
 None of these refunds anything. The units were paid for when they were
 bought, and the protocol has no message that hands vouchers back.
 
-**Small budgets, topped up often.** The provider caps how much one peer may
-hold unspent with `accounting.max_budget`, and its default is modest: 1 GiB.
-A TopUp that would take a peer's budget past it is refused before any money
-moves. Small budgets are better for both sides. The payer has less paid in
-advance at any one time, so a provider that fails or disappears takes less
-with it. The provider owes less service it has already been paid for, and
-has less to honor at its busiest hour. A TopUp is one message, so buying
-often costs little. A peer that moves large volumes on behalf of others, such
-as a proxy buying for its users, can be given a larger `max_budget` of its
-own.
+**The payer chooses how much to prepay.** There is no limit on how much one
+peer may hold unspent. The payer carries the risk of what it prepays: units it
+has not used by the deadline expire, and a provider that fails or disappears
+takes the rest with it. A payer may top up in small steps to limit its own
+exposure. How much a peer can draw at the provider's busiest hour is bounded by
+its rate cap, not by the size of its budget.
 
 **What it costs the provider.** It takes on a liability: units it has been
 paid for and not yet delivered, possibly for weeks, and possibly wanted all at
 once by every peer at its busiest hour. That is why accumulative mode is a
 choice and never the default
 ([tollgate-hazards.md](tollgate-hazards.md#when-the-window-can-be-long)). The
-rate cap bounds how fast a large budget can be spent, and `max_budget` how
-large it can be.
+rate cap bounds how fast a large budget can be spent.
 
 ### Selling Time
 
@@ -327,11 +322,13 @@ throwing away a little of every grant to follow every small change in demand.
 The buyer watches its remaining budget instead, and tops up when it falls
 below a **low-water mark** (`buying.low_water`), by a fixed amount
 (`buying.top_up`), with a window it chooses (`buying.budget_window_ms`, no
-longer than the provider's `max_window_ms`). It never asks for more than the
-provider's `max_budget` leaves room for. It needs no hysteresis: a top-up
+longer than the provider's `max_window_ms`). It needs no hysteresis: a top-up
 wastes nothing, so buying a little early costs only the money held a little
 longer. A budget that reaches its deadline is gone, so the buyer also tops up
 `buying.renew_lead_ms` before the deadline if something still wants the link.
+There is no minimum grant: a buyer whose top-up runs out before it can buy
+again falls to the minimum flow allowance, and sizing its top-ups is its own
+accounting.
 
 In both modes it buys only while something wants the link: observed demand,
 or the standing `buying.demand`. An idle accumulative buyer above its
@@ -646,7 +643,7 @@ No cryptography fixes this. Two things limit it instead:
 - **Policy** — the loss is however many vouchers are held or committed at
   once. Hold one grant's worth, risk one grant's worth, and the window is
   the payer's own choice. In accumulative mode the payer risks its whole
-  unspent budget, which `accounting.max_budget` bounds.
+  unspent budget, whose size it chooses.
 - **Reputation** — an issuer that stops redeeming sees its vouchers sell for
   less, which makes everything it issues later worth less too.
 
@@ -889,14 +886,15 @@ here is protocol-side.
 | One window model | Every grant has a window and a deadline in both modes. The mode decides only what a new grant does to the old one (replace and forfeit, or add and move the deadline) and where the speed comes from (`grant / window`, or a per-peer cap) | One grant shape and one message shape, so the mode is two switches rather than two protocols. The rule that unspent capacity expires holds in both |
 | Default mode | Superseding | It is the mode that keeps capacity perishable on a scale of seconds, so it is safe to leave on without thinking. Accumulative trades that away for convenience, which an operator should do on purpose |
 | Grant semantics (superseding) | A new grant replaces the one in force; the remainder is forfeit | This is what makes the product bandwidth rather than stored volume. Without forfeiture a buyer accumulates claims off-peak and presents them at peak |
-| Grant semantics (accumulative) | A new grant adds to what is left and moves the deadline to now plus its window | Pay for what you use. The hoarding it allows is bounded by a per-peer rate cap, a per-peer budget limit, and still by the deadline |
+| Grant semantics (accumulative) | A new grant adds to what is left and moves the deadline to now plus its window | Pay for what you use. The hoarding it allows is bounded by a per-peer rate cap, and still by the deadline |
 | Long accumulative windows | Not a separate setting: an accumulative node sets `max_window_ms` much larger, a month or a year | The bound means one thing in both modes, the longest window accepted. In accumulative mode the window no longer sets the speed, so a long one is safe |
 | Budget lifetime | Kept per payer in the provider's state across reconnects, rollovers, settlements and restarts, written to disk, until its deadline | The budget is already paid for, so losing it at a reconnect would take a phone's money for walking out of range. The deadline keeps the provider from owing service indefinitely |
-| Budget size | `accounting.max_budget`, 1 GiB by default; buyers top up small and often | Less paid in advance means less lost if the provider fails, and less owed at the busiest hour. A TopUp is one message, so buying often is cheap. A proxy moving large volumes for its users can be given a larger limit |
+| Budget size | No limit; the payer chooses how much to prepay | The payer carries the risk of what it prepays: unspent units expire at the deadline, and a provider that fails loses what it holds. How much a peer can draw at the busiest hour is bounded by `rate_cap`, its speed, not by the size of its budget. And the provider already holds the money |
 | Speed in accumulative mode | A per-peer rate cap set by the provider, or none; slowed near zero so the budget is not overrun | The window no longer divides out a rate. A cap keeps a large budget from being spent any faster than a small one |
 | Selling time | Superseding with a pinned rate, renewed inside the usual windows; not a third mode | A fixed speed for a fixed time is exactly a rate renewed. Raising `max_window_ms` to the interval would force long-lived channels, put the whole interval at risk on a dropped link, and undo the anti-hoarding bound |
 | Buying across modes | A node buys only from providers whose Offer is in its own `accounting.mode`, and skips the others | A relay cannot hedge buying in one mode and selling in the other: what it owes and what it holds would expire on different terms. One buyer algorithm per node. A bridge between the modes is possible with two nodes and a balancer between them, or a custom implementation |
 | Accumulative buyer | Tops up by a fixed amount below a low-water mark, with a long window of its own choosing; no hysteresis | Buying early forfeits nothing, so there is nothing to time |
+| Minimum grant | None | A buyer that tops up too little and cannot buy again in time falls to the minimum flow allowance. That is the buyer's own accounting, and the provider loses nothing by it: `min_topup_gap_ms` already bounds how often it is asked to verify a TopUp |
 | Rate within a grant | Fixed at `grant / window`, not banked (superseding) | Otherwise a buyer that waited would be owed an unbounded burst just before the deadline |
 | Reaction latency | One message, no acknowledgment | Cumulative signed state makes TopUp idempotent, so fire-and-forget is safe and a payer can use a rate the moment it buys it |
 | Who pays | Each side pays for what it received, in the vouchers of whoever delivered it | Symmetric and unchanged. Both owe by default, so both fund a channel and buy their own grants |

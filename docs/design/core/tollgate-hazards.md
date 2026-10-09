@@ -116,14 +116,17 @@ softens the rule on purpose, in the ways listed above: a new grant adds to
 what is left, and the operator sets `max_window_ms` to a month or a year.
 Capacity still expires, at the deadline. The window can be that long only
 because the speed comes from a cap rather than from `grant / window`:
+**`accounting.rate_cap`**, so a budget is spent no faster than the cap, however
+large it is.
 
-- **`accounting.rate_cap`**, so a budget is spent no faster than the cap,
-  however large it is.
-- **`accounting.max_budget`**, so no peer holds more than that unspent at
-  once.
+What remains, which that bound limits but does not remove:
 
-What remains, which those bounds limit but do not remove:
-
+- **The buyer carries the risk of what it prepays.** A superseding payer has
+  paid at most one short window ahead. An accumulative payer has paid as far
+  ahead as it chose to. Units it has not used by the deadline expire, and if
+  the provider defaults, disappears or loses its disk, the payer loses all of
+  them. The provider, for its part, owes service it has already been paid for,
+  which it has to keep on disk and honor.
 - **Stockpiling for the busiest hour.** A buyer can buy whenever vouchers are
   cheap or the link is quiet and spend at the busiest hour, and keep a budget
   alive by buying again before its deadline. Every buyer can do the same at
@@ -131,16 +134,9 @@ What remains, which those bounds limit but do not remove:
   sold, and accumulative mode has no committed rate for admission control to
   check. At peak, N accumulative peers can each draw up to their rate cap, and
   if N caps exceed the link, every peer on it — superseding ones included —
-  gets less than it paid for. `rate_cap` and `max_budget` bound it; an
-  operator selling in this mode sizes the caps against the link, or accepts
-  that the link is shared at peak.
-- **The provider holds more prepaid value.** A superseding payer has paid at
-  most one short window ahead. An accumulative payer may have paid up to
-  `max_budget` ahead, until its deadline. If the provider defaults,
-  disappears or loses its disk, the payer loses all of it. The provider, for
-  its part, owes service it has already been paid for, which it has to keep
-  on disk and honor. This is why `max_budget` defaults to a modest amount and
-  buyers top up small and often.
+  gets less than it paid for. `rate_cap` bounds it, not the size of any
+  budget; an operator selling in this mode sizes the caps against the link, or
+  accepts that the link is shared at peak.
 - **A carried budget is drawn at the session's multiplier.** A budget carried
   into a new session is drawn at that session's received multiplier, so
   raising the multiplier between sessions reprices units already sold.
@@ -191,7 +187,7 @@ deposit, or an operator allowlist. None is specified.
 | Never pay a peer a bonus to send or accept traffic | Peers profiting from traffic nobody wants |
 | No price-aware routing | Cheapest route being a blackhole |
 | Metrics never price inputs | A peer degrading its link to move its own price |
-| Unspent capacity expires, and windows are capped — in accumulative mode, where windows are long by the operator's choice, each peer's speed and stored budget are capped as well | Buying capacity off-peak to present at peak |
+| Unspent capacity expires, and windows are capped — in accumulative mode, where windows are long by the operator's choice, each peer's speed is capped as well | Buying capacity off-peak to present at peak |
 | Free peering not transitive | Laundered free transit |
 | Locks survive every swap | Locks removed by swapping through change |
 | Aggregate caps on anything granted per peer | Free identities multiplying anything given away |

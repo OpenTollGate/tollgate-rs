@@ -587,14 +587,13 @@ accounting:
   mode: superseding              # superseding or accumulative
   # The rest applies only in accumulative mode:
   rate_cap: null                 # fastest a peer is carried, units/s; null = no cap
-  max_budget: 1073741824         # most a peer may hold unspent, units (1 GiB); null = no limit
   min_topup_gap_ms: 1000         # shortest time between two TopUps from one peer
 ```
 
-The mode and the three bounds are sent to each peer in the Offer
+The mode and both bounds are sent to each peer in the Offer
 ([tollgate-protocol.md](tollgate-protocol.md#0x01-offer)), beside
 `grants.window_range_ms`, so a payer knows before it buys how fast it will be
-carried and how much it may hold. In superseding mode the bounds are not sent
+carried and how often it may buy. In superseding mode the bounds are not sent
 and not used.
 
 **An accumulative node accepts much longer windows.** It sets the upper end
@@ -612,28 +611,27 @@ off-peak and spending at peak
 Pick `accumulative` for buyers who pay for a quantity and want to use it at
 their own pace — a phone on a data pack — and read
 [When the Window Can Be Long](tollgate-hazards.md#when-the-window-can-be-long)
-first. The two bounds are what make long windows safe enough:
+first.
 
-- **`rate_cap`** is the speed every accumulative peer is shaped to while it
-  has budget. The window no longer sets a rate, so the operator does. Size it
-  against the link: at the busiest hour every peer holding a budget may want
-  its cap at once, and the node has already sold the units. `null` leaves the
-  link as the only limit.
-- **`max_budget`** is the most one peer may hold unspent. It bounds how much a
-  peer can save up for the busiest hour, and how much this node owes a peer at
-  once. A TopUp that would pass it is refused before any money moves.
+**`rate_cap`** is the speed every accumulative peer is shaped to while it has
+budget. It is what makes long windows safe enough. The window no longer sets a
+rate, so the operator does. Size it against the link: at the busiest hour
+every peer holding a budget may want its cap at once, and the node has already
+sold the units. `null` leaves the link as the only limit.
 
-**Keep `max_budget` modest.** Frequent small top-ups are better than a few
-large ones: a buyer has less paid in advance, so it loses less if this node
-fails or disappears, and this node owes less at its busiest hour. A TopUp is
-one message, so buying often costs little. A proxy that buys for many users
-moves larger volumes on their behalf; give that one peer a larger
-`max_budget` in `peers`.
+There is no limit on how much a peer may hold unspent. The buyer chooses how
+much to prepay and carries that risk: what it has not used by the deadline
+expires, and what it holds is lost if this node fails. How much a peer can
+draw at the busiest hour is bounded by `rate_cap`, not by the size of its
+budget.
 
-`min_topup_gap_ms` does for accumulative mode what the lower end of
-`grants.window_range_ms` does for superseding: it bounds how many signature
-checks a peer can impose. One a second is plenty for a buyer adding hundreds
-of megabytes at a time.
+**`min_topup_gap_ms`** is the shortest time this node accepts between two
+TopUps from one peer. Every TopUp makes this node verify signatures and write
+state, so it bounds how often a peer can make it do that. In superseding mode
+the lower end of `grants.window_range_ms` does this job, because a buyer that
+buys too often forfeits what it bought. In accumulative mode nothing is
+forfeit, so the gap is needed. One a second is plenty for a buyer adding
+hundreds of megabytes at a time.
 
 A budget is kept in this node's state and written to disk beside the channel
 backups, so it survives a reconnect, a restart of this node, a channel
@@ -656,7 +654,6 @@ produced the rate is invisible to it.
 |-----------|---------|-------------|
 | `mode` | `superseding` | `superseding` or `accumulative`. Also the only mode this node buys in. Per-peer override in `peers`, for selling |
 | `rate_cap` | `null` | Accumulative only. Units per second each peer is shaped to while it has budget; `null` = no cap. Near zero budget the peer is also slowed so it cannot overrun what is left. Per-peer override in `peers` |
-| `max_budget` | `1073741824` | Accumulative only. Most units one peer may hold unspent (1 GiB); `null` = no limit. Per-peer override in `peers` |
 | `min_topup_gap_ms` | `1000` | Accumulative only. A TopUp sooner than this after the peer's last is refused, to be sent again |
 
 ---
@@ -676,7 +673,7 @@ grants:
 - **Upper bound** is the longest window this node accepts. In superseding mode it caps how far ahead capacity can be bought, which is what stops a buyer accumulating off-peak claims and presenting them at peak. Long windows also mean a large forfeit when a payer raises its rate early, so a high ceiling is not a favor to the payer. Selling a longer interval, such as an hour, does not need a longer window: the buyer renews inside it ([Selling Time](tollgate-vouchers.md#selling-time)). Raising it is allowed, but the safety margin is twice the longest superseding window and `channels.ttl_seconds` must be at least twice the margin, so a one-hour window needs channels of four hours or more. In accumulative mode it is set to a month or a year, and the channel rule does not apply ([Accounting](#accounting)).
 - **Lower bound** caps how many grants can arrive per second, and therefore how many signature verifications a peer can impose. On an ESP32 that is the binding constraint, not bandwidth. Raise it on constrained hardware.
 
-There is no minimum grant size. A short window already bounds message rate, and a small grant is cheap to serve.
+There is no minimum grant size. A short window, or in accumulative mode `accounting.min_topup_gap_ms`, already bounds message rate, and a small grant is cheap to serve.
 
 ### Defaults
 
@@ -723,15 +720,16 @@ buys time ([Selling Time](tollgate-vouchers.md#selling-time)).
 **Accumulative.** Buying early forfeits nothing. The buyer tops up by
 `top_up`, with a window of `budget_window_ms`, whenever its remaining budget
 falls below `low_water`, and `renew_lead_ms` before the deadline, in both cases
-only while something wants the link (observed demand, or `demand`). It never
-asks for more than the peer's `max_budget` leaves room for. It counts the
-budget itself, from what it signed and what it measured, and takes the
-provider's Balance message as the truth whenever one arrives.
+only while something wants the link (observed demand, or `demand`). It
+counts the budget itself, from what it signed and what it measured, and takes
+the provider's Balance message as the truth whenever one arrives.
 
 Set `low_water` to cover what the link moves while a top-up is on its way: a
 few seconds at the peer's rate cap is plenty. `top_up` trades message count
-against money paid ahead, which the peer holds until it is used; keep it
-small next to the peer's `max_budget`.
+against money paid ahead, which the peer holds until it is used, and which
+this node loses if the peer fails. A `top_up` too small to last until the
+next one may be sent leaves the link at the minimum flow allowance between
+them.
 
 ### Defaults
 
@@ -745,7 +743,7 @@ small next to the peer's `max_budget`.
 | `cap_hold_ms` | `10000` | Superseding. How long to respect a rate a peer named in a TopUpReject before trying higher again |
 | `min_rate`, `max_rate` | `0`, unset (no ceiling) | Superseding. Bounds on the rate bought. Equal values pin it |
 | `low_water` | `67108864` | Accumulative. Top up when the remaining budget falls below this (64 MiB) |
-| `top_up` | `268435456` | Accumulative. Units added per top-up (256 MiB), clamped to what the peer's `max_budget` allows |
+| `top_up` | `268435456` | Accumulative. Units added per top-up (256 MiB) |
 | `budget_window_ms` | `2592000000` | Accumulative. Window asked for with each top-up (30 days), clamped to the peer's `window_range_ms` |
 
 ---
@@ -774,12 +772,11 @@ peers:
   "05jkl...":
     endpoint: "192.168.1.1:4747"
 
-  # Sell this peer volume rather than speed: a proxy buying for its users
+  # Sell this peer volume rather than speed
   "06pqr...":
     accounting:
       mode: accumulative
       rate_cap: 2500000          # 20 Mbit/s
-      max_budget: 10737418240    # 10 GiB
     grants:
       window_range_ms: [60000, 2592000000]   # up to 30 days
 ```
@@ -792,7 +789,7 @@ peers:
 | `received_multiplier` | *(from `vouchers.received_multiplier`)* | Unsigned surcharge on what this peer pushes at us, on top of it being paid for delivering it |
 | `blocked` | `false` | Refuse all service to this peer |
 | `prefetch` | *(from `merchant.prefetch`)* | Channel fundings held ahead for this upstream |
-| `accounting.mode`, `accounting.rate_cap`, `accounting.max_budget` | *(from the `accounting` block)* | The accounting mode this node sells to this peer in, and its accumulative bounds. Any not given come from the node-wide block. What this node buys from the peer still follows the node-wide `accounting.mode` |
+| `accounting.mode`, `accounting.rate_cap` | *(from the `accounting` block)* | The accounting mode this node sells to this peer in, and its accumulative bounds. Any not given come from the node-wide block. What this node buys from the peer still follows the node-wide `accounting.mode` |
 | `grants.window_range_ms` | *(from `grants.window_range_ms`)* | The windows this peer may ask for. A peer sold to in accumulative mode on a superseding node needs a longer upper end |
 | `endpoint` | *(none)* | Static endpoint for IP peering |
 
@@ -901,7 +898,8 @@ Each daemon watches its own config file for changes and applies runtime-changeab
 | Window range | Advertised in the Offer; payer picks per grant | Upper end bounds buying off-peak for peak, lower end bounds signature verifications per second |
 | Accounting mode | `accounting.mode`, `superseding` by default, overridable per peer for selling; fixed for a session | Speed and volume are different products, and the operator knows which its buyers want. Superseding is the default because its capacity expires in seconds and so cannot be stockpiled |
 | Accumulative windows | No separate setting: the upper end of `grants.window_range_ms` is set to a month or a year; exempt from the channel-lifetime rule | The window means the same in both modes, the longest one accepted. The budget lives in node state rather than in a channel, so a long window does not need a long channel |
-| Accumulative bounds | A per-peer `rate_cap` and `max_budget`, with defaults of no cap and 1 GiB | The window no longer limits how fast a peer can draw, and a long window lets it hold a lot, so the operator states both. A modest default keeps buyers topping up small and often: less paid ahead is less lost if a provider fails, and less owed at peak |
+| Accumulative bounds | `rate_cap`, per peer, no cap by default; and `min_topup_gap_ms`, 1 s by default | The window no longer limits how fast a peer can draw, so the operator states a speed. Nothing is forfeit by buying often, so the operator states how often a peer may make it verify a TopUp |
+| Accumulative budget size | No limit | The buyer chooses how much to prepay and carries that risk: unspent units expire at the deadline, and a provider that fails loses what it holds. How much a peer can draw at peak is bounded by `rate_cap`, not by budget size. And the provider already holds the money |
 | Buying mode | A node buys only in its own `accounting.mode` and skips providers in the other | A relay cannot hedge buying one mode and selling the other, and one buyer algorithm per node is simpler. Bridging the two is possible with two nodes and a balancer, or a custom implementation |
 | Selling time | Not a mode: superseding with a buyer whose `min_rate` equals its `max_rate` | A fixed speed for a fixed time is a rate renewed every window; the length of time is how many vouchers the buyer holds |
 | Minimum flow allowance | A rate, not a per-interval quantity | It is the floor of the shaper and what a peer falls back to when its grant expires. A rate cannot be accumulated |

@@ -171,9 +171,8 @@ mode.
 
 In accumulative mode the window is only how long a budget lasts, and it is
 weeks or months long. What this section says the window does is done there by
-other settings: `min_topup_gap_ms` bounds signature checks, `rate_cap` bounds
-speed, and `max_budget` bounds how far ahead a payer has paid
-([tollgate-protocol.md](tollgate-protocol.md#0x01-offer)).
+other settings: `min_topup_gap_ms` bounds signature checks and `rate_cap`
+bounds speed ([tollgate-protocol.md](tollgate-protocol.md#0x01-offer)).
 
 It is chosen by the payer, per grant, inside the range the provider advertised.
 Nothing is agreed between the two sides, and no boundary is shared — each side
@@ -201,7 +200,7 @@ is the payer's exposure, and it has two distinct bounds:
 
 | Risk | Bounded by |
 |---|---|
-| Payer buys a grant and the provider does not deliver | The grant — which is one window's worth. In accumulative mode, the unspent budget, up to the provider's `max_budget` |
+| Payer buys a grant and the provider does not deliver | The grant — which is one window's worth. In accumulative mode, the unspent budget, as large as the payer chose to make it |
 | Payer funds a channel and the issuer refuses to honor the refund | Channel capacity |
 
 The second is the trust cost of the issuer being the mint
