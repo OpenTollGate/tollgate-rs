@@ -26,7 +26,7 @@ use crate::control;
 use crate::enforcer::Enforcer;
 use crate::identity::Identity;
 use crate::settle::{Backoff, Settler};
-use crate::wire::{self, PeerIdentity, Wire};
+use crate::wire::{self, Connection, PeerIdentity, Wire};
 
 /// How often the node samples its meters and ticks core.
 ///
@@ -106,6 +106,17 @@ impl NodeConfig {
     }
 }
 
+/// The connection a peer is on.
+#[derive(Debug)]
+struct Link {
+    /// Which one, so an event from a connection it replaced can be told apart.
+    conn: Connection,
+    /// Where it comes from: what the enforcer gates.
+    addr: SocketAddr,
+    /// Its outbound queue.
+    tx: mpsc::Sender<Message>,
+}
+
 /// A running node.
 pub struct Node {
     identity: Identity,
@@ -114,8 +125,8 @@ pub struct Node {
     channels: Arc<dyn ChannelBackend>,
     /// Settlements, and the retries of the ones that fail.
     settler: Settler,
-    /// Outbound queue per connected peer.
-    links: HashMap<PubKey, mpsc::Sender<Message>>,
+    /// The connection each peer is on, and its outbound queue.
+    links: HashMap<PubKey, Link>,
     /// Channel fundings a peer sent while the enforcer was not selling to it,
     /// verified once it is. See [`Enforcer::selling`].
     deferred: HashMap<PubKey, Vec<Vec<u8>>>,
@@ -294,20 +305,52 @@ impl Node {
 
     async fn on_wire(&mut self, event: Wire, done: &mpsc::Sender<Event>) {
         match event {
-            Wire::PeerUp { peer, addr, tx } => {
-                self.links.insert(peer, tx);
+            Wire::PeerUp {
+                peer,
+                conn,
+                addr,
+                tx,
+            } => {
+                // A peer reconnecting before its old connection's end has
+                // reached us. The new connection replaces the old one, as
+                // core's session does; what the host held for the old one
+                // goes the way it would have had the old one ended first, so
+                // the enforcer counts from zero, as the session's new meter
+                // does, and gates the address the peer is at now.
+                let replaced = self.links.insert(peer, Link { conn, addr, tx });
+                if let Some(old) = replaced {
+                    debug!(
+                        %peer,
+                        old = %old.addr,
+                        new = %addr,
+                        "a peer reconnected before its old connection ended"
+                    );
+                    self.deferred.remove(&peer);
+                    self.enforcer.remove(peer);
+                }
                 // Tie the key the protocol knows to the address the kernel
                 // knows, before anything is gated or shaped for this peer.
                 self.enforcer.register(peer, addr.ip());
                 self.dispatch(Event::PeerConnected { peer }, done).await;
             }
-            Wire::PeerDown { peer } => {
+            Wire::PeerDown { peer, conn } => {
+                // The end of a connection already replaced is not the peer's:
+                // tearing down now would take the connection it is on with it.
+                if self.replaced(peer, conn) {
+                    debug!(%peer, "a replaced connection ended");
+                    return;
+                }
                 self.links.remove(&peer);
                 self.deferred.remove(&peer);
                 self.enforcer.remove(peer);
                 self.dispatch(Event::PeerDisconnected { peer }, done).await;
             }
-            Wire::Message { peer, msg } => {
+            Wire::Message { peer, conn, .. } if self.replaced(peer, conn) => {
+                // Said on a connection the peer has since replaced, to a
+                // session that has since started over.
+                debug!(%peer, "dropping a message from a replaced connection");
+            }
+            Wire::Message { peer, msg, .. } => {
                 // Nothing is sold while the enforcer cannot enforce it: the
                 // capacity this node can deliver is zero, and the payer is told
                 // so as it would be at any other ceiling. Its money is untouched,
@@ -364,6 +407,15 @@ impl Node {
                     .await;
             }
         }
+    }
+
+    /// Whether `conn` is a connection of `peer`'s that another has replaced.
+    ///
+    /// Not merely one that is not current: once core has dropped a peer there
+    /// is no link at all, and its connection's end is still that connection's
+    /// to report.
+    fn replaced(&self, peer: PubKey, conn: Connection) -> bool {
+        self.links.get(&peer).is_some_and(|link| link.conn != conn)
     }
 
     /// Republish what the node is doing, for anything watching.
@@ -629,7 +681,7 @@ impl Node {
         // A full outbox means the peer is not reading. Dropping is safe for the
         // only message that repeats: TopUp is cumulative, so the next one
         // carries the correct total anyway.
-        if link.try_send(msg).is_err() {
+        if link.tx.try_send(msg).is_err() {
             warn!(%peer, "outbox full, dropping a message");
         }
     }
@@ -719,4 +771,134 @@ fn spawn_dialer(
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::IpAddr;
+    use std::sync::Mutex;
+
+    use tollgate_core::access::AccessLevel;
+    use tollgate_core::meter::Counters;
+
+    use super::*;
+    use crate::channel::LocalChannels;
+
+    /// An enforcer that remembers who it was told about and from where, and,
+    /// like the kernel ones, ignores a registration for a peer it already has.
+    #[derive(Debug, Default)]
+    struct Registry(Mutex<HashMap<PubKey, IpAddr>>);
+
+    impl Registry {
+        fn addr(&self, peer: PubKey) -> Option<IpAddr> {
+            self.0.lock().unwrap().get(&peer).copied()
+        }
+    }
+
+    impl Enforcer for Registry {
+        fn register(&self, peer: PubKey, addr: IpAddr) {
+            self.0.lock().unwrap().entry(peer).or_insert(addr);
+        }
+        fn set_access(&self, _: PubKey, _: AccessLevel) {}
+        fn set_shaping_rate(&self, _: PubKey, _: u64) {}
+        fn counters(&self, _: PubKey) -> Counters {
+            Counters::default()
+        }
+        fn demand(&self, _: PubKey) -> u64 {
+            0
+        }
+        fn set_demand(&self, _: PubKey, _: u64) {}
+        fn shaping_rate(&self, _: PubKey) -> u64 {
+            0
+        }
+        fn peers(&self) -> Vec<PubKey> {
+            self.0.lock().unwrap().keys().copied().collect()
+        }
+        fn remove(&self, peer: PubKey) {
+            self.0.lock().unwrap().remove(&peer);
+        }
+    }
+
+    fn node(enforcer: Arc<dyn Enforcer>) -> Node {
+        let identity = Identity::generate();
+        let config = NodeConfig {
+            identity: identity.clone(),
+            policy: NodePolicy::default(),
+            buyer: BuyerPolicy::default(),
+            listen: "127.0.0.1:0".parse().unwrap(),
+            peer_identity: PeerIdentity::Address,
+            mint_url: "http://127.0.0.1/unused".into(),
+            mint_local: "http://127.0.0.1/unused".into(),
+            channel_ttl_seconds: 3_600,
+            peers: Vec::new(),
+            connector: None,
+        };
+        Node::new(&config, Arc::new(LocalChannels::new(identity)), enforcer)
+    }
+
+    #[tokio::test]
+    async fn a_late_disconnect_leaves_the_connection_that_replaced_it_alone() {
+        let registry = Arc::new(Registry::default());
+        let mut node = node(registry.clone());
+        let (done, _done_rx) = mpsc::channel(256);
+        let peer = Identity::generate().pubkey();
+
+        // The peer's first connection, then a second — from another address —
+        // before the node has heard the first one end.
+        let (first, second) = (Connection::next(), Connection::next());
+        let (first_tx, _first_rx) = mpsc::channel(64);
+        let (second_tx, mut second_rx) = mpsc::channel(64);
+        let second_addr: SocketAddr = "10.0.0.8:40002".parse().unwrap();
+        node.on_wire(
+            Wire::PeerUp {
+                peer,
+                conn: first,
+                addr: "10.0.0.7:40001".parse().unwrap(),
+                tx: first_tx,
+            },
+            &done,
+        )
+        .await;
+        node.on_wire(
+            Wire::PeerUp {
+                peer,
+                conn: second,
+                addr: second_addr,
+                tx: second_tx,
+            },
+            &done,
+        )
+        .await;
+        // The first connection's end arrives late.
+        node.on_wire(Wire::PeerDown { peer, conn: first }, &done)
+            .await;
+
+        // The second connection is the peer's, whole: a link to send on, a
+        // session in core, and the enforcer gating the address it came from.
+        assert!(node.links.contains_key(&peer), "the live link was dropped");
+        assert!(
+            node.sessions.peer(&peer).is_some(),
+            "the live session was ended"
+        );
+        assert_eq!(registry.addr(peer), Some(second_addr.ip()));
+        while second_rx.try_recv().is_ok() {}
+        node.send(
+            peer,
+            Message::Disconnect(tollgate_protocol::Disconnect {
+                reason: ReasonCode::Other,
+            }),
+        )
+        .await;
+        assert!(
+            second_rx.try_recv().is_ok(),
+            "nothing reaches the live link"
+        );
+
+        // Its own end is still the end.
+        node.on_wire(Wire::PeerDown { peer, conn: second }, &done)
+            .await;
+        assert!(!node.links.contains_key(&peer));
+        assert!(node.sessions.peer(&peer).is_none());
+        assert_eq!(registry.addr(peer), None);
+    }
 }

@@ -361,6 +361,15 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 ### Fixed
 
+- A peer that reconnects before its old connection's end reaches the node
+  keeps the new connection. The end named only the peer, so when it arrived
+  late it dropped the new connection's link, ended its session and removed it
+  from the enforcer, and the peer sat connected with nothing to answer it. Every
+  connection now has an id its events carry: the end of one already replaced,
+  and anything still read from it, is ignored, and a connection that replaces
+  another clears the enforcer's state for the old one and registers afresh, as
+  it would have had the old one ended first.
+
 - A node reaches a mint named by an IPv6 address, `http://[addr]:port`, as
   every mint on a FIPS mesh is. cdk's default HTTP client, bitreq, looked the
   host up with its brackets on and failed, so no channel toward a mesh peer was
