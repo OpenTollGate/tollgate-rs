@@ -12,8 +12,8 @@ TollGate is not a network protocol. It is a payment layer that operates alongsid
 |---|---|
 | **tollgate-protocol** | Wire format and lifecycle defined in these design documents: messages, CBOR codec, framing. Resource-agnostic, its own `no_std` crate, so another implementation can depend on the message types alone. |
 | **market** | Where vouchers get their money price: acquisition routes, the reliability signal, issuer risk. Served by `merchantd`, a daemon separate from the protocol ([tollgate-daemons.md](tollgate-daemons.md)); a node works without any of it. |
-| **tollgate-core** | Rust library implementing the protocol's resource-agnostic logic: grants, buying, metering, access control. Sans-IO: the host feeds it events and carries out the actions it returns, through a `ChannelBackend` and a `ResourceAdapter` it implements. |
-| **tollgate-net** | First deployment of TollGate: **(re)selling network access**. Built on `tollgate-core`, it ships the network-forwarding `ResourceAdapter` (traditional IP or a mesh such as [FIPS](https://github.com/jmcorgan/fips)) and a Spilman `ChannelBackend`. It runs as three daemons — `tollgated`, `mintd` and `merchantd` — described in [tollgate-daemons.md](tollgate-daemons.md). |
+| **tollgate-core** | Rust library implementing the protocol's resource-agnostic logic: grants, buying, metering, access control. Sans-IO: the host feeds it events and carries out the actions it returns, through a `ChannelBackend` and an `Enforcer` it implements. |
+| **tollgate-net** | First deployment of TollGate: **(re)selling network access**. Built on `tollgate-core`, it ships the network-forwarding enforcers (traditional IP or a mesh such as [FIPS](https://github.com/jmcorgan/fips), or an external program over the [enforcer protocol](tollgate-enforcer-protocol.md)) and a Spilman `ChannelBackend`. It runs as three daemons — `tollgated`, `mintd` and `merchantd` — described in [tollgate-daemons.md](tollgate-daemons.md). |
 
 A constrained-device variant (`tollgate-net-esp32`) lives in a separate project and consumes the same `tollgate-core`.
 
@@ -29,7 +29,7 @@ A constrained-device variant (`tollgate-net-esp32`) lives in a separate project 
 
 **Operator sovereignty**: The operator controls their node's economic behavior by deciding what to sell its vouchers for, and to whom. **The operator's margin is the spread between what they earn for delivery, and what they pay their peers.** TollGate provides the tools; the operator makes the business decisions.
 
-**Network and transport agnostic**: The protocol doesn't dictate how resources travel or how protocol messages reach the peer. The underlying system handles routing and delivery; TollGate handles commerce. Messages can travel over any bidirectional channel between authenticated peers. The same `tollgate-core` library can power a high-end Linux router, a constrained OpenWrt device, or an ESP32 microcontroller — each host supplying its own wallet and resource adapter.
+**Network and transport agnostic**: The protocol doesn't dictate how resources travel or how protocol messages reach the peer. The underlying system handles routing and delivery; TollGate handles commerce. Messages can travel over any bidirectional channel between authenticated peers. The same `tollgate-core` library can power a high-end Linux router, a constrained OpenWrt device, or an ESP32 microcontroller — each host supplying its own wallet and enforcer.
 
 ## How Payment Works
 
@@ -148,7 +148,7 @@ The three layers introduced in [What's in this repo](#whats-in-this-repo) — `t
 `tollgate-core` contains all payment logic, metering, and access control. It is network-agnostic — it does not know about FIPS, IP, or any specific transport — and **sans-IO**: it never does I/O, never reads the clock, and never verifies a signature. The host turns real events into `Event` values, supplies the time, and carries out the `Action`s core returns. To do that, the host implements two traits of its own:
 
 1. **ChannelBackend** — Spilman channel funding, balance-update signing and verification, settlement. Must support token locking (NUT-11 2-of-2 multisig). See [tollgate-payment-channels.md](tollgate-payment-channels.md).
-2. **ResourceAdapter** — Peer identification, metering counters (units delivered per peer), access control and shaping enforcement, and optional metrics for operator visibility. See [tollgate-access-control.md](tollgate-access-control.md) and [tollgate-metering.md](tollgate-metering.md).
+2. **Enforcer** (`ResourceAdapter` in the code today) — Peer identification, metering counters (units delivered per peer), access control and shaping enforcement, and optional metrics for operator visibility. See [tollgate-access-control.md](tollgate-access-control.md) and [tollgate-metering.md](tollgate-metering.md).
 3. **Peer Identifiers** — Peers are always identified by their Nostr public key (npub). The consumer provides npubs for connected peers, similar to how FIPS transports provide identifiers to FMP.
 
 ### Separation Model
@@ -158,13 +158,13 @@ tollgate-core (lib)              ← Pure logic, no platform code
     │
     ├── tollgate-net (this repo)    ← Network forwarding, feature-flagged per OS
     │     ├── Linux / macOS / Windows / OpenWrt
-    │     ├── tollgated   ← protocol, FIPS or IP adapter, Spilman channels; holds no value
+    │     ├── tollgated   ← protocol, FIPS or IP enforcer, Spilman channels; holds no value
     │     ├── mintd       ← minimal Cashu mint: issues and burns this node's vouchers
     │     └── merchantd   ← prices, sells, buys upstream vouchers; holds all value
     │
     └── tollgate-net-esp32 (separate project)
           ├── ESP-IDF / constrained runtime
-          └── Custom wallet + resource adapter
+          └── Custom wallet + enforcer
 ```
 
 The three daemons normally run on one machine and talk over local sockets; why they are split, and what each may do at the others, is in [tollgate-daemons.md](tollgate-daemons.md).
@@ -192,10 +192,10 @@ The three daemons normally run on one machine and talk over local sockets; why t
 │  │   outbound)  │  │   & Codec    │  │               │    │
 │  └──────────────┘  └──────────────┘  └───────────────┘    │
 │                                                            │
-│  Host traits: ChannelBackend, ResourceAdapter              │
+│  Host traits: ChannelBackend, Enforcer                     │
 └────────────────────────────────────────────────────────────┘
 
-  Implementation provides: Spilman Channel Backend | FIPS/IP Resource Adapter | Operator Config
+  Implementation provides: Spilman Channel Backend | FIPS/IP Enforcer | Operator Config
 ```
 </details>
 
@@ -298,6 +298,7 @@ TollGate uses the [Cashu Spilman channel](https://github.com/SatsAndSports/cashu
 | [tollgate-metering.md](tollgate-metering.md) | Local metering counters and what they are and are not used for |
 | [tollgate-hazards.md](tollgate-hazards.md) | Constraints that exist because removing them reintroduces a known abuse |
 | [tollgate-daemons.md](tollgate-daemons.md) | Process split: tollgated delivers, mintd issues and burns, merchantd prices and holds all value |
+| [tollgate-enforcer-protocol.md](tollgate-enforcer-protocol.md) | Driving an external enforcer: payer, subject and binding, the local socket protocol |
 | [tollgate-configuration.md](tollgate-configuration.md) | Configuration schema and runtime parameters |
 
 ### Market

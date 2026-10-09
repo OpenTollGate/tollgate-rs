@@ -63,9 +63,9 @@
   <line x1="550" y1="150" x2="550" y2="195" stroke="#d0a040" stroke-width="1.5"/>
   <text x="540" y="178" text-anchor="end" class="num">3</text>
 
-  <!-- TollGate FIPS Adapter (center bar) -->
+  <!-- TollGate FIPS enforcer (center bar) -->
   <rect x="70" y="195" width="560" height="45" rx="5" class="callout" stroke="#50c050" stroke-width="2"/>
-  <text x="350" y="222" text-anchor="middle" class="mlabel" fill="#80e080">TollGate FIPS Adapter</text>
+  <text x="350" y="222" text-anchor="middle" class="mlabel" fill="#80e080">TollGate FIPS Enforcer</text>
 
   <!-- Numbered connections down -->
   <line x1="180" y1="240" x2="180" y2="280" stroke="#d0a040" stroke-width="1.5"/>
