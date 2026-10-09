@@ -42,6 +42,13 @@ tollgated -c /path/to/tollgate.yaml
 
 When `-c` is specified, only that file is loaded.
 
+```
+tollgated -c /etc/tollgate/fips-exit.yaml --instance fips-exit
+```
+
+`--instance` names the instance ([Instance](#instance)). It wins over
+`instance` in the file. The init script passes both.
+
 ### OpenWrt
 
 On OpenWrt, the primary config path is `/etc/tollgate/tollgate.yaml`. UCI integration is a future consideration — initially TollGate uses YAML directly.
@@ -51,6 +58,8 @@ On OpenWrt, the primary config path is `/etc/tollgate/tollgate.yaml`. UCI integr
 ## YAML Structure
 
 ```yaml
+instance:        # This instance's name: logs, service, runtime directory
+control_socket:  # Where tolltop and local clients reach this instance
 identity:    # Node identity (keypair)
 network:     # Where the TollGate protocol listens
 enforcer:    # What enforces delivery: loopback, ip, fips or external
@@ -62,6 +71,66 @@ channels:    # Spilman channel parameters
 grants:      # Bounds on what a payer may buy in one purchase
 peers:       # Static peer overrides
 ```
+
+---
+
+## Instance
+
+One machine may run several `tollgated` at once, one per task: say one selling
+internet access on the LAN, one selling FIPS peering, and one selling a FIPS
+exit. Each is an **instance**, and `instance` is its name.
+
+```yaml
+instance: "ip"            # unset = "default"
+control_socket: ""        # empty = /run/tollgate-<instance>/control.sock
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `instance` | `default` | The instance's name. Letters, digits and `-` only, because it becomes part of a path. The logs show it, and the init script lists instances by it. `--instance` on the command line wins over it |
+| `control_socket` | `/run/tollgate-<instance>/control.sock` | The local socket `tolltop` reads, and trusted local clients such as a proxy talk to. Set it only to put the socket somewhere else |
+
+### Instances and Their Sockets
+
+**Each instance has its own runtime directory, `/run/tollgate-<instance>/`.**
+The init script creates it before the instance starts, owned by the user the
+instance runs as. Only that user can create files in it. Who may then connect
+to a socket in it is set by the socket's own file permissions.
+
+The directory holds the instance's sockets, under fixed names:
+
+| Socket | Who listens | Path |
+|--------|-------------|------|
+| Control | `tollgated` | `/run/tollgate-<instance>/control.sock` |
+| Enforcer | The external enforcer, only with `enforcer.kind: external` | `/run/tollgate-<instance>/enforcer.sock` |
+
+So a router running three instances has three directories:
+
+| Instance | Service | Runtime directory |
+|----------|---------|-------------------|
+| `ip` | `tollgate-ip` | `/run/tollgate-ip/` |
+| `fips` | `tollgate-fips` | `/run/tollgate-fips/` |
+| `fips-exit` | `tollgate-fips-exit` | `/run/tollgate-fips-exit/` |
+
+The `fips-exit` instance runs as the user `exitd`, the same user as its
+enforcer, the exit proxy `exitd`. So `exitd` can create `enforcer.sock` in
+`/run/tollgate-fips-exit/`, and no other program can put a socket there in its
+place.
+
+**Clients find the sockets from the instance's name.** A proxy working with
+the instance `ip` connects to `/run/tollgate-ip/control.sock` without being
+told where it is. `tolltop` finds every running instance by listing
+`/run/tollgate-*/control.sock`.
+
+**An instance with no name is called `default`,** and keeps the same layout:
+its control socket is `/run/tollgate-default/control.sock`. One rule then
+covers every node, and `tolltop` finds an unnamed node the same way it finds
+the others.
+
+`/run` is where these live on Linux and OpenWrt. The macOS package uses
+`/usr/local/var/run` instead, and a node a person runs by hand uses
+`$XDG_RUNTIME_DIR`. Only that first part changes. If the instance's directory
+is missing, `tollgated` creates it, if it can.
 
 ---
 
@@ -103,7 +172,7 @@ enforcer:
   kind: loopback              # loopback, ip, fips or external
   interface: "eth0"           # ip only: the interface facing the peers
   fips_socket: ""             # fips only: the FIPS control socket; empty = FIPS's own default
-  socket: ""                  # external only: the enforcer's Unix socket (required there)
+  socket: ""                  # external only: the enforcer's Unix socket; empty = the instance's default
   identity: null              # pubkey or address; null = the kind's default
 ```
 
@@ -112,7 +181,7 @@ enforcer:
 | `kind` | `loopback` | `loopback` shapes and meters a socket of its own and forwards nobody's traffic — for demos and tests, and it runs anywhere. `ip` gates and shapes the kernel's forwarding path with nftables and `tc`, which is what sells transit; it needs Linux with `CAP_NET_ADMIN`. `fips` sells transit across a FIPS mesh, leaving enforcement to the FIPS node over its control socket. `external` hands enforcement to a separate program, over the enforcer protocol |
 | `interface` | `"eth0"` | Where the peers' `tc` classes live. Only `ip` uses it |
 | `fips_socket` | *(FIPS's default path)* | Only `fips` uses it |
-| `socket` | *(none)* | The Unix socket the external enforcer listens on. Only `external` uses it, and there it is required |
+| `socket` | `/run/tollgate-<instance>/enforcer.sock` | The Unix socket the external enforcer listens on. Only `external` uses it. Set it only if the enforcer listens somewhere else ([Instances and Their Sockets](#instances-and-their-sockets)) |
 | `identity` | *(by kind, below)* | Who a connecting peer is: `pubkey` or `address` |
 
 The default is `loopback` because it runs everywhere and gates nothing it does not own: a node that installed firewall rules because a config line was missing would be a nasty surprise.
@@ -621,6 +690,7 @@ Some parameters can be changed at runtime without restarting `tollgated`:
 | Channel parameters | No | Applies to new channels only |
 | Own mint URL and unit | No | Requires restart; changing them invalidates outstanding vouchers |
 | Identity | No | Requires restart |
+| Instance name, control socket, enforcer socket | No | Requires restart |
 
 `merchantd` has its own runtime changes:
 
@@ -645,6 +715,9 @@ Each daemon watches its own config file for changes and applies runtime-changeab
 | Format | YAML | Follows FIPS pattern, human-readable, supports comments |
 | Loading | Cascading multi-file with priority | System defaults + user overrides + deployment specifics |
 | Defaults | Every parameter has a sensible default | Minimal config for simple deployments |
+| Instances | One `tollgated` for every task, run once per task; each instance is named by `instance` or `--instance` | The name ties together what belongs to one instance: its service, its logs and its runtime directory |
+| Runtime directory | One per instance, `/run/tollgate-<instance>/`, created by the init script and owned by the instance's user. The control and enforcer sockets sit in it under fixed names, and their keys are set only to deviate | Ownership: only the instance's user can create a socket there, so no other program can take the place of the enforcer or of `tollgated`. Discovery: a client finds an instance from its name alone, and `tolltop` finds them all with one listing. One place per instance: two instances never share a path, and everything of one instance is in one directory |
+| Unset instance | Named `default`, with the same layout | One rule for every node. Keeping the old plain paths for an unnamed node would give clients a second place to look, and `tolltop`'s listing would miss it |
 | Mint block | Optional. Where `mintd` is, and its unit; no privilege there | Issuing sits in its own daemon. A node that issues nothing — a pass-through relay, a buying leaf — needs no `mintd` at all |
 | Merchant block | A socket to `merchantd`, and `prefetch` counted in fundings per upstream | `tollgated` holds nothing of value, so it asks for upstream vouchers when it needs them; upstreams differ in mint and capacity, so no single amount fits |
 | Grants block | Replaces the metering block | There is no interval to negotiate and no drift tolerance to set. What is left is a bound on what a payer may buy in one purchase |

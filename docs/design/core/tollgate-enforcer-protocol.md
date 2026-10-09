@@ -64,10 +64,11 @@ but a subject belongs to at most one payer.
 
 ### What a Subject Is
 
-Each `tollgated` runs as a named instance, such as `tollgate-ip`,
-`tollgate-fips` or `tollgate-fips-exit`. Each instance is paired with exactly
-one enforcer, for one task. The operator configures the two together, outside
-this protocol.
+Each `tollgated` runs as a named instance, such as `ip`, `fips` or
+`fips-exit`, under the services `tollgate-ip`, `tollgate-fips` and
+`tollgate-fips-exit` ([Instance](tollgate-configuration.md#instance)). Each
+instance is paired with exactly one enforcer, for one task. The operator
+configures the two together, outside this protocol.
 
 That pairing already says what the enforcer looks for in traffic, so the
 protocol does not repeat it. A subject on the wire is plain bytes, with no
@@ -148,11 +149,19 @@ subjects take. A single flag on a subject tells the enforcer the third.
 **The enforcer listens on a Unix socket, and `tollgated` connects to it.**
 `tollgated` reconnects whenever the connection drops. The enforcer is the
 server because it owns the traffic: it may start before `tollgated`, and it
-keeps running when `tollgated` restarts. `tollgated` needs only the socket's
-path, `enforcer.socket`.
+keeps running when `tollgated` restarts.
+
+**The socket's path follows from the instance's name.** It is
+`/run/tollgate-<instance>/enforcer.sock`, in the instance's own runtime
+directory ([Instances and Their
+Sockets](tollgate-configuration.md#instances-and-their-sockets)). The enforcer
+listens there, and `tollgated` connects there. `enforcer.socket` is needed only
+to put it somewhere else.
 
 **Whoever can open the socket can open the traffic.** The socket's file
-permissions must therefore admit `tollgated` alone. The enforcer serves one
+permissions must therefore admit `tollgated` alone. The runtime directory
+helps here: only the instance's user can create files in it, so no other
+program can put a socket there in the enforcer's place. The enforcer serves one
 connection at a time. A second connection replaces the first, and the
 enforcer resets to closed, as if the first had dropped.
 
@@ -453,9 +462,9 @@ identity fixes, and derives the rest.
 ## Delegated Bindings
 
 A **trusted local client** is a program on the same machine that talks to
-`tollgated` over its control socket. The socket's file permissions are what
-make it trusted. Such a client may ask `tollgated` to add a subject to a
-payer's bindings. That is a **delegated binding**. `tollgated` did not see the
+`tollgated` over its control socket, `/run/tollgate-<instance>/control.sock`.
+The socket's file permissions are what make it trusted. Such a client may ask
+`tollgated` to add a subject to a payer's bindings. That is a **delegated binding**. `tollgated` did not see the
 subject itself; it is taking the client's word.
 
 The typical client is a proxy that buys a session for each phone it serves.
@@ -609,15 +618,18 @@ A `bind` carries at most eight subjects, which keeps the largest message under
 
 A router sells internet access to devices on its LAN, `br-lan`. Its enforcer
 is a firewall program that matches addresses and hardware (MAC) addresses, and
-takes no third party's word for them. It is paired with the instance
-`tollgate-ip`, whose config says:
+takes no third party's word for them. It is paired with the instance `ip`,
+whose config says:
 
 ```yaml
+instance: ip
 enforcer:
   kind: external
-  socket: "/run/tollgate-ip/enforcer.sock"
   identity: address
 ```
+
+No `socket` is written, so the enforcer listens at the default for this
+instance, `/run/tollgate-ip/enforcer.sock`.
 
 The enforcer starts and says what it was built for:
 
@@ -695,16 +707,21 @@ Nothing is sold per link here. The exit's traffic to the payer crosses
 whatever mesh path FIPS picks, and any paid peering along that path is a
 separate matter, handled by the built-in `fips` enforcer.
 
-The enforcer is the proxy itself, paired with the instance
-`tollgate-fips-exit`. FIPS tells the proxy which address a connection came
-from. The proxy wants to know which key. The instance's config says:
+The enforcer is the proxy itself, `exitd`, paired with the instance
+`fips-exit`. FIPS tells the proxy which address a connection came from. The
+proxy wants to know which key. The instance's config says:
 
 ```yaml
+instance: fips-exit
 enforcer:
   kind: external
-  socket: "/run/tollgate-fips-exit/enforcer.sock"
   identity: pubkey
 ```
+
+The socket is the default for this instance,
+`/run/tollgate-fips-exit/enforcer.sock`. The instance runs as the user `exitd`,
+the same user as the proxy, so the proxy can create its socket in
+`/run/tollgate-fips-exit/` and no other program can.
 
 The node runs FIPS and `tollgated` listens on its `fips0` address, so `pubkey`
 is allowed. The instance sells traffic, so its unit is `byte`. The enforcer
@@ -799,6 +816,7 @@ handed bytes that are neither.
 | Trust on the wire | No trust grades. `hello` states the identity the enforcer was built for and whether it accepts delegated bindings; a subject carries only a `delegated` flag | The deployment already fixes what trust there is: FIPS checks keys, a LAN address can be faked, a delegated binding is the local client's word. Per-subject grades would repeat that without letting an enforcer do anything the identity and the flag do not. A field nobody can act on invites an enforcer to trust it |
 | Payer state | One `set(peer, rate)`: `0` closed, a rate open and shaped, `null` open and unshaped. Access levels stay in `tollgated` | Open or closed, and how fast, is all an enforcer applies, and core's rate already says both. One message means no moment open at a rate nobody bought |
 | Transport | Unix socket; the enforcer listens, `tollgated` connects and reconnects | The enforcer owns the traffic and may start first or outlive `tollgated`. The socket's file permissions decide who may connect |
+| Socket path | `/run/tollgate-<instance>/enforcer.sock` by default, in the instance's runtime directory; `enforcer.socket` only to deviate | The enforcer is set up for one instance, so both ends can work the path out from the instance's name and neither needs it written down. The directory belongs to the instance's user, so no other program can listen there in the enforcer's place |
 | Encoding | CBOR with the wire protocol's 2-byte framing; types in `tollgate-protocol` | One codec and one framing in the codebase. A Rust enforcer links the types, even without the standard library; others get a CDDL schema |
 | Type numbers | `0x20` upwards, clear of the wire protocol's | A message on the wrong socket fails to decode instead of being misread |
 | `bind` | Replaces the payer's whole set of subjects | Sending it twice does no harm, so resending the full state uses the same messages as normal operation |

@@ -371,6 +371,21 @@ Not every node needs all three:
 | Market maker, forwards nothing | merchantd | Trades paper without delivering any |
 | Constrained device (ESP32) | Deferred | Likely a remote `merchantd` selling its vouchers, or all three linked into one binary. The split is a boundary, not a requirement for separate processes |
 
+### Several tollgated Instances
+
+One machine may run `tollgated` more than once, one **instance** per task:
+say `ip` selling internet access on the LAN, and `fips-exit` selling a FIPS
+exit. It is the same program each time, with its own config file and its own
+name.
+
+Each instance has its own runtime directory, `/run/tollgate-<instance>/`,
+owned by the user it runs as. Its control socket is
+`/run/tollgate-<instance>/control.sock`, so the LAN instance's is
+`/run/tollgate-ip/control.sock`. `tolltop` and local clients such as a proxy
+find an instance by its name, and `tolltop` finds them all by listing
+`/run/tollgate-*/control.sock`. The details are in
+[tollgate-configuration.md](tollgate-configuration.md#instances-and-their-sockets).
+
 ---
 
 ## Security
@@ -420,4 +435,5 @@ what show it.
 | Upstream funding | tollgated asks merchantd, which may refuse; any buffer counted in next fundings per upstream peer, decided by measurement | Keeps tollgated free of value without guessing at latency. Upstreams differ in mint and capacity, so one global amount means nothing |
 | Lightning at merchantd | None: Cashu tokens from `accepts` only | No Lightning node on the router. A Lightning-only buyer mints at one of the accepted mints first |
 | Link metrics in pricing | Read by the operator, who sets prices by hand | `fund` and `deposit` stay the whole interface. A read-only feed from `tollgated` is future work, and never a price input for a single peer ([tollgate-hazards.md](tollgate-hazards.md)) |
+| tollgated instances | One program, run once per task; each instance has its own name and its own runtime directory, `/run/tollgate-<instance>/`, holding its sockets | Each task is configured, restarted and watched on its own. The directory is owned by the instance's user, so nothing else can create a socket in it, and a client finds an instance from its name alone |
 | Deployment target | One machine, local sockets | Remote merchantd is possible later; its open questions are deferred |
