@@ -361,6 +361,14 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 ### Fixed
 
+- A channel funding that fails is reported to core after a wait, one second
+  doubling to 30 s, core's funding timeout, and reset once a funding toward
+  that peer succeeds. Core asks again on the tick after it hears of a failure,
+  and it heard at once, so a payer whose mint was unreachable asked every
+  100 ms and logged "could not fund a channel" as often. The warning now
+  carries the attempt and the wait, and a success after failures is logged at
+  `info`.
+
 - A peer that reconnects before its old connection's end reaches the node
   keeps the new connection. The end named only the peer, so when it arrived
   late it dropped the new connection's link, ended its session and removed it

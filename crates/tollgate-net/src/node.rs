@@ -6,13 +6,13 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tollgate_core::buyer::BuyerPolicy;
+use tollgate_core::buyer::{BuyerPolicy, FUNDING_TIMEOUT_MS};
 use tollgate_core::config::{NodePolicy, PeerPolicy};
 use tollgate_core::session::Sessions;
 use tollgate_core::{Action, Event, Millis};
@@ -42,6 +42,19 @@ const TICK: Duration = Duration::from_millis(100);
 /// abandoned: the channel is lost to its refund timelock, as it would be to a
 /// power cut.
 const SHUTDOWN_SETTLE_GRACE: Duration = Duration::from_secs(5);
+
+/// How long a failed funding is held before core hears of it: one second,
+/// doubling to core's own funding timeout.
+///
+/// Core asks again on the tick after it hears a funding failed, so a mint that
+/// is down would otherwise be asked ten times a second, and the failure logged
+/// as often. Until core hears, it waits on the request, as it waits on one that
+/// is slow; past its funding timeout it would ask again without hearing, so the
+/// wait goes no further than that.
+const FUNDING_BACKOFF: Backoff = Backoff {
+    initial: Duration::from_secs(1),
+    max: Duration::from_millis(FUNDING_TIMEOUT_MS),
+};
 
 /// Most channel fundings held per peer while the enforcer is not selling.
 ///
@@ -125,6 +138,9 @@ pub struct Node {
     channels: Arc<dyn ChannelBackend>,
     /// Settlements, and the retries of the ones that fail.
     settler: Settler,
+    /// Fundings toward each peer that have failed in a row. Shared with the
+    /// funding tasks, which count a failure and clear the count on success.
+    funding_failures: Arc<Mutex<HashMap<PubKey, u32>>>,
     /// The connection each peer is on, and its outbound queue.
     links: HashMap<PubKey, Link>,
     /// Channel fundings a peer sent while the enforcer was not selling to it,
@@ -159,6 +175,7 @@ impl Node {
             sessions,
             enforcer,
             settler: Settler::new(Arc::clone(&channels), Backoff::DEFAULT),
+            funding_failures: Arc::default(),
             channels,
             links: HashMap::new(),
             deferred: HashMap::new(),
@@ -552,25 +569,56 @@ impl Node {
                 let channels = Arc::clone(&self.channels);
                 let done = done.clone();
                 let started = self.started;
-                tokio::task::spawn_blocking(move || {
-                    match channels.fund(peer, &mint_url, capacity) {
+                let failures = Arc::clone(&self.funding_failures);
+                tokio::spawn(async move {
+                    let funded = tokio::task::spawn_blocking(move || {
+                        channels.fund(peer, &mint_url, capacity)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(anyhow::anyhow!("funding task failed: {e}")));
+                    match funded {
                         Ok(funded) => {
+                            let failed = failures
+                                .lock()
+                                .expect("not poisoned")
+                                .remove(&peer)
+                                .unwrap_or(0);
+                            if failed > 0 {
+                                info!(%peer, failed, "funded a channel after failing");
+                            }
                             let now = millis_since(started);
-                            let _ = done.blocking_send(Event::OutgoingChannelFunded {
-                                peer,
-                                request,
-                                channel_id: funded.channel_id,
-                                capacity: funded.capacity,
-                                expires_at: funded.expiry.map(|e| channel::expires_at(e, now)),
-                                funding: funded.funding,
-                            });
+                            let _ = done
+                                .send(Event::OutgoingChannelFunded {
+                                    peer,
+                                    request,
+                                    channel_id: funded.channel_id,
+                                    capacity: funded.capacity,
+                                    expires_at: funded.expiry.map(|e| channel::expires_at(e, now)),
+                                    funding: funded.funding,
+                                })
+                                .await;
                         }
                         Err(e) => {
-                            warn!(%peer, error = format!("{e:#}"), "could not fund a channel");
-                            // So core can ask again rather than wait out the
-                            // funding timeout.
-                            let _ =
-                                done.blocking_send(Event::OutgoingFundingFailed { peer, request });
+                            let attempt = {
+                                let mut failures = failures.lock().expect("not poisoned");
+                                let count = failures.entry(peer).or_default();
+                                *count = count.saturating_add(1);
+                                *count
+                            };
+                            let retry_in = FUNDING_BACKOFF.delay(attempt);
+                            warn!(
+                                %peer,
+                                attempt,
+                                retry_in_s = retry_in.as_secs_f32(),
+                                error = format!("{e:#}"),
+                                "could not fund a channel"
+                            );
+                            // Core asks again on the next tick after it hears,
+                            // so it hears once the wait is over.
+                            tokio::time::sleep(retry_in).await;
+                            let _ = done
+                                .send(Event::OutgoingFundingFailed { peer, request })
+                                .await;
                         }
                     }
                 });
@@ -776,13 +824,16 @@ fn spawn_dialer(
 #[cfg(test)]
 mod tests {
     use std::net::IpAddr;
-    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
+    use anyhow::bail;
     use tollgate_core::access::AccessLevel;
     use tollgate_core::meter::Counters;
+    use tollgate_protocol::{ChannelId, Signature};
 
     use super::*;
-    use crate::channel::LocalChannels;
+    use crate::channel::{FundedChannel, LocalChannels, VerifiedChannel};
+    use crate::enforcer::Loopback;
 
     /// An enforcer that remembers who it was told about and from where, and,
     /// like the kernel ones, ignores a registration for a peer it already has.
@@ -821,6 +872,15 @@ mod tests {
 
     fn node(enforcer: Arc<dyn Enforcer>) -> Node {
         let identity = Identity::generate();
+        let channels = Arc::new(LocalChannels::new(identity.clone()));
+        node_with(identity, channels, enforcer)
+    }
+
+    fn node_with(
+        identity: Identity,
+        channels: Arc<dyn ChannelBackend>,
+        enforcer: Arc<dyn Enforcer>,
+    ) -> Node {
         let config = NodeConfig {
             identity: identity.clone(),
             policy: NodePolicy::default(),
@@ -833,7 +893,7 @@ mod tests {
             peers: Vec::new(),
             connector: None,
         };
-        Node::new(&config, Arc::new(LocalChannels::new(identity)), enforcer)
+        Node::new(&config, channels, enforcer)
     }
 
     #[tokio::test]
@@ -900,5 +960,126 @@ mod tests {
         assert!(!node.links.contains_key(&peer));
         assert!(node.sessions.peer(&peer).is_none());
         assert_eq!(registry.addr(peer), None);
+    }
+
+    /// A wallet whose mint can be taken down: funding fails while it is.
+    #[derive(Debug)]
+    struct Unreachable {
+        inner: LocalChannels,
+        down: AtomicBool,
+    }
+
+    impl ChannelBackend for Unreachable {
+        fn fund(&self, peer: PubKey, mint_url: &str, capacity: u64) -> Result<FundedChannel> {
+            if self.down.load(Ordering::SeqCst) {
+                bail!("mint unreachable");
+            }
+            self.inner.fund(peer, mint_url, capacity)
+        }
+        fn verify(&self, peer: PubKey, funding: &[u8]) -> Result<VerifiedChannel> {
+            self.inner.verify(peer, funding)
+        }
+        fn sign_update(&self, channel_id: ChannelId, cumulative: u64) -> Result<Signature> {
+            self.inner.sign_update(channel_id, cumulative)
+        }
+        fn verify_update(
+            &self,
+            peer: PubKey,
+            id: ChannelId,
+            cumulative: u64,
+            sig: Signature,
+        ) -> bool {
+            self.inner.verify_update(peer, id, cumulative, sig)
+        }
+        fn record_update(
+            &self,
+            peer: PubKey,
+            id: ChannelId,
+            cumulative: u64,
+            sig: Signature,
+        ) -> Result<()> {
+            self.inner.record_update(peer, id, cumulative, sig)
+        }
+        fn settle(&self, channel_id: ChannelId) -> Result<()> {
+            self.inner.settle(channel_id)
+        }
+    }
+
+    /// Ask for a channel toward `peer`, as core does, and time the answer.
+    async fn fund(
+        node: &mut Node,
+        peer: PubKey,
+        request: u64,
+        done: &mpsc::Sender<Event>,
+        answers: &mut mpsc::Receiver<Event>,
+    ) -> (Event, Duration) {
+        let asked = tokio::time::Instant::now();
+        node.execute(
+            Action::FundChannel {
+                peer,
+                request,
+                mint_url: "http://127.0.0.1/unused".into(),
+                capacity: 1_000,
+            },
+            done,
+        )
+        .await;
+        let answer = answers
+            .recv()
+            .await
+            .expect("the node answers every request");
+        (answer, asked.elapsed())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_funding_is_reported_after_a_growing_wait() {
+        // A mint that is down was asked again on every tick: core asks on the
+        // tick after it hears a funding failed, and it heard at once.
+        let identity = Identity::generate();
+        let wallet = Arc::new(Unreachable {
+            inner: LocalChannels::new(identity.clone()),
+            down: AtomicBool::new(true),
+        });
+        let mut node = node_with(identity, wallet.clone(), Arc::new(Loopback::new()));
+        let (done, mut answers) = mpsc::channel(16);
+        let peer = Identity::generate().pubkey();
+
+        // One second, doubling, and never longer than core would wait on a
+        // request that is not answered at all.
+        let mut waits = Vec::new();
+        for request in 1..=7 {
+            let (answer, waited) = fund(&mut node, peer, request, &done, &mut answers).await;
+            assert!(matches!(
+                answer,
+                Event::OutgoingFundingFailed { request: r, .. } if r == request
+            ));
+            waits.push(waited.as_secs());
+        }
+        assert_eq!(waits, [1, 2, 4, 8, 16, 30, 30]);
+
+        // Once the mint is back the channel comes back at once, and the next
+        // failure starts from a second again.
+        wallet.down.store(false, Ordering::SeqCst);
+        let (answer, waited) = fund(&mut node, peer, 8, &done, &mut answers).await;
+        assert!(matches!(
+            answer,
+            Event::OutgoingChannelFunded { request: 8, .. }
+        ));
+        assert_eq!(waited.as_secs(), 0);
+
+        wallet.down.store(true, Ordering::SeqCst);
+        let (_, waited) = fund(&mut node, peer, 9, &done, &mut answers).await;
+        assert_eq!(waited.as_secs(), 1);
+
+        // Each peer waits on its own failures.
+        let (_, waited) = fund(
+            &mut node,
+            Identity::generate().pubkey(),
+            10,
+            &done,
+            &mut answers,
+        )
+        .await;
+        assert_eq!(waited.as_secs(), 1);
     }
 }
