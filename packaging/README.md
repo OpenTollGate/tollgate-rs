@@ -59,7 +59,7 @@ ssh root@192.168.1.1 opkg install /tmp/tollgate_*.ipk
 About 10 MB packaged, 22 MB installed — most of it the mint. Fine on anything
 with a spare 32 MB of flash; too big for an 8 MB router without trimming.
 
-Dependencies are what the adapter actually uses: `nftables` for the gate and
+Dependencies are what the enforcer actually uses: `nftables` for the gate and
 the counters, `tc-full` for the shaper, `ip-full` for the routes and
 neighbours an upstream is counted by (BusyBox's `ip` has no JSON output),
 `kmod-sched-core` for the HTB class it installs, and `kmod-nf-conntrack`
@@ -70,7 +70,7 @@ address — a peer funds its channel against that mint, so `127.0.0.1` would be
 useless to it — opens 4747 and 3338 on the lan zone, and turns on forwarding.
 
 The service starts at `START=96`, after the firewall. fw4 flushing on a later
-start would take the adapter's own table and classes with it.
+start would take the enforcer's own table and classes with it.
 
 It ships selling at **1000 sat for about an hour at 5 MB/s** — 18 GB, so
 `bytes_per_unit: 18000000`, around 60 sat/GiB — taking minibits paper. That is
@@ -128,7 +128,7 @@ demand rate, renews before each one lapses, and rolls channels over as they
 fill. The router gates and shapes its LAN address to what it bought.
 
 What this does *not* do is meter the Mac's actual usage. `buying.demand` is a
-declared rate, not a measured one — the loopback adapter has no view of what
+declared rate, not a measured one — the loopback enforcer has no view of what
 the machine is really pulling through the router. So the Mac buys a constant
 rate rather than what it happens to need.
 

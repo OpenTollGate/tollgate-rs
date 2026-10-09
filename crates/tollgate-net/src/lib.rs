@@ -11,7 +11,7 @@
 //! - [`wire`] — the raw-TCP control plane, length-prefixed CBOR.
 //! - [`dataplane`] — the resource itself: real bytes on a real socket, shaped
 //!   to what was bought.
-//! - [`adapter`] — the delivery gate and the meters.
+//! - [`enforcer`] — the delivery gate and the meters.
 //! - [`channel`] — payment channels behind a trait.
 //! - [`client`] — one buyer session, for a program that speaks TollGate on a
 //!   device's behalf.
@@ -32,12 +32,12 @@
 //! - [`control`] — a local socket publishing what the node is doing, which is
 //!   what `tolltop` reads.
 
-pub mod adapter;
 pub mod channel;
 pub mod client;
 pub mod config;
 pub mod control;
 pub mod dataplane;
+pub mod enforcer;
 pub mod fips;
 pub mod identity;
 pub mod market;

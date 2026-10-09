@@ -72,7 +72,7 @@ fn buyer_policy() -> BuyerPolicy {
 struct Node {
     id: PubKey,
     sessions: Sessions,
-    /// Shaping rate last applied per peer — what the resource adapter would be
+    /// Shaping rate last applied per peer — what the enforcer would be
     /// enforcing.
     shaping: BTreeMap<PubKey, u64>,
     /// Access level last applied per peer.
@@ -236,7 +236,7 @@ fn carry_out(
                 },
             )),
 
-            // The resource adapter.
+            // The enforcer.
             Action::SetShapingRate { peer, rate } => {
                 node.shaping.insert(peer, rate);
             }
@@ -513,7 +513,7 @@ fn an_expired_grant_drops_the_peer_to_the_allowance_not_to_silence() {
 #[test]
 fn with_the_allowance_disabled_a_lapsed_peer_is_not_carried() {
     // The allowance is the only thing that carries a peer that stopped paying,
-    // so with none there is nothing left: every adapter closes the gate.
+    // so with none there is nothing left: every enforcer closes the gate.
     let mut policy = node_policy("https://b.example/mint");
     policy.minimum_flow = 0;
 
@@ -1186,7 +1186,7 @@ fn the_shaper_is_only_told_when_something_actually_changed() {
         !steady
             .iter()
             .any(|x| matches!(x, Action::SetShapingRate { .. })),
-        "rate did not change, so the adapter should not have been told"
+        "rate did not change, so the enforcer should not have been told"
     );
 }
 

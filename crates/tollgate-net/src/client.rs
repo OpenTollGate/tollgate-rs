@@ -22,9 +22,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::sync::watch;
 
-use crate::adapter::{Loopback, ResourceAdapter};
 use crate::channel::{Funding, SpilmanChannels, SpilmanConfig};
 use crate::config::File;
+use crate::enforcer::{Enforcer, Loopback};
 use crate::node::Node;
 use crate::wire::Connector;
 
@@ -115,26 +115,26 @@ peers:
         .context("build the channel backend")?,
     );
 
-    // The loopback adapter carries nothing here — the device's traffic goes
+    // The loopback enforcer carries nothing here — the device's traffic goes
     // through the gateway's own gate — but it is where demand lives.
-    let adapter: Arc<dyn ResourceAdapter> = Arc::new(Loopback::new());
-    tokio::spawn(hold_demand(Arc::clone(&adapter), rate));
+    let enforcer: Arc<dyn Enforcer> = Arc::new(Loopback::new());
+    tokio::spawn(hold_demand(Arc::clone(&enforcer), rate));
 
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .context("bind the session's control plane")?;
-    Node::new(&config, channels, adapter)
+    Node::new(&config, channels, enforcer)
         .run_on(listener, config, shutdown)
         .await
 }
 
 /// Keep the demand toward every peer at the latest rate. Re-applied on a
 /// short tick because the gateway appears as a peer only once connected.
-async fn hold_demand(adapter: Arc<dyn ResourceAdapter>, mut rate: watch::Receiver<u64>) {
+async fn hold_demand(enforcer: Arc<dyn Enforcer>, mut rate: watch::Receiver<u64>) {
     loop {
         let current = *rate.borrow_and_update();
-        for peer in adapter.peers() {
-            adapter.set_demand(peer, current);
+        for peer in enforcer.peers() {
+            enforcer.set_demand(peer, current);
         }
         tokio::select! {
             changed = rate.changed() => if changed.is_err() { return },

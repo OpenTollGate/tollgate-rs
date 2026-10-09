@@ -2,7 +2,7 @@
 # TollGate node — procd init script for OpenWrt
 
 USE_PROCD=1
-# After the network and the firewall: the adapter installs its own nftables
+# After the network and the firewall: the enforcer installs its own nftables
 # table and tc classes on the forwarding path, and fw4 flushing afterwards
 # would take them with it.
 START=96
@@ -54,7 +54,7 @@ start_service() {
 }
 
 stop_service() {
-	# The adapter tears its own table down on a clean exit; this is for the
+	# The enforcer tears its own table down on a clean exit; this is for the
 	# case where it did not get one.
 	nft delete table inet tollgate 2>/dev/null || true
 }

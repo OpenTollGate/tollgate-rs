@@ -13,10 +13,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tollgate_net::Identity;
-use tollgate_net::adapter::{Loopback, ResourceAdapter};
 use tollgate_net::channel::{SpilmanChannels, SpilmanConfig};
 use tollgate_net::client::{self, ClientSpec};
 use tollgate_net::config::File;
+use tollgate_net::enforcer::{Enforcer, Loopback};
 use tollgate_net::mint::{self, IssueLimit, MintConfig};
 use tollgate_net::node::Node;
 use tollgate_net::wallet::{Wallet, WalletFunding};

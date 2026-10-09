@@ -12,7 +12,7 @@ buying:
   renew_lead_ms: 1200
 forwarding:
   # The client forwards nothing — it is at the edge of the mesh. It runs the
-  # FIPS adapter anyway, so that its control plane checks the gateway's
+  # FIPS enforcer anyway, so that its control plane checks the gateway's
   # identity against the address it dials, and so that `--demand` reaches the
   # buyer through the same path a real node would use.
   mode: fips

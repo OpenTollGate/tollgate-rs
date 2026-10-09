@@ -140,13 +140,13 @@ async fn main() -> Result<()> {
     );
 
     // Which thing actually delivers. The loopback shaper carries a socket of
-    // its own and forwards nobody's traffic; the kernel adapter gates and
+    // its own and forwards nobody's traffic; the kernel enforcer gates and
     // shapes the real forwarding path.
-    let adapter: Arc<dyn tollgate_net::adapter::ResourceAdapter> = match file.forwarding.mode {
+    let enforcer: Arc<dyn tollgate_net::enforcer::Enforcer> = match file.forwarding.mode {
         ForwardingMode::Loopback => {
-            let loopback = Arc::new(tollgate_net::adapter::Loopback::new());
+            let loopback = Arc::new(tollgate_net::enforcer::Loopback::new());
 
-            // The loopback data plane belongs to the loopback adapter, so it is
+            // The loopback data plane belongs to the loopback enforcer, so it is
             // started here rather than by the node.
             let data = tokio::net::TcpListener::bind(config.data_listen())
                 .await
@@ -170,11 +170,11 @@ async fn main() -> Result<()> {
         #[cfg(target_os = "linux")]
         ForwardingMode::Nftables => {
             let interface = file.forwarding.interface.clone();
-            let adapter = tollgate_net::adapter::Nftables::new(&interface).with_context(|| {
+            let enforcer = tollgate_net::enforcer::Ip::new(&interface).with_context(|| {
                 format!("set up nftables and tc on {interface}; CAP_NET_ADMIN is required")
             })?;
             info!(%interface, "gating and shaping the kernel forwarding path");
-            Arc::new(adapter)
+            Arc::new(enforcer)
         }
         #[cfg(not(target_os = "linux"))]
         ForwardingMode::Nftables => {
@@ -183,23 +183,23 @@ async fn main() -> Result<()> {
         #[cfg(unix)]
         ForwardingMode::Fips => {
             let socket = if file.forwarding.fips_socket.is_empty() {
-                tollgate_net::adapter::Fips::default_socket_path()
+                tollgate_net::enforcer::Fips::default_socket_path()
             } else {
                 file.forwarding.fips_socket.clone().into()
             };
-            let adapter = tollgate_net::adapter::Fips::new(&socket, config.policy.minimum_flow)
+            let enforcer = tollgate_net::enforcer::Fips::new(&socket, config.policy.minimum_flow)
                 .with_context(|| {
-                    format!(
-                        "reach the FIPS control socket at {}; is fipsd running?",
-                        socket.display()
-                    )
-                })?;
+                format!(
+                    "reach the FIPS control socket at {}; is fipsd running?",
+                    socket.display()
+                )
+            })?;
             info!(
                 socket = %socket.display(),
                 allowance = config.policy.minimum_flow,
                 "setting transit policy on the FIPS node"
             );
-            Arc::new(adapter)
+            Arc::new(enforcer)
         }
         #[cfg(not(unix))]
         ForwardingMode::Fips => {
@@ -214,11 +214,12 @@ async fn main() -> Result<()> {
         ForwardingMode::External => {
             let socket = PathBuf::from(&file.forwarding.gate_socket);
             info!(socket = %socket.display(), "waiting for the gate to say hello");
-            let (adapter, identify) =
-                tollgate_net::adapter::External::connect(&socket, file.forwarding.identify).await?;
+            let (enforcer, identify) =
+                tollgate_net::enforcer::External::connect(&socket, file.forwarding.identify)
+                    .await?;
             config.identify = identify;
             info!(socket = %socket.display(), ?identify, "enforcing through the gate");
-            Arc::new(adapter)
+            Arc::new(enforcer)
         }
         #[cfg(not(unix))]
         ForwardingMode::External => {
@@ -226,7 +227,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    let node = Node::new(&config, channels, adapter.clone());
+    let node = Node::new(&config, channels, enforcer.clone());
 
     // Anything watching this node reads here. A Unix socket rather than a port:
     // it is operational state for a local tool, not something a peer acts on.
@@ -259,14 +260,14 @@ async fn main() -> Result<()> {
     };
     if demand > 0 || args.ramp > 0 {
         info!(demand, "wanting");
-        let adapter = Arc::clone(&adapter);
+        let enforcer = Arc::clone(&enforcer);
         let (base, ramp, interval) = (demand, args.ramp, args.ramp_interval.max(1));
         tokio::spawn(async move {
             let mut steps = 0u64;
             loop {
                 let demand = base.saturating_add(ramp.saturating_mul(steps));
-                for peer in adapter.peers() {
-                    adapter.set_demand(peer, demand);
+                for peer in enforcer.peers() {
+                    enforcer.set_demand(peer, demand);
                 }
                 tokio::time::sleep(Duration::from_secs(interval)).await;
                 if ramp > 0 {
@@ -277,14 +278,14 @@ async fn main() -> Result<()> {
     }
 
     if args.report > 0 {
-        let adapter = Arc::clone(&adapter);
+        let enforcer = Arc::clone(&enforcer);
         let period = Duration::from_secs(args.report);
         tokio::spawn(async move {
             let mut last: std::collections::HashMap<_, (u64, u64)> = Default::default();
             loop {
                 tokio::time::sleep(period).await;
-                for peer in adapter.peers() {
-                    let now = adapter.counters(peer);
+                for peer in enforcer.peers() {
+                    let now = enforcer.counters(peer);
                     let (was_delivered, was_received) = last
                         .insert(peer, (now.delivered, now.received))
                         .unwrap_or((0, 0));
@@ -292,8 +293,8 @@ async fn main() -> Result<()> {
                     let secs = period.as_secs().max(1);
                     info!(
                         peer = %peer,
-                        shaped = adapter.shaping_rate(peer),
-                        demand = adapter.demand(peer),
+                        shaped = enforcer.shaping_rate(peer),
+                        demand = enforcer.demand(peer),
                         down = (now.received - was_received) / secs,
                         up = (now.delivered - was_delivered) / secs,
                         "link"

@@ -462,7 +462,7 @@ impl Default for ForwardingSection {
     }
 }
 
-/// Which adapter enforces access and rate.
+/// Which enforcer enforces access and rate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ForwardingMode {

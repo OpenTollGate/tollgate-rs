@@ -1,6 +1,6 @@
 [package]
 name = "tollgate-net"
-description = "TollGate node: raw-TCP transport, payment channels, and a network-forwarding resource adapter"
+description = "TollGate node: raw-TCP transport, payment channels, and a network-forwarding enforcer"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -54,7 +54,7 @@ hex.workspace = true
 arc-swap = "1"
 ratatui = "0.30"
 crossterm = "0.29"
-# FIPS names peers by npub, so the adapter that drives it has to speak NIP-19.
+# FIPS names peers by npub, so the enforcer that drives it has to speak NIP-19.
 bech32 = "0.11"
 # Implementing cdk's payment-processor trait, and rewriting the stream of
 # payments it produces. Both versions follow cdk's own.

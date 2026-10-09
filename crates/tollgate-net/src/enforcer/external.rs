@@ -1,7 +1,7 @@
 //! Driving a gate: an enforcement program this node does not contain.
 //!
 //! The gate owns a data plane — a firewall, a proxy, a tunnel — and listens on
-//! a Unix socket. This adapter connects to it, tells it which payer holds which
+//! a Unix socket. This enforcer connects to it, tells it which payer holds which
 //! subjects and at what rate each payer is carried, and takes back what it
 //! carried. The protocol is `docs/design/core/tollgate-gate-protocol.md`; the
 //! messages are [`tollgate_protocol::gate`].
@@ -12,7 +12,7 @@
 //! carrying its rate: `0` closed, a number open and shaped, `null` open and
 //! unshaped. That rate is the one core shapes the payer to, which is `0`
 //! exactly when [`AccessLevel::carried`] says the payer is shut out — so
-//! [`set_access`](ResourceAdapter::set_access) has nothing to add, and sends
+//! [`set_access`](Enforcer::set_access) has nothing to add, and sends
 //! nothing.
 //!
 //! What a payer is bound to is what this node genuinely has about it: under
@@ -25,7 +25,7 @@
 //! A gate starts closed and closes again whenever the connection drops, so
 //! every connection begins with the full state: a `bind` and a `set` for every
 //! payer. While there is no connection — or before the first `hello` this node
-//! accepts — [`selling`](ResourceAdapter::selling) is false, and the node sells
+//! accepts — [`selling`](Enforcer::selling) is false, and the node sells
 //! nothing. The counters are rebased across connections, so the totals core
 //! sees never go backwards.
 //!
@@ -56,7 +56,7 @@ use tollgate_protocol::gate::{
 use tollgate_protocol::{FrameReader, MAX_FRAME_LEN, PubKey};
 use tracing::{debug, error, info, warn};
 
-use super::ResourceAdapter;
+use super::Enforcer;
 use crate::wire::Identify;
 
 /// How long to wait between attempts to reach the gate.
@@ -190,7 +190,7 @@ pub enum DelegateError {
     TooMany,
 }
 
-/// One payer, as this adapter knows it.
+/// One payer, as this enforcer knows it.
 #[derive(Debug, Clone)]
 struct Peer {
     /// When it arrived, relative to the others.
@@ -343,7 +343,7 @@ impl External {
     /// Reach the gate at `socket`, and wait for a `hello` this node can run
     /// behind.
     ///
-    /// Returns the adapter and the Identify mode the gate requires, which is
+    /// Returns the enforcer and the Identify mode the gate requires, which is
     /// the mode the node must run. Waits as long as the gate is unreachable or
     /// speaks a version this node does not, retrying about once a second;
     /// fails if the gate's `hello` contradicts itself or `pin`, the
@@ -356,18 +356,18 @@ impl External {
         pin: Option<Identify>,
     ) -> Result<(Self, Identify)> {
         let socket = socket.into();
-        let adapter = Self {
+        let enforcer = Self {
             state: Arc::new(Mutex::new(State::default())),
         };
         let (first_tx, first_rx) = oneshot::channel();
         tokio::spawn(maintain(
             socket.clone(),
-            Arc::clone(&adapter.state),
+            Arc::clone(&enforcer.state),
             pin,
             first_tx,
         ));
         match first_rx.await {
-            Ok(Ok(mode)) => Ok((adapter, mode)),
+            Ok(Ok(mode)) => Ok((enforcer, mode)),
             Ok(Err(refusal)) => bail!(
                 "refusing to run behind the gate at {}: {refusal}",
                 socket.display()
@@ -699,7 +699,7 @@ async fn read_loop(
     }
 }
 
-impl ResourceAdapter for External {
+impl Enforcer for External {
     /// Bind the payer to what this node knows of it, and send its rate — `0`
     /// until core says otherwise. The gate hears of it before its Offer.
     fn register(&self, peer: PubKey, addr: IpAddr) {
@@ -759,7 +759,7 @@ impl ResourceAdapter for External {
             .unwrap_or_default()
     }
 
-    /// Told rather than measured, as for the FIPS adapter: a gate reports what
+    /// Told rather than measured, as for the FIPS enforcer: a gate reports what
     /// it carried, not what anyone wanted.
     fn demand(&self, peer: PubKey) -> u64 {
         self.state

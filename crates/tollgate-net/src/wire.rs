@@ -31,7 +31,7 @@ pub enum Wire {
         /// Where they reach us from.
         ///
         /// The session identifies a peer by public key; the kernel identifies
-        /// it by address, and an adapter that gates forwarding needs both.
+        /// it by address, and an enforcer that gates forwarding needs both.
         addr: SocketAddr,
         /// Outbound queue for this link.
         tx: mpsc::Sender<Message>,
@@ -63,7 +63,7 @@ pub enum Identify {
     ///
     /// On plain IP an address commits to nothing, so there is nothing to check
     /// against. A peer that claims a paying peer's key gets that peer's session
-    /// — which is why an adapter that gates by address should not be run on an
+    /// — which is why an enforcer that gates by address should not be run on an
     /// unwrapped network.
     #[default]
     Claimed,
@@ -214,7 +214,7 @@ async fn run(
     stream.set_nodelay(true).ok();
     let addr = stream
         .peer_addr()
-        .context("the peer's address is what an adapter gates on")?;
+        .context("the peer's address is what an enforcer gates on")?;
 
     // Before the session exists, because a session is what a stolen key would
     // be stealing. On a dialled connection the same check reads as configuration

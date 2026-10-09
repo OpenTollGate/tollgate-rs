@@ -5,9 +5,9 @@
 //! carried and how fast, and `show_transit_policy` reports what has moved under
 //! it — so nothing here has to know how a mesh forwards anything.
 //!
-//! # Why this one is safe where the kernel adapter is not
+//! # Why this one is safe where the kernel enforcer is not
 //!
-//! [`Nftables`](super::Nftables) binds a peer's public key to whatever address
+//! [`Ip`](super::Ip) binds a peer's public key to whatever address
 //! it announced itself from, on the peer's own say-so. On an unwrapped IP
 //! network that is a real hole: claim a paying peer's key and its grant gates
 //! your address.
@@ -18,7 +18,7 @@
 //! and no binding step to subvert — which is why the [`register`] address
 //! argument is ignored rather than merely unused.
 //!
-//! [`register`]: ResourceAdapter::register
+//! [`register`]: Enforcer::register
 //!
 //! # Identity
 //!
@@ -39,7 +39,7 @@ use tollgate_core::meter::Counters;
 use tollgate_protocol::PubKey;
 use tracing::{debug, warn};
 
-use super::ResourceAdapter;
+use super::Enforcer;
 use crate::fips::names;
 
 /// How long a counter reading is reused before the socket is asked again.
@@ -56,7 +56,7 @@ const COUNTER_TTL: Duration = Duration::from_millis(200);
 /// tick; it is not worth stalling the event loop that would do the retrying.
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// One peer, as this adapter knows it.
+/// One peer, as this enforcer knows it.
 #[derive(Debug, Clone)]
 struct Peer {
     /// How a policy for this peer is addressed.
@@ -66,7 +66,7 @@ struct Peer {
     access: AccessLevel,
     rate: u64,
     /// What this node wants to pull from the peer, if anything. See
-    /// [`ResourceAdapter::set_demand`].
+    /// [`Enforcer::set_demand`].
     demand: u64,
     counters: Counters,
 }
@@ -84,7 +84,7 @@ impl Fips {
     /// Connect to a FIPS control socket and declare the floor, failing if
     /// nothing answers.
     ///
-    /// Probes rather than trusting the path: an adapter that cannot reach FIPS
+    /// Probes rather than trusting the path: an enforcer that cannot reach FIPS
     /// would report policies as applied while the mesh carried everything
     /// unshaped, which is worse than not starting.
     ///
@@ -96,17 +96,17 @@ impl Fips {
     /// per peer as they arrive, is what makes the floor hold from the first
     /// packet instead of the first tick.
     pub fn new(socket: impl Into<PathBuf>, minimum_flow: u64) -> Result<Self> {
-        let adapter = Self {
+        let enforcer = Self {
             socket: socket.into(),
             peers: Mutex::new(HashMap::new()),
             last_refresh: Mutex::new(None),
         };
-        adapter
+        enforcer
             .request("show_transit_policy", serde_json::json!({}))
             .with_context(|| {
                 format!(
                     "reach the FIPS control socket at {}",
-                    adapter.socket.display()
+                    enforcer.socket.display()
                 )
             })?;
 
@@ -114,7 +114,7 @@ impl Fips {
         // which is still a floor worth stating: without the default they would
         // get everything. The gate is core's, as it is for a named peer, so an
         // unnamed peer is admitted exactly when a named unpaid one would be.
-        adapter
+        enforcer
             .request(
                 "set_default_transit_policy",
                 serde_json::json!({
@@ -125,7 +125,7 @@ impl Fips {
             .context("declare the minimum flow allowance as the FIPS default")?;
         debug!(minimum_flow, "unnamed peers held at the allowance");
 
-        Ok(adapter)
+        Ok(enforcer)
     }
 
     /// Where FIPS puts its control socket unless told otherwise.
@@ -268,7 +268,7 @@ fn rate_for_fips(rate: u64) -> serde_json::Value {
     }
 }
 
-impl ResourceAdapter for Fips {
+impl Enforcer for Fips {
     /// Note a peer. The address is ignored: FIPS gates by authenticated
     /// identity, and there is nothing here for an address to add.
     fn register(&self, peer: PubKey, _addr: IpAddr) {

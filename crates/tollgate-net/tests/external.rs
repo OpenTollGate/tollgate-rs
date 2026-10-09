@@ -1,6 +1,6 @@
 //! `forwarding.mode: external` against a stub gate.
 //!
-//! The stub is this test: it listens where the adapter connects, says `hello`,
+//! The stub is this test: it listens where the enforcer connects, says `hello`,
 //! and asserts on what `tollgated`'s side sends it — or sends what a real gate
 //! would, and what a broken one might. The protocol is
 //! `docs/design/core/tollgate-gate-protocol.md`.
@@ -17,8 +17,8 @@ use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tollgate_core::buyer::BuyerPolicy;
 use tollgate_core::config::{GrantPolicy, NodePolicy, PeerPolicy};
 use tollgate_core::meter::Counters as MeterCounters;
-use tollgate_net::adapter::{DelegateError, External, Loopback, ResourceAdapter};
 use tollgate_net::channel::LocalChannels;
+use tollgate_net::enforcer::{DelegateError, Enforcer, External, Loopback};
 use tollgate_net::identity::Identity;
 use tollgate_net::node::{Node, NodeConfig, PeerConfig};
 use tollgate_net::wire::Identify;
@@ -153,13 +153,13 @@ fn fips_hello() -> Hello {
     }
 }
 
-/// Start the adapter against `stub`, answering its connection with `hello`.
+/// Start the enforcer against `stub`, answering its connection with `hello`.
 async fn connected(stub: &Stub, hello: Hello) -> (External, Identify, Conn) {
     let connecting = tokio::spawn(External::connect(stub.path.clone(), None));
     let mut conn = stub.accept().await;
     conn.hello(hello).await;
-    let (adapter, mode) = connecting.await.expect("join").expect("connect");
-    (adapter, mode, conn)
+    let (enforcer, mode) = connecting.await.expect("join").expect("connect");
+    (enforcer, mode, conn)
 }
 
 fn key(seed: u8) -> PubKey {
@@ -188,17 +188,17 @@ fn is_set(msg: &GateMessage, peer: PubKey, rate: Option<u64>) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// The adapter against the stub
+// The enforcer against the stub
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn a_payer_is_bound_to_its_address_and_starts_closed() {
     let stub = Stub::new();
-    let (adapter, mode, mut conn) = connected(&stub, lan_hello()).await;
+    let (enforcer, mode, mut conn) = connected(&stub, lan_hello()).await;
     assert_eq!(mode, Identify::Claimed, "the gate's hello decides the mode");
 
     let payer = key(1);
-    adapter.register(payer, lan(23));
+    enforcer.register(payer, lan(23));
 
     // The subject is what this node saw, and the payer's rate is zero until
     // core says otherwise.
@@ -215,16 +215,16 @@ async fn a_payer_is_bound_to_its_address_and_starts_closed() {
     assert!(is_set(&conn.recv().await.unwrap(), payer, Some(0)));
 
     // Open, shaped, closed again; unmetered is open and unshaped.
-    adapter.set_shaping_rate(payer, 3_276_800);
+    enforcer.set_shaping_rate(payer, 3_276_800);
     assert!(is_set(&conn.recv().await.unwrap(), payer, Some(3_276_800)));
-    adapter.set_shaping_rate(payer, 0);
+    enforcer.set_shaping_rate(payer, 0);
     assert!(is_set(&conn.recv().await.unwrap(), payer, Some(0)));
-    adapter.set_shaping_rate(payer, u64::MAX);
+    enforcer.set_shaping_rate(payer, u64::MAX);
     assert!(is_set(&conn.recv().await.unwrap(), payer, None));
 
     // An access level says nothing a rate does not.
-    adapter.set_access(payer, tollgate_core::access::AccessLevel::Active);
-    adapter.remove(payer);
+    enforcer.set_access(payer, tollgate_core::access::AccessLevel::Active);
+    enforcer.remove(payer);
     assert_eq!(
         conn.recv().await,
         Some(GateMessage::Remove(gate::Remove { peer: payer }))
@@ -234,11 +234,11 @@ async fn a_payer_is_bound_to_its_address_and_starts_closed() {
 #[tokio::test]
 async fn under_fips_the_key_itself_is_bound() {
     let stub = Stub::new();
-    let (adapter, mode, mut conn) = connected(&stub, fips_hello()).await;
+    let (enforcer, mode, mut conn) = connected(&stub, fips_hello()).await;
     assert_eq!(mode, Identify::Fips);
 
     let payer = key(2);
-    adapter.register(payer, "fd00::1".parse().unwrap());
+    enforcer.register(payer, "fd00::1".parse().unwrap());
     let GateMessage::Bind(bind) = conn.recv().await.unwrap() else {
         panic!("expected a bind");
     };
@@ -260,10 +260,10 @@ async fn a_subject_the_gate_does_not_match_is_never_sent() {
     let stub = Stub::new();
     let mut hello = lan_hello();
     hello.kinds = vec![SubjectKind::Ipv6];
-    let (adapter, _, mut conn) = connected(&stub, hello).await;
+    let (enforcer, _, mut conn) = connected(&stub, hello).await;
 
     let payer = key(3);
-    adapter.register(payer, lan(5));
+    enforcer.register(payer, lan(5));
     assert_eq!(
         conn.recv().await,
         Some(GateMessage::Bind(gate::Bind {
@@ -276,10 +276,10 @@ async fn a_subject_the_gate_does_not_match_is_never_sent() {
 #[tokio::test]
 async fn counters_reach_the_adapter_and_are_rebased_across_reconnects() {
     let stub = Stub::new();
-    let (adapter, _, mut conn) = connected(&stub, lan_hello()).await;
+    let (enforcer, _, mut conn) = connected(&stub, lan_hello()).await;
     let payer = key(4);
-    adapter.register(payer, lan(4));
-    adapter.set_shaping_rate(payer, 5_000);
+    enforcer.register(payer, lan(4));
+    enforcer.set_shaping_rate(payer, 5_000);
     conn.until("the rate", |m| is_set(m, payer, Some(5_000)))
         .await;
 
@@ -289,7 +289,7 @@ async fn counters_reach_the_adapter_and_are_rebased_across_reconnects() {
         received: 10,
     }))
     .await;
-    let probe = adapter.clone();
+    let probe = enforcer.clone();
     wait_for("the first counters", move || {
         probe.counters(payer)
             == MeterCounters {
@@ -301,9 +301,9 @@ async fn counters_reach_the_adapter_and_are_rebased_across_reconnects() {
 
     // The gate goes away: nothing is sold, and nothing it counted is lost.
     drop(conn);
-    let probe = adapter.clone();
-    wait_for("the adapter to notice", move || !probe.selling(payer)).await;
-    assert_eq!(adapter.counters(payer).delivered, 100);
+    let probe = enforcer.clone();
+    wait_for("the enforcer to notice", move || !probe.selling(payer)).await;
+    assert_eq!(enforcer.counters(payer).delivered, 100);
 
     // It comes back from closed, so it is told everything again.
     let mut conn = stub.accept().await;
@@ -313,7 +313,7 @@ async fn counters_reach_the_adapter_and_are_rebased_across_reconnects() {
         Some(GateMessage::Bind(ref b)) if b.peer == payer && b.bindings.len() == 1
     ));
     assert!(is_set(&conn.recv().await.unwrap(), payer, Some(5_000)));
-    assert!(adapter.selling(payer));
+    assert!(enforcer.selling(payer));
 
     // Its counts start again from zero; the totals do not.
     conn.send(GateMessage::Counters(Counters {
@@ -322,7 +322,7 @@ async fn counters_reach_the_adapter_and_are_rebased_across_reconnects() {
         received: 3,
     }))
     .await;
-    let probe = adapter.clone();
+    let probe = enforcer.clone();
     wait_for("the rebased counters", move || {
         probe.counters(payer)
             == MeterCounters {
@@ -346,7 +346,7 @@ async fn counters_reach_the_adapter_and_are_rebased_across_reconnects() {
     }))
     .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(adapter.counters(payer).delivered, 130);
+    assert_eq!(enforcer.counters(payer).delivered, 130);
 }
 
 #[tokio::test]
@@ -376,7 +376,7 @@ async fn a_gate_that_is_not_there_yet_is_waited_for() {
         reader: FrameReader::new(),
     };
     conn.hello(lan_hello()).await;
-    let (_adapter, mode) = connecting.await.expect("join").expect("connect");
+    let (_enforcer, mode) = connecting.await.expect("join").expect("connect");
     assert_eq!(mode, Identify::Claimed);
     let _ = std::fs::remove_file(&path);
 }
@@ -433,23 +433,23 @@ async fn a_hello_that_contradicts_itself_refuses_to_start() {
 #[tokio::test]
 async fn a_reconnecting_gate_that_changes_the_mode_is_refused() {
     let stub = Stub::new();
-    let (adapter, _, conn) = connected(&stub, lan_hello()).await;
+    let (enforcer, _, conn) = connected(&stub, lan_hello()).await;
     let payer = key(5);
-    adapter.register(payer, lan(5));
+    enforcer.register(payer, lan(5));
     drop(conn);
 
     // The same socket, now asking for fips: refused, and nothing is sold.
     let mut conn = stub.accept().await;
     conn.hello(fips_hello()).await;
     assert!(conn.closed_by_tollgated().await, "refused and closed");
-    assert!(!adapter.selling(payer));
+    assert!(!enforcer.selling(payer));
 
     // A gate that asks for the mode the node runs is taken back.
     let mut conn = stub.accept().await;
     conn.hello(lan_hello()).await;
     conn.until("the full state", |m| is_set(m, payer, Some(0)))
         .await;
-    assert!(adapter.selling(payer));
+    assert!(enforcer.selling(payer));
 }
 
 #[tokio::test]
@@ -475,19 +475,19 @@ async fn another_gate_protocol_version_is_closed_and_tried_again() {
 #[tokio::test]
 async fn delegated_bindings_are_refused_when_the_gate_refuses_them() {
     let stub = Stub::new();
-    let (adapter, _, mut conn) = connected(&stub, lan_hello()).await;
+    let (enforcer, _, mut conn) = connected(&stub, lan_hello()).await;
     let payer = key(6);
-    adapter.register(payer, lan(6));
+    enforcer.register(payer, lan(6));
     conn.until("the payer's set", |m| is_set(m, payer, Some(0)))
         .await;
 
     assert_eq!(
-        adapter.delegate(payer, Subject::Ipv4([192, 168, 1, 40])),
+        enforcer.delegate(payer, Subject::Ipv4([192, 168, 1, 40])),
         Err(DelegateError::Refused)
     );
     // Turned down here, so nothing reaches the gate: the next thing it hears
     // is the rate below, not a bind.
-    adapter.set_shaping_rate(payer, 7);
+    enforcer.set_shaping_rate(payer, 7);
     assert!(is_set(&conn.recv().await.unwrap(), payer, Some(7)));
 }
 
@@ -496,21 +496,21 @@ async fn a_delegated_binding_reaches_a_gate_that_accepts_them_flagged() {
     let stub = Stub::new();
     let mut hello = lan_hello();
     hello.delegated = true;
-    let (adapter, _, mut conn) = connected(&stub, hello).await;
+    let (enforcer, _, mut conn) = connected(&stub, hello).await;
     let payer = key(7);
-    adapter.register(payer, lan(7));
+    enforcer.register(payer, lan(7));
     conn.until("the payer's set", |m| is_set(m, payer, Some(0)))
         .await;
 
     assert_eq!(
-        adapter.delegate(key(8), Subject::Ipv4([192, 168, 1, 41])),
+        enforcer.delegate(key(8), Subject::Ipv4([192, 168, 1, 41])),
         Err(DelegateError::UnknownPayer)
     );
     assert_eq!(
-        adapter.delegate(payer, Subject::Mac([1; 6])),
+        enforcer.delegate(payer, Subject::Mac([1; 6])),
         Err(DelegateError::KindNotMatched(SubjectKind::Mac))
     );
-    adapter
+    enforcer
         .delegate(payer, Subject::Ipv4([192, 168, 1, 40]))
         .expect("delegate");
     assert_eq!(
@@ -536,15 +536,15 @@ async fn a_payer_holds_at_most_one_binds_worth_of_subjects() {
     let stub = Stub::new();
     let mut hello = lan_hello();
     hello.delegated = true;
-    let (adapter, _, mut conn) = connected(&stub, hello).await;
+    let (enforcer, _, mut conn) = connected(&stub, hello).await;
     let payer = key(12);
-    adapter.register(payer, lan(12));
+    enforcer.register(payer, lan(12));
     conn.until("the payer's set", |m| is_set(m, payer, Some(0)))
         .await;
 
     // Its own, and seven more.
     for i in 0..7 {
-        adapter
+        enforcer
             .delegate(payer, Subject::Ipv4([10, 0, 0, i]))
             .expect("room left");
     }
@@ -559,7 +559,7 @@ async fn a_payer_holds_at_most_one_binds_worth_of_subjects() {
     };
     assert_eq!(bind.bindings.iter().filter(|b| b.delegated).count(), 7);
     assert_eq!(
-        adapter.delegate(payer, Subject::Ipv4([10, 0, 0, 99])),
+        enforcer.delegate(payer, Subject::Ipv4([10, 0, 0, 99])),
         Err(DelegateError::TooMany)
     );
 }
@@ -567,10 +567,10 @@ async fn a_payer_holds_at_most_one_binds_worth_of_subjects() {
 #[tokio::test]
 async fn a_conflict_stops_sales_to_that_payer_only() {
     let stub = Stub::new();
-    let (adapter, _, mut conn) = connected(&stub, lan_hello()).await;
+    let (enforcer, _, mut conn) = connected(&stub, lan_hello()).await;
     let (first, second) = (key(9), key(10));
-    adapter.register(first, lan(23));
-    adapter.register(second, lan(23));
+    enforcer.register(first, lan(23));
+    enforcer.register(second, lan(23));
     conn.until("the second payer's set", |m| is_set(m, second, Some(0)))
         .await;
 
@@ -579,22 +579,22 @@ async fn a_conflict_stops_sales_to_that_payer_only() {
         subject: Subject::Ipv4([192, 168, 1, 23]),
     }))
     .await;
-    let probe = adapter.clone();
+    let probe = enforcer.clone();
     wait_for("the conflict", move || !probe.selling(second)).await;
-    assert!(adapter.selling(first), "the first payer keeps the subject");
+    assert!(enforcer.selling(first), "the first payer keeps the subject");
 }
 
 /// Whether `tollgated` closes the connection after the gate sends `bytes`,
 /// framed, once `hello` is done — and stops selling until the next one.
 async fn closes_on(frame: Vec<u8>) -> bool {
     let stub = Stub::new();
-    let (adapter, _, mut conn) = connected(&stub, lan_hello()).await;
+    let (enforcer, _, mut conn) = connected(&stub, lan_hello()).await;
     let payer = key(11);
-    adapter.register(payer, lan(11));
+    enforcer.register(payer, lan(11));
     conn.stream.write_all(&frame).await.expect("write");
     let closed = conn.closed_by_tollgated().await;
     if closed {
-        let probe = adapter.clone();
+        let probe = enforcer.clone();
         wait_for("sales to stop", move || !probe.selling(payer)).await;
     }
     closed
@@ -709,7 +709,7 @@ struct Pair {
     provider: PubKey,
     published: tollgate_net::control::Published,
     payer: PubKey,
-    payer_adapter: Arc<Loopback>,
+    payer_enforcer: Arc<Loopback>,
 }
 
 impl Pair {
@@ -728,14 +728,14 @@ impl Pair {
 async fn run_node(
     identity: Identity,
     peers: Vec<PeerConfig>,
-    adapter: Arc<dyn ResourceAdapter>,
+    enforcer: Arc<dyn Enforcer>,
 ) -> (std::net::SocketAddr, tollgate_net::control::Published) {
     let control = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("bind");
     let listen = control.local_addr().expect("addr");
     let config = config(identity.clone(), listen, peers);
-    let node = Node::new(&config, Arc::new(LocalChannels::new(identity)), adapter);
+    let node = Node::new(&config, Arc::new(LocalChannels::new(identity)), enforcer);
     let published = node.published();
     tokio::spawn(async move {
         let _ = node.run_on(control, config, std::future::pending()).await;
@@ -743,17 +743,17 @@ async fn run_node(
     (listen, published)
 }
 
-/// Start a provider behind `adapter`, and a payer dialling it.
-async fn pair(adapter: External) -> Pair {
+/// Start a provider behind `enforcer`, and a payer dialling it.
+async fn pair(enforcer: External) -> Pair {
     let identity = Identity::generate();
     let provider = identity.pubkey();
-    let (listen, published) = run_node(identity, vec![], Arc::new(adapter)).await;
+    let (listen, published) = run_node(identity, vec![], Arc::new(enforcer)).await;
 
-    // The payer: an ordinary node on the loopback adapter. Its data plane is
+    // The payer: an ordinary node on the loopback enforcer. Its data plane is
     // not started; demand is told, not measured.
     let identity = Identity::generate();
     let payer = identity.pubkey();
-    let payer_adapter = Arc::new(Loopback::new());
+    let payer_enforcer = Arc::new(Loopback::new());
     run_node(
         identity,
         vec![PeerConfig {
@@ -761,7 +761,7 @@ async fn pair(adapter: External) -> Pair {
             endpoint: Some(listen.to_string()),
             policy: PeerPolicy::default(),
         }],
-        payer_adapter.clone(),
+        payer_enforcer.clone(),
     )
     .await;
 
@@ -769,7 +769,7 @@ async fn pair(adapter: External) -> Pair {
         provider,
         published,
         payer,
-        payer_adapter,
+        payer_enforcer,
     }
 }
 
@@ -790,8 +790,8 @@ async fn first_set(conn: &mut Conn, payer: PubKey) -> (Vec<GateMessage>, Option<
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn access_follows_payment_and_counters_reach_the_ledger() {
     let stub = Stub::new();
-    let (adapter, _, mut conn) = connected(&stub, lan_hello()).await;
-    let p = pair(adapter).await;
+    let (enforcer, _, mut conn) = connected(&stub, lan_hello()).await;
+    let p = pair(enforcer).await;
 
     // Bound before anything is sold, to the address it came from, and closed.
     let (before, rate) = first_set(&mut conn, p.payer).await;
@@ -808,7 +808,7 @@ async fn access_follows_payment_and_counters_reach_the_ledger() {
     assert_eq!(rate, Some(0), "the gate starts closed");
 
     // It pays, and the gate opens at the rate it bought: 125% of 2 MB/s.
-    p.payer_adapter.set_demand(p.provider, 2_000_000);
+    p.payer_enforcer.set_demand(p.provider, 2_000_000);
     conn.until("the payer to be opened at what it bought", |m| {
         is_set(m, p.payer, Some(2_500_000))
     })
@@ -828,7 +828,7 @@ async fn access_follows_payment_and_counters_reach_the_ledger() {
     .await;
 
     // It stops paying, and the gate closes again.
-    p.payer_adapter.set_demand(p.provider, 0);
+    p.payer_enforcer.set_demand(p.provider, 0);
     conn.until("the payer to be closed when its grant lapses", |m| {
         is_set(m, p.payer, Some(0))
     })
@@ -838,14 +838,14 @@ async fn access_follows_payment_and_counters_reach_the_ledger() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn nothing_is_sold_while_the_gate_is_down() {
     let stub = Stub::new();
-    let (adapter, _, conn) = connected(&stub, lan_hello()).await;
+    let (enforcer, _, conn) = connected(&stub, lan_hello()).await;
     // The gate goes before the payer arrives.
     drop(conn);
-    let probe = adapter.clone();
-    wait_for("the adapter to notice", move || !probe.connected()).await;
+    let probe = enforcer.clone();
+    wait_for("the enforcer to notice", move || !probe.connected()).await;
 
-    let p = pair(adapter.clone()).await;
-    p.payer_adapter.set_demand(p.provider, 2_000_000);
+    let p = pair(enforcer.clone()).await;
+    p.payer_enforcer.set_demand(p.provider, 2_000_000);
     wait_for("the payer's session", || p.session().is_some()).await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     let s = p.session().expect("the session is kept");
@@ -868,8 +868,8 @@ async fn nothing_is_sold_while_the_gate_is_down() {
 
     // Down again, mid-session: sales stop, the session stays.
     drop(conn);
-    let probe = adapter.clone();
-    wait_for("the adapter to notice", move || !probe.connected()).await;
+    let probe = enforcer.clone();
+    wait_for("the enforcer to notice", move || !probe.connected()).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let bought = p.session().expect("kept").authorized;
     tokio::time::sleep(Duration::from_secs(3)).await;

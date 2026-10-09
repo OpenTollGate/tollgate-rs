@@ -25,7 +25,7 @@ use tollgate_core::access::AccessLevel;
 use tollgate_core::session::{Phase, Sessions};
 use tracing::debug;
 
-use crate::adapter::ResourceAdapter;
+use crate::enforcer::Enforcer;
 
 /// Where a control socket might live, best first.
 ///
@@ -188,7 +188,7 @@ pub type Published = Arc<ArcSwap<Snapshot>>;
 /// Build a snapshot of everything the node is doing right now.
 pub fn snapshot(
     sessions: &Sessions,
-    adapter: &dyn ResourceAdapter,
+    enforcer: &dyn Enforcer,
     pubkey: &str,
     mint_url: &str,
     uptime_ms: u64,
@@ -199,7 +199,7 @@ pub fn snapshot(
     let peers = sessions
         .peers()
         .map(|session| {
-            let counters = adapter.counters(session.peer);
+            let counters = enforcer.counters(session.peer);
             let grant = &session.grant;
 
             PeerSnapshot {
@@ -218,7 +218,7 @@ pub fn snapshot(
                 }
                 .into(),
 
-                shaped_rate: adapter.shaping_rate(session.peer),
+                shaped_rate: enforcer.shaping_rate(session.peer),
                 authorized: grant.authorized(),
                 consumed: grant.consumed(),
                 grant_expires_in_ms: if grant.is_live(now) {

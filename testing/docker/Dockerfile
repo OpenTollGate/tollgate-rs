@@ -45,7 +45,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # ---- Stage 2: runtime ----
 FROM debian:trixie-slim
 
-# nftables and iproute2 are what the IP adapter gates and shapes with. curl
+# nftables and iproute2 are what the `ip` enforcer gates and shapes with. curl
 # reaches the mint and market over HTTP; the control socket speaks raw JSON
 # rather than HTTP, so netcat reads that one. jq does the assertions.
 RUN apt-get update && \

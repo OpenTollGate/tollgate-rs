@@ -62,7 +62,7 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     # Masquerade toward the upstream segment before starting, so the origin
     # replies to the gateway rather than to a client it has no route to. This
-    # is the operator's network setup, not the adapter's: a separate table, so
+    # is the operator's network setup, not the enforcer's: a separate table, so
     # tollgated re-creating its own on startup leaves it alone.
     #
     # NAT does not disturb the metering. On the way out the forward hook still

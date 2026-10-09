@@ -1,6 +1,6 @@
-//! The resource adapter: what actually delivers, and what counts it.
+//! The built-in enforcers: what actually delivers, and what counts it.
 //!
-//! Core decides *what* to enforce; an adapter enforces it. For network
+//! Core decides *what* to enforce; an enforcer enforces it. For network
 //! forwarding that means two numbers per peer — an **access level** and a
 //! **shaping rate** — and two counters.
 //!
@@ -14,7 +14,7 @@
 //! - [`Loopback`] shapes and meters a dedicated socket in userspace. It
 //!   forwards nobody's traffic, but the shaping and the counters are real, so it
 //!   exercises the whole protocol on any platform.
-//! - [`Nftables`] gates and shapes the kernel's own forwarding path with
+//! - [`Ip`] gates and shapes the kernel's own forwarding path with
 //!   nftables and `tc`. This is the one that carries somebody else's packets,
 //!   and it needs Linux and `CAP_NET_ADMIN`.
 //! - [`Fips`] sets the same two numbers on a FIPS node through its control
@@ -22,7 +22,7 @@
 //!   authenticated before this node hears of them.
 //! - [`External`] hands them to a gate: an enforcement program this node does
 //!   not contain, over a Unix socket (`tollgate-gate-protocol.md`). A new use
-//!   case is a new gate rather than a new adapter.
+//!   case is a new gate rather than a new enforcer.
 
 use std::net::IpAddr;
 
@@ -34,25 +34,25 @@ use tollgate_protocol::PubKey;
 mod external;
 #[cfg(unix)]
 mod fips;
-mod loopback;
 #[cfg(target_os = "linux")]
-mod nftables;
+mod ip;
+mod loopback;
 
 #[cfg(unix)]
 pub use external::{DelegateError, External, Refusal, check_hello};
 #[cfg(unix)]
 pub use fips::Fips;
-pub use loopback::Loopback;
 #[cfg(target_os = "linux")]
-pub use nftables::Nftables;
+pub use ip::Ip;
+pub use loopback::Loopback;
 
 /// What core needs of whatever is delivering the resource.
-pub trait ResourceAdapter: Send + Sync + std::fmt::Debug {
+pub trait Enforcer: Send + Sync + std::fmt::Debug {
     /// Note the address a peer reaches us from.
     ///
     /// The TollGate session identifies a peer by public key; the kernel
     /// identifies it by address. This is where the two are tied together, and
-    /// an adapter that does not gate by address ignores it.
+    /// an enforcer that does not gate by address ignores it.
     fn register(&self, peer: PubKey, addr: IpAddr);
 
     /// Apply an access level decided by core.
@@ -64,7 +64,7 @@ pub trait ResourceAdapter: Send + Sync + std::fmt::Debug {
 
     /// Apply a shaping rate decided by core, in units per second.
     ///
-    /// Already includes the minimum flow allowance as its floor, so an adapter
+    /// Already includes the minimum flow allowance as its floor, so an enforcer
     /// applies one number and needs to know nothing about grants.
     fn set_shaping_rate(&self, peer: PubKey, rate: u64);
 
@@ -80,7 +80,7 @@ pub trait ResourceAdapter: Send + Sync + std::fmt::Debug {
     /// The rate a peer is currently shaped to.
     fn shaping_rate(&self, peer: PubKey) -> u64;
 
-    /// Every peer the adapter is tracking.
+    /// Every peer the enforcer is tracking.
     fn peers(&self) -> Vec<PubKey>;
 
     /// Forget a peer that has gone away.
@@ -88,7 +88,7 @@ pub trait ResourceAdapter: Send + Sync + std::fmt::Debug {
 
     /// Whether this node may sell to a peer right now.
     ///
-    /// Always, for an adapter that enforces in this process or refuses to
+    /// Always, for an enforcer that enforces in this process or refuses to
     /// start. One whose enforcement lives in another program says no while it
     /// cannot reach that program, and for a peer it refuses: the node then
     /// rejects the peer's purchases and takes no new channel from it, and

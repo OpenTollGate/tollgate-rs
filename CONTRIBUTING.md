@@ -16,7 +16,7 @@ payment channels. The workspace is layered, bottom to top:
   (`tolltop`). It turns real events into core `Event`s, executes the
   `Action`s core returns, and owns everything core refuses to touch:
   TCP, the shaper, the mint, the wallet, Spilman channels, and the
-  nftables / FIPS adapters that enforce what a peer bought.
+  nftables / FIPS enforcers that enforce what a peer bought.
 
 Most non-trivial changes affect behavior that only shows between two
 nodes — what a peer is allowed to draw, when a purchase is refused, how
@@ -164,7 +164,7 @@ done
 This is the same matrix that runs on GitHub Actions. Catching a
 regression locally is much cheaper than catching it in CI. The `fips`
 suite is not in CI, because it needs a FIPS checkout this repository
-does not carry; run it by hand if you touched the FIPS adapter.
+does not carry; run it by hand if you touched the FIPS enforcer.
 
 ### Self-review against the project review checklist
 
