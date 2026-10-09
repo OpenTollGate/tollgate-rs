@@ -181,9 +181,10 @@ they are settled at once.
 **Reconnection:** a new connection starts a fresh session with a new Announce.
 If the listener still holds state for that pubkey, the friendly path applies
 and it shares the channel state back. Where both sides still hold it — a blip
-rather than a reboot — the session starts over the kept channels: grants are
-zeroed as for any new session, but the channel ids and the totals signed on
-them carry over. Each side sends one ChannelReady per channel it is still paid
+rather than a reboot — the session starts over the kept channels: superseding
+grants are zeroed as for any new session, but the channel ids and the totals
+signed on them carry over. An accumulative budget carries over too, whether or
+not the channels do (see [Grant State](#grant-state)). Each side sends one ChannelReady per channel it is still paid
 on, between its Announce and its Offer. A payer that sees its channel named
 keeps paying on it and funds nothing; one that does not, funds a new channel
 and sends Accept, and an Accept tells the other side to settle the channels it
@@ -225,17 +226,18 @@ TollGate peer; human-facing UI is currently a non-goal
 | Type | Name | Direction | Purpose |
 |------|------|-----------|---------|
 | 0x00 | Announce | Bidirectional | "I am a TollGate node" — protocol version, pubkey |
-| 0x01 | Offer | Bidirectional | Accepted mints, unit, window range, received multiplier |
+| 0x01 | Offer | Bidirectional | Accepted mints, unit, accounting mode and its bounds, received multiplier |
 | 0x02 | Accept | Bidirectional | Accept the offer, provide Spilman funding |
 | 0x03 | ChannelReady | Bidirectional | Confirm Spilman channel funded and active |
-| 0x04 | TopUp | Payer → provider | Signed Spilman update buying a rate for a bounded window |
-| 0x05 | TopUpReject | Provider → payer | Refuse a grant, with the rate that would be accepted |
+| 0x04 | TopUp | Payer → provider | Signed Spilman update buying a rate for a bounded window, or adding to a budget |
+| 0x05 | TopUpReject | Provider → payer | Refuse a grant, with the rate or amount that would be accepted |
 | 0x06 | RolloverInit | Sender → Receiver | New channel alongside exhausting one |
 | 0x07 | RolloverReady | Receiver → Sender | New channel funded, ready |
 | 0x08 | ChannelClose | Either → Either | Request cooperative close |
 | 0x09 | CloseAck | Either → Either | Acknowledge close |
 | 0x0A | Reject | Either → Either | Reject proposal (with reason) |
 | 0x0B | Disconnect | Either → Either | Orderly teardown |
+| 0x0C | Balance | Provider → payer | What is left of an accumulative budget |
 
 ---
 
@@ -268,7 +270,8 @@ Spilman support is universal in v1 — there is no per-token payment mode to sig
 ### 0x01 Offer
 
 Sent by each peer after Announce. Declares which mints the sender will take
-payment in, and how welcome the peer's outgoing traffic is.
+payment in, how it keeps its accounts with the peer, and how welcome the
+peer's outgoing traffic is.
 
 ```cbor
 {
@@ -276,14 +279,47 @@ payment in, and how welcome the peer's outgoing traffic is.
   1: [<mint_url>, ...],            // text array — mints accepted, most preferred
                                    //   first; at least one entry
   2: <unit>,                       // text — "byte", "wh", "ml"
-  3: [<min_window_ms>, <max_window_ms>],  // [u32, u32] — grant window bounds
+  3: [<min_window_ms>, <max_window_ms>],  // [u32, u32] — grant window bounds.
+                                   //   Superseding mode only: present exactly
+                                   //   when field 6 is absent
   4: <received_multiplier>,        // u16 — surcharge on units I receive from you,
                                    //   on top of you paying for what I deliver.
                                    //   Default 0 = no surcharge
   5: true,                         // bool, optional — I will not charge you.
                                    //   Written only when true; absent = I charge
+  6: [                             // array, optional — present = accumulative mode
+       <min_topup_gap_ms>,         //   u32 — shortest time between two TopUps
+       <max_budget>,               //   u64 | null — most units you may hold unspent
+       <rate_cap>                  //   u64 | null — fastest I carry you, units/second
+     ],
 }
 ```
+
+**Fields 3 and 6 say the accounting mode.** Exactly one of them is present.
+Field 3 means **superseding**: each TopUp buys a rate for a window and
+replaces the grant before it. Field 6 means **accumulative**: each TopUp adds
+to a running budget that only traffic draws down
+([tollgate-vouchers.md](tollgate-vouchers.md#two-accounting-modes)). An Offer
+with both, or neither, is malformed. Each carries the bounds that mode needs,
+so a mode is never sent without them.
+
+The mode is the sender's to choose, and it is fixed for the session: a
+revised Offer never changes which of the two fields it carries. A payer that
+will not buy in the mode it is offered buys nothing, or sends Disconnect.
+
+Field 6's three entries:
+
+- `min_topup_gap_ms` caps how often a TopUp may arrive, which is the job
+  `min_window_ms` does in superseding mode: on a constrained provider the
+  signature check on each TopUp is the binding limit. It is needed here more,
+  not less. In superseding mode a payer that buys too often throws away what
+  it bought; in accumulative mode it loses nothing, so only this bound stops it.
+- `max_budget` is the most the payer may hold unspent at once. `null` means no
+  limit. It bounds both what one peer can present at the provider's busiest
+  hour and what the provider owes it.
+- `rate_cap` is the speed the provider shapes this peer to while it has
+  budget. `null` means the link is the only limit. The payer cannot buy a
+  higher one; with no window there is no rate to buy.
 
 Field 5 is one-sided: it says only whether the sender charges the receiver,
 never whether the receiver charges back. A receiver that sees it funds no
@@ -315,8 +351,8 @@ funds its channel in one of the mints this node listed, and this node pays the
 peer in one of the mints the *peer* listed. A pure pass-through relay can
 therefore name its upstream's mint alone and never issue vouchers of its own.
 
-**Field 3 bounds what the payer may ask for.** Every payment is a grant of
-units to be spent inside a window the payer chooses, and the rate it buys is
+**Field 3 bounds what the payer may ask for**, in superseding mode. Every
+payment is a grant of units to be spent inside a window the payer chooses, and the rate it buys is
 the one divided by the other ([tollgate-vouchers.md](tollgate-vouchers.md)).
 The payer picks any window in this range, per grant, without negotiating.
 
@@ -348,7 +384,10 @@ protocol does not restate them.
 
 The multiplier is the only field that can change mid-session, by sending a
 revised Offer. It takes effect on the payer's **next** grant — a grant already
-bought is priced at the multiplier that was in force when it was bought. A
+bought is priced at the multiplier that was in force when it was bought. In
+accumulative mode there is no next grant, only one running budget, so there
+the multiplier too is fixed for the session; a change takes effect when the
+next session starts. A
 revised Offer that changes nothing is also the keepalive — see Keepalive under
 [Raw TCP](#raw-tcp). The
 accepted-mint set is fixed for the session, because a peer's channel is funded
@@ -366,8 +405,9 @@ Sent by the peer to accept the offer and fund its outgoing channel.
 ```
 
 There is nothing to echo back. The payer picks a mint from the list the offer
-already carried; the unit and multiplier admit no choice; and the window is
-chosen per grant rather than agreed once, so there is no range to reconcile.
+already carried; the unit, the multiplier and the accounting mode admit no
+choice; and the window is chosen per grant rather than agreed once, so there
+is no range to reconcile.
 
 Funding the channel buys nothing on its own. It opens the channel the grants
 will be signed against.
@@ -395,24 +435,58 @@ knows before it decides whether to fund — see Reconnection under
 
 ### Grant State
 
-When a session starts (both ChannelReady messages exchanged), each side zeroes
-the grant state it keeps for the peer paying it:
+Each side keeps three numbers for the peer paying it:
 
 ```
-authorized   0        cumulative units the payer has signed for, ever
-consumed     0        cumulative units drawn against them
-deadline     —        when the current grant stops being spendable
+authorized   cumulative units the payer may draw, ever
+consumed     cumulative units drawn against them
+deadline     when the current grant stops being spendable (superseding only)
 ```
 
 `authorized − consumed` is what the peer may still spend, and it is never
-negative. Nothing here is exchanged: the payer knows what it signed, the
-provider knows what it delivered, and neither has to tell the other.
+negative: a peer that draws past it between two counter readings has its
+`consumed` held at `authorized`, and the overrun is not carried as a debt.
+
+When a session starts (both ChannelReady messages exchanged), what the
+provider sets them to depends on the mode:
+
+| | Superseding | Accumulative |
+|---|---|---|
+| `authorized` | `0` | The budget this payer left behind, if the provider still holds it; else `0` |
+| `consumed` | `0` | `0` |
+| `deadline` | none | never used |
+
+**A superseding grant does not outlive its session.** Everything is zeroed,
+and the payer buys again as soon as the Offer arrives.
+
+**An accumulative budget does.** It belongs to the payer, not to the session
+or to any channel. When a session ends — Disconnect, a held session given up,
+or the provider shutting down — the provider writes the payer's remaining
+budget, `authorized − consumed`, to disk beside its channel backups
+([tollgate-payment-channels.md](tollgate-payment-channels.md#reboot--state-loss)),
+and keeps it for `accounting.hold_seconds`. A session that starts inside that
+time starts with it as `authorized`. It is also written at every accepted
+TopUp, so a provider that crashes loses at most the traffic since then, in
+the payer's favor. The record is keyed by the payer's key; under
+`enforcer.identity: address` it also needs the address the payer last had. A
+budget past its hold time is forfeit, and so is one that was never written —
+a provider that loses its disk has lost its peers' budgets.
+
+A channel rolling over or settling does not touch the budget. The provider
+settles the cumulative totals it was signed, which already paid for every
+unit in the budget, spent or not.
+
+Nothing here is exchanged in superseding mode: the payer knows what it signed,
+the provider knows what it delivered, and neither has to tell the other. In
+accumulative mode the provider also sends Balance, so a payer that reconnects
+learns what it left behind ([0x0C Balance](#0x0c-balance)).
 
 ### 0x04 TopUp
 
 Sent by the payer whenever it wants capacity. It is the Spilman balance update
-and the purchase of a rate in one message, and it is the **only** payment
-message in the protocol.
+and the purchase in one message, and it is the **only** payment message in the
+protocol. In superseding mode it buys a rate; in accumulative mode it adds to
+the payer's budget.
 
 ```cbor
 {
@@ -423,9 +497,17 @@ message in the protocol.
         <signature>],              //   bytes(64) — Schnorr over (channel_id, cumulative)
        ...
      ],
-  2: <window_ms>,                  // u32 — spend the grant within this long, from receipt
+  2: <window_ms>,                  // u32 — spend the grant within this long,
+                                   //   from receipt. Superseding mode only:
+                                   //   required there, absent in accumulative
 }
 ```
+
+**Field 2 follows the mode the provider offered.** A TopUp without it to a
+superseding provider, or with it to an accumulative one, does not fit the
+mode. It is refused as a whole with Reject (reason 0x0A), and nothing is
+ratcheted. It does not count as a verification failure: the signatures may be
+fine, and the payer only has to read the Offer again.
 
 **The grant is the combined increase across every update.** One message may
 ratchet several channels, which is what lets a single purchase span a channel
@@ -450,6 +532,11 @@ for each update:
     require the channel appears only once
 
 grant      = Σ (cumulative - signed[channel])   // this purchase alone
+```
+
+Then, in **superseding** mode:
+
+```
 require min_window_ms <= window_ms <= max_window_ms
 
 for each update: signed[channel] = cumulative
@@ -459,12 +546,37 @@ deadline   = now + window_ms
 rate       = grant / window_ms           // fixed for the life of the grant
 ```
 
+And in **accumulative** mode:
+
+```
+require now - last_topup >= min_topup_gap_ms
+require (authorized - consumed) + grant <= max_budget    // unless null
+
+for each update: signed[channel] = cumulative
+authorized = authorized + grant          // nothing burns
+last_topup = now
+                                         // no deadline, no rate bought
+```
+
+In accumulative mode the provider shapes the payer, on every tick, to
+
+```
+rate = min(rate_cap, (authorized - consumed) per tick)
+```
+
+and never below the minimum flow allowance. The second term only matters near
+the end: it slows a payer with little budget left so that it cannot overrun
+the budget before the provider next reads its counters. With a one-second
+tick and 4 MB left, the payer is carried at no more than 4 MB/s. With no
+`rate_cap` it is the only limit.
+
 **Applied atomically.** If any update fails, the whole message is refused —
 applying some of them would leave the grant a different size from the one the
 payer asked for and paid for.
 
-**A grant replaces the previous one, it does not add to it.** Buying again
-before the old window runs out forfeits whatever was left of it. That is the
+**In superseding mode a grant replaces the previous one, it does not add to
+it.** Buying again before the old window runs out forfeits whatever was left of
+it. That is the
 payer's risk and it is what makes the product bandwidth rather than a stored
 quantity of bytes: capacity that was not used is gone, exactly as it is for the
 provider, who cannot sell a second twice either.
@@ -473,6 +585,11 @@ The forfeit is bounded by the window the payer chose, so **window length is the
 payer's risk dial.** Short windows keep the loss from raising the rate mid-flight
 small and reaction quick, at the cost of more signature verifications. Long
 windows cut message count and punish misjudgment.
+
+**In accumulative mode a TopUp adds to what is left.** There is no window to
+lose and no rate to raise. The payer's risk is instead the budget itself: it
+has paid for units it has not had yet, and holds that claim against this
+provider until it uses it or the hold time runs out.
 
 **`cumulative` is monotonic**, which is what the Spilman ratchet requires — the
 provider always holds the highest-value state and can settle it at any time.
@@ -508,17 +625,24 @@ as a downloaded one. A peer that wants to upload heavily therefore has to buy a
 larger grant, which is enforced by the shaper as the traffic happens instead of
 appearing on a bill afterward.
 
-**At the deadline** the provider sets `consumed = authorized`. Unspent capacity
-expires and the payment is kept. Traffic does not stop dead — it falls back to
-the minimum flow allowance ([tollgate-vouchers.md](tollgate-vouchers.md)), which
-is what keeps a link alive between grants.
+The weighting is the same in both modes. Its redesign, still pending, will
+change it in both at once.
+
+**At the deadline**, in superseding mode, the provider sets
+`consumed = authorized`. Unspent capacity expires and the payment is kept.
+Traffic does not stop dead — it falls back to the minimum flow allowance
+([tollgate-vouchers.md](tollgate-vouchers.md)), which is what keeps a link
+alive between grants. An accumulative budget has no deadline; the payer falls
+to the allowance when the budget reaches zero, and is back at its rate cap
+with the next TopUp.
 
 ### 0x05 TopUpReject
 
-Sent when the provider will not honor a grant — most often because the rate
-would oversubscribe capacity it has already committed to other peers. A grant
-that fails verification is not declined but rejected, with Reject (0x06); see
-TopUp above.
+Sent when the provider will not honor a grant — in superseding mode most often
+because the rate would oversubscribe capacity it has already committed to other
+peers; in accumulative mode because the budget would pass `max_budget`, or the
+TopUp came sooner than `min_topup_gap_ms` after the last. A grant that fails
+verification is not declined but rejected, with Reject (0x06); see TopUp above.
 
 ```cbor
 {
@@ -528,10 +652,19 @@ TopUp above.
         <cumulative>],             //   u64
        ...
      ],
-  2: <max_rate_available>,         // u64 — units per second we would accept
+  2: <max_rate_available>,         // u64 — units per second we would accept.
+                                   //   Superseding mode only
   3: <reason>,                     // u8 — see Reject reason codes
+  4: <max_grant_available>,        // u64 — the most units we would add now.
+                                   //   Accumulative mode only
 }
 ```
+
+Field 2 or field 4 is present, following the mode, never both. In
+accumulative mode `max_grant_available` is `max_budget` less the budget the
+payer still holds, so a payer can re-buy at once with a grant that fits. A
+TopUp refused for coming too soon (reason 0x0B) carries the same number; the
+payer sends it again once the gap has passed.
 
 The refused states are echoed in full because a purchase may span several
 channels, so one channel id no longer identifies which purchase was refused.
@@ -547,6 +680,12 @@ a rate that will be taken.
 This is admission control, and it is only possible because the payer states the
 rate it wants up front for a bounded horizon. The provider can sum committed
 rates across peers and refuse before taking the money.
+
+Accumulative mode has no committed rate to sum, so it has no admission control
+of this kind. What stands in for it is static: each peer's `rate_cap`, and its
+`max_budget`. A node that sells in both modes counts only superseding grants
+against `grants.max_rate` (see Open Problems in
+[tollgate-vouchers.md](tollgate-vouchers.md#open-problems)).
 
 ### 0x06 RolloverInit
 
@@ -622,6 +761,9 @@ General-purpose rejection for any proposal.
 | 0x07 | Rate exceeds available capacity |
 | 0x08 | Grant exceeds remaining channel capacity |
 | 0x09 | Protocol version unsupported |
+| 0x0A | TopUp does not fit the accounting mode (a window sent to an accumulative provider, or none to a superseding one) |
+| 0x0B | TopUp too soon after the last (accumulative: inside `min_topup_gap_ms`) |
+| 0x0C | Budget would exceed `max_budget` |
 | 0xFF | Other (see reason_text) |
 
 ### 0x0B Disconnect
@@ -634,6 +776,37 @@ Orderly teardown of the entire TollGate relationship.
   1: <reason_code>,                // u8 — same codes as Reject
 }
 ```
+
+### 0x0C Balance
+
+Sent by a provider in accumulative mode, to tell the payer what is left of its
+budget.
+
+```cbor
+{
+  0: 0x0C,                         // type: Balance
+  1: <remaining>,                  // u64 — authorized − consumed, in units
+}
+```
+
+It is sent:
+
+- once on every connection, right after the provider's Offer, so a payer
+  that reconnects learns the budget it left behind — `0` if there is none
+- after every TopUp the provider accepts
+- when the budget reaches zero
+
+It is information, not a promise and not an acknowledgment. Nothing waits for
+it: a payer still uses what it bought the moment it sends the TopUp. Between
+Balance messages the payer keeps its own count, from what it signed and what
+it measured crossing the link, and replaces that count with each Balance it
+receives. The two drift apart by transit loss and by the moment each side
+reads its counters, which is why the provider's number wins. A provider that
+reported less than the truth would gain nothing it could not already take by
+delivering less.
+
+It is never sent in superseding mode, where a grant lives one window and the
+payer's own count is enough.
 
 ---
 
@@ -654,8 +827,8 @@ schedule, for its own windows, and neither waits for the other.
      B → A: Announce (v1, pubkey_B, capabilities)
 
   2. Offer
-     A → B: Offer (accepted mints, unit, window range, multiplier)
-     B → A: Offer (accepted mints, unit, window range, multiplier)
+     A → B: Offer (accepted mints, unit, mode and its bounds, multiplier)
+     B → A: Offer (accepted mints, unit, mode and its bounds, multiplier)
 
   3. Channels
      B → A: Accept + funding (B→A channel)
@@ -691,6 +864,30 @@ service. There is no pre-channel phase.
   No acknowledgment, no boundary to wait for. A may start pushing
   at the new rate immediately; the worst case is one RTT of shaping
   at the old rate while the message lands.
+```
+
+### Accumulative Budget
+
+```
+  B sells to A in accumulative mode: rate cap 10 M/s, max budget 4 G,
+  min gap 1 s. A has nothing carried over.
+
+  B → A: Offer (field 6: [1000, 4G, 10M])
+  B → A: Balance (0)
+
+  t=0     A → B: TopUp (cumulative 1G)          no window
+                 authorized = 1G, B shapes A to 10 M/s
+          B → A: Balance (1G)
+
+  t=30s   A has downloaded 300 M                budget 700 M
+  t=30s … t=1h  A is idle                       budget 700 M, nothing drains
+
+  t=40m   the link drops. B holds the session for stale_timeout,
+          then writes A's 700 M to disk and settles A's channel.
+
+  t=1h    A reconnects: Announce, Offer
+          B → A: Balance (700M)                 A carries on at 10 M/s
+          A funds a new channel, and tops up from it when it needs to
 ```
 
 ### Multiplier Change
@@ -777,6 +974,7 @@ Typical message sizes (CBOR encoded):
 | RolloverInit | ~380 bytes + ~104 per funding proof past the first (Spilman funding) |
 | ChannelClose | ~110 bytes |
 | Disconnect | ~10 bytes |
+| Balance | ~12 bytes |
 
 The Spilman funding carries only what the receiver cannot derive: the channel's
 terms, the opening signature, and per funding proof the mint's signature and
@@ -802,10 +1000,16 @@ Plus 2 bytes of length prefix per message. Setup messages are one-time. TopUp is
 | Payment timing | Prepaid: the grant is bought before the traffic it covers | Holding a voucher is already a claim on the issuer, so prepaying adds no trust that was not already there. Postpaying would add provider credit risk on top of it for nothing |
 | Payment message | One — TopUp, which is the Spilman update and the purchase at once | Settlement, metering exchange and balance acknowledgment all collapse into it |
 | Channels per purchase | An array of updates, capped at 8; the grant is their combined increase, applied atomically | A cumulative total only means anything against the channel it was signed on, so spanning a rollover — or spending from several accepted mints — needs several ratchets in one message. Splitting them across messages would leave the provider unable to tell one purchase from two, and a partial application would make the grant size ambiguous |
-| Grant semantics | A grant replaces the previous one; the remainder burns | Selling a rate rather than a stored quantity. Without forfeiture a buyer could accumulate off-peak claims and spend them at peak |
+| Accounting mode | Chosen by the provider per peer and carried in the Offer: field 3 (a window range) means superseding, field 6 (a gap, a budget limit and a rate cap) means accumulative; exactly one is present; fixed for the session | Each mode needs different bounds, so the field that carries the bounds also says the mode, and a mode can never arrive without them. The payer has nothing to choose, so nothing is negotiated |
+| Grant semantics | Superseding: a grant replaces the previous one and the remainder burns. Accumulative: a TopUp adds to a running budget that only traffic draws down | Superseding sells a rate rather than a stored quantity; without forfeiture a buyer could accumulate off-peak claims and spend them at peak. Accumulative sells volume on purpose, bounded by a per-peer rate cap and budget limit instead |
+| TopUp window | Required in superseding mode, absent in accumulative; a mismatch is refused with Reject 0x0A | A window has no meaning without a rate to buy. Refusing outright, rather than ignoring the field, catches a payer that misread the Offer before it pays for something it did not mean to buy |
+| TopUp rate in accumulative mode | `min_topup_gap_ms` between TopUps, enforced by the provider | In superseding mode buying too often wastes the buyer's own money; in accumulative mode it costs nothing, so the provider's signature checks need an explicit bound |
+| Accumulative budget across sessions | Written to disk and restored at the next session for `accounting.hold_seconds`; untouched by rollover and settlement | It is already paid for. A reconnect is not a reason to take it, and settlement only collects the money that bought it |
+| Balance message | Provider → payer, accumulative only: after the Offer on every connection, after each accepted TopUp, and at zero | A payer that reconnects cannot otherwise know what it left behind. Informational, so nothing waits on it and the no-acknowledgment property of TopUp stands |
 | Grant state | Cumulative authorized, never decreasing | Satisfies the Spilman ratchet and makes TopUp idempotent, so lost and reordered messages are harmless and no acknowledgment is needed |
 | Reaction latency | One message, no round trip | Fire-and-forget is safe because the state is cumulative, so a payer can raise its rate and use it immediately |
-| Window bounds | `[min_window_ms, max_window_ms]`, provider-set, payer chooses per grant | `max` bounds buying off-peak for peak; `min` bounds signature verifications per second, which is the binding constraint on a constrained provider |
+| Window bounds | `[min_window_ms, max_window_ms]`, provider-set, payer chooses per grant (superseding) | `max` bounds buying off-peak for peak; `min` bounds signature verifications per second, which is the binding constraint on a constrained provider |
+| Longer intervals | Bought as renewals inside `max_window_ms`, not by raising it | Selling an hour at a fixed speed is a pinned rate renewed every window. A window as long as the interval would force channels several times as long and put the whole interval at risk on one dropped link |
 | Admission control | TopUpReject carries the rate that would be accepted | The payer states its rate up front for a bounded horizon, so the provider can refuse before taking the money instead of shaping afterward |
 | Delivery pricing | None in the protocol — one voucher per unit, both directions | A voucher is a claim on one unit, so redemption is delivery |
 | Accepted mints | One ordered list, at least one entry, no prices | Accept or refuse is binary. What an issuer's paper is worth is expressed in what you pay for it on the market, not in a settlement discount |
@@ -814,7 +1018,7 @@ Plus 2 bytes of length prefix per message. Setup messages are one-time. TopUp is
 | Metering counts | Unchanged: delivered and received, raw — but local | Measurement never changed. What changed is that it stopped being an input to payment, so the counters are no longer exchanged |
 | Market operations | Separate endpoints and a separate protocol; never TollGate messages | Buying and swapping vouchers is not part of paying for delivery, and a node that offers neither is fully functional |
 | Money in the protocol | Never appears | Sats are a market concern; the payment protocol only ever counts units and vouchers |
-| Message numbering | Contiguous, 0x00–0x0B | No reserved gaps. v1 is unreleased, so the codes describe the protocol as designed rather than its history |
+| Message numbering | Contiguous, 0x00–0x0C | No reserved gaps. v1 is unreleased, so the codes describe the protocol as designed rather than its history |
 | ChannelReady direction | Implied by the sender | The party that verified the funding is the party that will be paid on that channel, so a direction field would restate what the sender already says |
 | Free mode | Offer field 5, then Accept without funding, skip metering | Simplest path for free peering. The flag is omitted when false, so an Offer from a node that charges is unchanged |
 | Channel ownership | Each peer manages its own outgoing channel | Channels carry shared state, but rollover is initiated by the funder alone — only the party putting up new funds decides when to do it |

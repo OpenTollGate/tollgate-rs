@@ -60,7 +60,9 @@ A buyer prepays a **grant**: a quantity paired with a window, so what it
 buys is a rate. The seller shapes the buyer to exactly that rate. A
 purchase takes effect on arrival — the signed channel state is
 cumulative, so a lost message costs nothing — and raising a rate
-mid-window forfeits what was left of the grant in force. A peer that has
+mid-window forfeits what was left of the grant in force. A seller can
+instead sell volume: in its accumulative mode each purchase adds to a
+running budget that only traffic draws down. A peer that has
 bought nothing is held at a small minimum flow, enough to reach a mint
 and buy.
 

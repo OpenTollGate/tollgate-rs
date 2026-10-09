@@ -65,7 +65,11 @@ A peer arrives already holding vouchers for the node it wants service from, or i
 
 1. **Channel establishment**: The peers open Spilman channels (one per direction). Each peer manages rollover for its own outgoing channel — only the funder needs to initiate, since only the funder puts up new funds. Each channel is funded in one of the mints the counterparty lists — usually its own, which is always reachable over the peering link.
 
-2. **Buying capacity**: The payer sends a **TopUp** whenever it wants a rate — a signed channel update carrying a cumulative total and a **window** to spend the new units in. The rate is one divided by the other. A new grant replaces the one in force, so raising the rate mid-window forfeits the remainder; that is what makes the product bandwidth rather than a stored quantity of bytes. Nothing is acknowledged, so a payer can raise its rate and use it in the same breath.
+2. **Buying capacity**: The payer sends a **TopUp** — a signed channel update carrying a cumulative total. What it buys depends on the provider's **accounting mode**, which the provider names in its Offer ([tollgate-vouchers.md](tollgate-vouchers.md#two-accounting-modes)):
+   - **Superseding**, the default: the TopUp also carries a **window** to spend the new units in, and the rate is one divided by the other. A new grant replaces the one in force, so raising the rate mid-window forfeits the remainder; that is what makes the product bandwidth rather than a stored quantity of bytes. Selling time — an hour at a fixed speed — is this mode with the rate held steady.
+   - **Accumulative**: the TopUp adds its units to a running budget, which only traffic draws down. No window and no forfeit: units not used today are still there tomorrow, for as long as the provider holds them (a day by default). The provider caps each peer's speed and how much it may hold, because this mode lets a buyer stockpile ([tollgate-hazards.md](tollgate-hazards.md#when-accumulation-is-acceptable)).
+
+   Nothing is acknowledged, so a payer can buy and use what it bought in the same breath.
 
 3. **Rollover**: When a channel approaches exhaustion (default: at 80% capacity), a new channel is opened alongside it. The old channel continues to be drained to 100%. Once exhausted, grants continue on the new channel. A purchase that straddles the boundary is signed against **both in one TopUp** — if the old channel has 2 vouchers remaining and the next grant is 5, the same message ratchets the old channel to its capacity and starts the new one at 3. The grant is the combined increase, so the payer never sees a short window at a channel boundary.
 
@@ -215,7 +219,7 @@ The three daemons normally run on one machine and talk over local sockets; why t
 
 ## What a Node Advertises
 
-A node's offer is short: the mints whose vouchers it will take, most preferred first; the unit it denominates in; the range of grant windows it will accept; and one unsigned multiplier saying how welcome the peer's uploads are.
+A node's offer is short: the mints whose vouchers it will take, most preferred first; the unit it denominates in; its accounting mode, with the range of grant windows it will accept (superseding) or the speed and budget limits it applies (accumulative); and one unsigned multiplier saying how welcome the peer's uploads are.
 
 There are no products, no rate tables, and no price anywhere. Delivery costs one voucher per unit, and the peer already holds the vouchers.
 
@@ -241,7 +245,7 @@ TollGate assumes that peers are authenticated by the underlying network (FIPS No
 
 **Under-delivery**: A provider takes a grant and delivers less than it sold. The payer detects this on its own — it knows what it bought and what arrived, both from local counters — and feeds it into which peers it buys from and how large a grant it risks. What it cannot do is prove it to a third party, so a provider skimming from every peer stays invisible outside those peerings. Bounded by the size of one grant.
 
-**Rugpull (receiver)**: The receiver takes a grant and provides nothing. Bounded by the window the payer chose — maximum exposure is one grant's worth, and short windows make it small.
+**Rugpull (receiver)**: The receiver takes a grant and provides nothing. Bounded by the window the payer chose — maximum exposure is one grant's worth, and short windows make it small. In accumulative mode the exposure is the payer's unspent budget, bounded by the provider's `max_budget`.
 
 **Rugpull (sender)**: The sender stops paying and expects continued service. Mitigated by access control — delivery stops when payment stops.
 
@@ -291,7 +295,7 @@ TollGate uses the [Cashu Spilman channel](https://github.com/SatsAndSports/cashu
 
 | Document | Description |
 | -------- | ----------- |
-| [tollgate-vouchers.md](tollgate-vouchers.md) | What peers pay each other with: denomination, grants and windows, who pays, the received multiplier, channels as state compression |
+| [tollgate-vouchers.md](tollgate-vouchers.md) | What peers pay each other with: denomination, accounting modes, grants and windows, budgets, who pays, the received multiplier, channels as state compression |
 | [tollgate-protocol.md](tollgate-protocol.md) | Wire protocol: messages, negotiation, codec |
 | [tollgate-payment-channels.md](tollgate-payment-channels.md) | Spilman channel lifecycle, rollover, offline resilience |
 | [tollgate-access-control.md](tollgate-access-control.md) | Delivery gates, access levels, unpaid peer restrictions |

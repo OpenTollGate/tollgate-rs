@@ -10,7 +10,7 @@ The core principle: **no pay, no delivery** — beyond the minimum flow allowanc
 
 ### What a TollGate session is
 
-A **TollGate session** exists between two peers only while they have agreed a price and payment is flowing — a funded channel, or a grant it paid for still being delivered — or while they have agreed not to charge at all. The minimum flow allowance is **not** a session: it is what a connected peer gets outside one, so it can reach what it needs to start one. A peer that has never paid and a peer whose payment has lapsed are therefore in the same place, `None`.
+A **TollGate session** exists between two peers only while they have agreed a price and payment is flowing — a funded channel, or a grant or budget it paid for still being delivered — or while they have agreed not to charge at all. The minimum flow allowance is **not** a session: it is what a connected peer gets outside one, so it can reach what it needs to start one. A peer that has never paid and a peer whose payment has lapsed are therefore in the same place, `None`.
 
 The connection that carries TollGate messages is open before a session starts and stays open after one ends, so a peer can pay its way into a session without reconnecting. (In the code, `Sessions` and `PeerSession` track that connection from the moment a peer connects; they are wider than a TollGate session in this sense.)
 
@@ -69,7 +69,7 @@ With a non-zero allowance, the peer's delivery is shaped to that rate. With the 
 
 A TollGate session with payment flowing: the peer has funded a channel to pay on. Delivery is allowed up to what it has bought, and its grant is drawn down as traffic passes.
 
-Between grants — one expired, the next not yet bought — the peer stays `Active` and is shaped to the allowance. That is a pause in buying, not the end of the session: the channel is still funded, and the next TopUp restores the rate at once. With a zero allowance the pause carries nothing: the peer's forwarding is blocked and it is hidden from bloom filters until that TopUp.
+Between grants — one expired, the next not yet bought, or in accumulative mode a budget at zero — the peer stays `Active` and is shaped to the allowance. That is a pause in buying, not the end of the session: the channel is still funded, and the next TopUp restores the rate at once. With a zero allowance the pause carries nothing: the peer's forwarding is blocked and it is hidden from bloom filters until that TopUp.
 
 The session ends when payment lapses: the last channel is full, nothing replaces it, and the grant that channel paid for has run out. The peer returns to `None`.
 

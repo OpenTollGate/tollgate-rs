@@ -12,7 +12,7 @@ A node runs as three daemons ([tollgate-daemons.md](tollgate-daemons.md)), and e
 
 | File | Daemon | Configures |
 |------|--------|------------|
-| `tollgate.yaml` | `tollgated` | The protocol: identity, accepted mints, channels, grants, peers. **Most of this document** |
+| `tollgate.yaml` | `tollgated` | The protocol: identity, accepted mints, channels, accounting, grants, buying, peers. **Most of this document** |
 | `mint.yaml` | `mintd` | This node's mint: unit, keyset storage, listeners, auto-accept |
 | `merchant.yaml` | `merchantd` | Prices, accepted payment, the market endpoints, the wallet |
 
@@ -68,7 +68,9 @@ merchant:    # Where merchantd is: upstream funding and foreign proceeds
 vouchers:    # Which mints this node takes payment in, and per-peer traffic terms
 access:      # Minimum flow allowance
 channels:    # Spilman channel parameters
-grants:      # Bounds on what a payer may buy in one purchase
+accounting:  # Superseding or accumulative, and the bounds of each
+grants:      # Bounds on what a payer may buy in one purchase (superseding)
+buying:      # How this node buys from its peers
 peers:       # Static peer overrides
 ```
 
@@ -566,9 +568,90 @@ Capacities must satisfy `0 < min_capacity ≤ initial_capacity ≤ max_capacity`
 
 ---
 
+## Accounting
+
+How this node keeps its accounts with the peers that pay it: what one of their
+payments buys, and what happens to units they paid for and did not use. There
+are two **accounting modes** ([tollgate-vouchers.md](tollgate-vouchers.md#two-accounting-modes)):
+
+- **`superseding`**, the default. A payment buys a rate for a window. The next
+  payment replaces it, and what was left of it is forfeit. This sells speed.
+- **`accumulative`**. A payment adds to a running budget, and only traffic
+  takes units out of it. Nothing expires while the payer is around, and a
+  budget left behind is kept for `hold_seconds`. This sells volume.
+
+```yaml
+accounting:
+  mode: superseding              # superseding or accumulative
+  # The rest applies only in accumulative mode:
+  rate_cap: null                 # fastest a peer is carried, units/s; null = no cap
+  max_budget: 4294967296         # most a peer may hold unspent, units (4 GiB); null = no limit
+  min_topup_gap_ms: 1000         # shortest time between two TopUps from one peer
+  hold_seconds: 86400            # how long a budget is kept after the peer's last session
+```
+
+The mode, `rate_cap`, `max_budget` and `min_topup_gap_ms` are sent to each peer
+in the Offer ([tollgate-protocol.md](tollgate-protocol.md#0x01-offer)), so a
+payer knows before it buys how fast it will be carried and how much it may
+hold. In superseding mode the Offer carries `grants.window_range_ms` instead,
+and the rest of this block is ignored.
+
+**Pick `superseding` unless buyers really want volume.** It keeps capacity
+perishable, which is what stops buyers stockpiling off-peak and spending at
+peak ([tollgate-hazards.md](tollgate-hazards.md#unspent-capacity-must-expire)).
+Pick `accumulative` for buyers who pay for a quantity and want to use it at
+their own pace — a phone on a data pack — and read
+[When Accumulation Is Acceptable](tollgate-hazards.md#when-accumulation-is-acceptable)
+first. The two bounds are what make it safe enough:
+
+- **`rate_cap`** is the speed every accumulative peer is shaped to while it
+  has budget. With no window there is no rate for the peer to buy, so the
+  operator sets it. Size it against the link: at the busiest hour every peer
+  holding a budget may want its cap at once, and the node has already sold
+  the units. `null` leaves the link as the only limit.
+- **`max_budget`** is the most one peer may hold unspent. It bounds how much a
+  peer can save up for the busiest hour, and how much this node owes a peer at
+  once. A TopUp that would pass it is refused before any money moves.
+
+`min_topup_gap_ms` does for accumulative mode what the lower end of
+`grants.window_range_ms` does for superseding: it bounds how many signature
+checks a peer can impose. One a second is plenty for a buyer adding hundreds
+of megabytes at a time.
+
+`hold_seconds` is how long a budget outlives the payer's last session. A
+budget is written to disk, so it survives a reconnect, a restart of this node,
+a channel rollover and a channel settlement. Past the hold time it is
+forfeit. Nothing is refunded: the units were paid for when they were bought.
+
+**Selling time is not a mode.** An operator selling "an hour at 1 MB/s" uses
+`superseding`. The buyer holds one rate and renews it every window for as
+long as it has vouchers, so the hour is in what it bought, not in the window
+([Selling Time](tollgate-vouchers.md#selling-time)).
+
+**The FIPS exit** sells time at a speed the client picks, draining while idle,
+so its instance (`fips-exit`) uses `superseding`, the default.
+`accumulative` is open to it as an option, like any other instance.
+
+**Enforcers are unaffected.** In either mode `tollgated` sends an enforcer one
+rate per payer, and reads its counters, exactly as now
+([tollgate-enforcer-protocol.md](tollgate-enforcer-protocol.md)). Which mode
+produced the rate is invisible to it.
+
+### Defaults
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `mode` | `superseding` | `superseding` or `accumulative`. Per-peer override in `peers` |
+| `rate_cap` | `null` | Accumulative only. Units per second each peer is shaped to while it has budget; `null` = no cap. Near zero budget the peer is also slowed so it cannot overrun what is left. Per-peer override in `peers` |
+| `max_budget` | `4294967296` | Accumulative only. Most units one peer may hold unspent (4 GiB); `null` = no limit. Per-peer override in `peers` |
+| `min_topup_gap_ms` | `1000` | Accumulative only. A TopUp sooner than this after the peer's last is refused, to be sent again |
+| `hold_seconds` | `86400` | Accumulative only. How long a budget is kept after the peer's last session ended (one day). `0` forfeits it when the session ends |
+
+---
+
 ## Grants
 
-What this node will accept when a peer buys capacity. A grant is a quantity of units paired with a window to spend it in, and the rate it buys is one divided by the other ([tollgate-vouchers.md](tollgate-vouchers.md)).
+What this node will accept when a peer buys capacity in superseding mode. A grant is a quantity of units paired with a window to spend it in, and the rate it buys is one divided by the other ([tollgate-vouchers.md](tollgate-vouchers.md)). In accumulative mode `window_range_ms` is not used, and `max_rate` counts only the peers buying in superseding mode.
 
 ```yaml
 grants:
@@ -578,7 +661,7 @@ grants:
 
 `window_range_ms` is advertised in the Offer, and the two ends do different jobs:
 
-- **Upper bound** caps how far ahead capacity can be bought, which is what stops a buyer accumulating off-peak claims and presenting them at peak. Long windows also mean a large forfeit when a payer raises its rate early, so a high ceiling is not a favor to the payer.
+- **Upper bound** caps how far ahead capacity can be bought, which is what stops a buyer accumulating off-peak claims and presenting them at peak. Long windows also mean a large forfeit when a payer raises its rate early, so a high ceiling is not a favor to the payer. Selling a longer interval, such as an hour, does not need a longer window: the buyer renews inside it ([Selling Time](tollgate-vouchers.md#selling-time)). Raising it is allowed, but the safety margin is twice the longest window and `channels.ttl_seconds` must be at least twice the margin, so a one-hour window needs channels of four hours or more.
 - **Lower bound** caps how many grants can arrive per second, and therefore how many signature verifications a peer can impose. On an ESP32 that is the binding constraint, not bandwidth. Raise it on constrained hardware.
 
 There is no minimum grant size. A short window already bounds message rate, and a small grant is cheap to serve.
@@ -588,9 +671,65 @@ There is no minimum grant size. A short window already bounds message rate, and 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `window_range_ms` | `[200, 30000]` | Payer chooses per grant. Five verifications per second worst case, and no claim held longer than 30 s |
-| `max_rate` | `null` | Total rate this node will commit across all buyers at once. A TopUp that would exceed it is refused with the rate still available attached |
+| `max_rate` | `null` | Total rate this node will commit across all superseding buyers at once. A TopUp that would exceed it is refused with the rate still available attached. Accumulative peers are not counted; leave room for their `rate_cap` by hand |
 
 There is no transit-loss tolerance. Counters are not exchanged, so there is no second number to disagree with — see [tollgate-metering.md](tollgate-metering.md).
+
+---
+
+## Buying
+
+How this node buys from the peers it pays. The buyer follows the accounting
+mode each peer offers it, so one node can buy a rate from one peer and a
+budget from another ([How a Buyer Buys](tollgate-vouchers.md#how-a-buyer-buys)).
+
+```yaml
+buying:
+  demand: 0                       # units/s to want from every peer regardless; 0 = only what is observed
+  # Superseding peers:
+  headroom_pct: 125               # buy this share of observed demand
+  window_ms: 4000                 # window to ask for, clamped to the peer's range
+  renew_lead_ms: 1200             # renew this long before the deadline
+  raise_threshold_pct: 150        # buy early only if demand rose this much
+  cap_hold_ms: 10000              # respect a rate a peer named for this long
+  min_rate: 0                     # never buy below this rate
+  # max_rate:                    # never buy above this rate; unset = no ceiling
+  # Accumulative peers:
+  low_water: 67108864             # top up when the budget falls below this (64 MiB)
+  top_up: 268435456               # by this much (256 MiB)
+```
+
+**Superseding.** The buyer buys a rate for a window and renews it
+`renew_lead_ms` before the deadline. It only buys again earlier when demand
+has risen past `raise_threshold_pct`, because buying early forfeits what is
+left of the grant in force. `min_rate` and `max_rate` bound the rate it buys;
+set them equal to hold one rate whatever the demand, which is how a buyer
+buys time ([Selling Time](tollgate-vouchers.md#selling-time)).
+
+**Accumulative.** Nothing expires, so there is no deadline and nothing to
+forfeit. The buyer tops up by `top_up` whenever its remaining budget falls
+below `low_water`, and only while something wants the link (observed demand,
+or `demand`). It never asks for more than the peer's `max_budget` leaves room
+for. It counts the budget itself, from what it signed and what it measured,
+and takes the provider's Balance message as the truth whenever one arrives.
+
+Set `low_water` to cover what the link moves while a top-up is on its way: a
+few seconds at the peer's rate cap is plenty. `top_up` trades message count
+against money paid ahead; it is never lost, but it is held by the peer.
+
+### Defaults
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `demand` | `0` | Units per second to want from every peer whether or not anything asks. A standing order that spends money. `0` buys only for observed demand |
+| `headroom_pct` | `125` | Superseding. Buy this percentage of observed demand, so a rising flow is not shaped before the next purchase lands |
+| `window_ms` | `4000` | Superseding. Window to ask for, clamped to the peer's `window_range_ms` |
+| `renew_lead_ms` | `1200` | Superseding. Renew this long before the deadline. Below 1000 a renewal under load lands late and the flow stalls |
+| `raise_threshold_pct` | `150` | Superseding. Buy before the deadline only if the wanted rate exceeds the one in force by this much |
+| `cap_hold_ms` | `10000` | Superseding. How long to respect a rate a peer named in a TopUpReject before trying higher again |
+| `min_rate`, `max_rate` | `0`, unset (no ceiling) | Superseding. Bounds on the rate bought. Equal values pin it |
+| `low_water` | `67108864` | Accumulative. Top up when the remaining budget falls below this (64 MiB) |
+| `top_up` | `268435456` | Accumulative. Units added per top-up (256 MiB), clamped to what the peer's `max_budget` allows |
 
 ---
 
@@ -617,6 +756,13 @@ peers:
   # Static peer endpoint (IP peering only)
   "05jkl...":
     endpoint: "192.168.1.1:4747"
+
+  # Sell this peer volume rather than speed
+  "06pqr...":
+    accounting:
+      mode: accumulative
+      rate_cap: 2500000          # 20 Mbit/s
+      max_budget: 10737418240    # 10 GiB
 ```
 
 ### Defaults
@@ -627,6 +773,7 @@ peers:
 | `received_multiplier` | *(from `vouchers.received_multiplier`)* | Unsigned surcharge on what this peer pushes at us, on top of it being paid for delivering it |
 | `blocked` | `false` | Refuse all service to this peer |
 | `prefetch` | *(from `merchant.prefetch`)* | Channel fundings held ahead for this upstream |
+| `accounting.mode`, `accounting.rate_cap`, `accounting.max_budget` | *(from the `accounting` block)* | This peer's accounting mode and its accumulative bounds. Any not given come from the node-wide block |
 | `endpoint` | *(none)* | Static endpoint for IP peering |
 
 There is no `price_multiplier`. Favoring a peer means selling it vouchers more cheaply, which happens outside the protocol. `no_charge` is **not transitive** — it means free for that peer's own traffic, never free for anything that peer is nominally the beneficiary of.
@@ -664,12 +811,19 @@ channels:
   ttl_seconds: 3600
   rollover_threshold_pct: 80
 
+accounting:
+  mode: superseding
+
 grants:
   window_range_ms: [200, 30000]
 
 peers:
   "02abc...":
     no_charge: true
+  "06pqr...":
+    accounting:
+      mode: accumulative
+      rate_cap: 2500000
 ```
 
 ---
@@ -683,6 +837,8 @@ Some parameters can be changed at runtime without restarting `tollgated`:
 | Received multiplier | Yes | Sent as a revised Offer; takes effect on the peer's next grant, never on one already bought |
 | Minimum flow allowance | Yes | Applies immediately — it is a shaping rate, not a budget |
 | Grant window range | Yes | Sent as a revised Offer; applies to the next grant |
+| Accounting mode and its bounds | New sessions only | The mode is fixed for a session. A peer moved from accumulative to superseding keeps its budget on disk until `hold_seconds` runs out, and gets it back if it is moved back in time |
+| Hold time | Yes | Applies to budgets from then on, including those already held |
 | Max rate | Yes | Lowering it does not revoke a grant already sold; it refuses the next one |
 | Peer overrides | Yes | Add/remove/modify peer policies |
 | Prefetch | Yes | Applies from the next funding |
@@ -722,6 +878,9 @@ Each daemon watches its own config file for changes and applies runtime-changeab
 | Merchant block | A socket to `merchantd`, and `prefetch` counted in fundings per upstream | `tollgated` holds nothing of value, so it asks for upstream vouchers when it needs them; upstreams differ in mint and capacity, so no single amount fits |
 | Grants block | Replaces the metering block | There is no interval to negotiate and no drift tolerance to set. What is left is a bound on what a payer may buy in one purchase |
 | Window range | Advertised in the Offer; payer picks per grant | Upper end bounds buying off-peak for peak, lower end bounds signature verifications per second |
+| Accounting mode | `accounting.mode`, `superseding` by default, overridable per peer; fixed for a session | Speed and volume are different products, and the operator knows which its buyers want. Superseding is the default because it is the one that cannot be stockpiled |
+| Accumulative bounds | A per-peer `rate_cap` and `max_budget`, with defaults of no cap and 4 GiB, and a one-day `hold_seconds` | Accumulative mode has no window to limit how fast or how much a peer can draw, so the operator states both. A finite default budget keeps the node's debt to any one peer bounded even when the operator sets nothing |
+| Selling time | Not a mode: superseding with a buyer whose `min_rate` equals its `max_rate` | A fixed speed for a fixed time is a rate renewed every window; the length of time is how many vouchers the buyer holds |
 | Minimum flow allowance | A rate, not a per-interval quantity | It is the floor of the shaper and what a peer falls back to when its grant expires. A rate cannot be accumulated |
 | Transit-loss settings | Removed | Counters are no longer exchanged, so there is no second number to disagree with |
 | Accepted mints | One ordered list, at least one entry, no prices | Accept or refuse is binary; what an issuer's paper is worth belongs on the market |

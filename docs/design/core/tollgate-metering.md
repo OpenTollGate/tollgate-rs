@@ -24,13 +24,17 @@ consumed += delivered + received × received_multiplier
 
 The counters themselves stay raw. The weighting is applied when drawing down the grant, so what the meter reports and what the shaper charges stay separable.
 
+**This is the same in both accounting modes** ([tollgate-vouchers.md](tollgate-vouchers.md#two-accounting-modes)). In superseding mode the sum draws down the grant in force, and whatever it has not drawn by the deadline expires. In accumulative mode it draws down the payer's running budget, and nothing else does. Metering does not know which mode it is feeding.
+
+The received multiplier itself is due to be redesigned: as it stands its net effect is off by one, its default makes a relay pay for its clients' uploads, and it needs a mint on every leaf. That redesign will change this formula in both modes at once; nothing here depends on how it comes out.
+
 What is metered is what the node delivers **for or through** the peer. Traffic addressed to or sent by the node itself — TollGate protocol messages, `mintd`, `merchantd`'s market endpoints — is not metered, and is **never blocked or shaped**, whatever the peer's access level: blocking it would cut off the payment that restores delivery. Where the delivery path already separates the two, as a kernel does between forwarded and locally-delivered packets, the exemption costs nothing. Where it does not, an implementation may count that traffic, but must still never block it.
 
 ## Cumulative Counter Model
 
-Counters are **cumulative since session start** (the ChannelReady baseline). They are compared against `authorized`, the cumulative total the peer has signed for, and the difference is what the peer may still spend.
+Counters are **cumulative since session start** (the ChannelReady baseline). They are compared against `authorized`, the cumulative total the peer has signed for — plus, in accumulative mode, any budget it carried into the session — and the difference is what the peer may still spend.
 
-Nothing here is reported to the peer. The payer knows what it signed for; the provider knows what it delivered. Neither has to convince the other, because the money moved before the traffic did.
+Nothing here is reported to the peer. The payer knows what it signed for; the provider knows what it delivered. Neither has to convince the other, because the money moved before the traffic did. The one exception is accumulative mode's Balance message, which tells the payer what is left of its budget ([tollgate-protocol.md](tollgate-protocol.md#0x0c-balance)). It is a convenience, so a payer that reconnects knows what it left behind, and decides no payment.
 
 Grant state and the TopUp message are in [tollgate-protocol.md](tollgate-protocol.md).
 
@@ -124,6 +128,7 @@ pub type PeerMetrics = HashMap<String, MetricValue>;
 | Counter names | `delivered` and `received`, unchanged | The payment model changed, the measurement did not. Both already mean the peer's download and upload |
 | Reporting | None — counters stay local | Payment happens before delivery, so no shared number decides how much money moves and there is nothing to reconcile |
 | Multiplier | Applied when drawing down the grant, not when counting | Keeps what the meter reports separable from what the shaper charges |
+| Accounting modes | Metering is the same in both; only what the sum draws down differs | A grant and a budget are both a number of units paid for. How they expire is a payment question, not a counting one |
 | Transit loss | The payer's cost | A grant is consumed whether or not packets arrive. The payer measures its own throughput and stops buying; no tolerance, no threshold, no message |
 | Under-delivery detection | One-sided, from the payer's own counters | Delivered rate against purchased rate needs nothing from the provider. Feeds connection choice: which peer to buy from, how large a grant to risk |
 | Under-delivery evidence | None — a payer can act but cannot prove | Accepted for now. Same visibility gap the market layer has for refused redemption, and revisitable as a reporting path if skimming proves common |

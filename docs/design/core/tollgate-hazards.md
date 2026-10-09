@@ -85,8 +85,8 @@ power to move a payment.
 
 ## Unspent Capacity Must Expire
 
-A grant is a quantity paired with a window, and what is not drawn inside that
-window is forfeit — both when the window ends and when a new grant replaces it
+In superseding mode, the default, a grant is a quantity paired with a window,
+and what is not drawn inside that window is forfeit — both when the window ends and when a new grant replaces it
 ([tollgate-vouchers.md](tollgate-vouchers.md)). That looks harsh, and the
 temptation is to soften it: credit the remainder into the next grant, let a
 small allowance accumulate, extend the deadline instead of replacing it.
@@ -107,6 +107,47 @@ Two bounds hold it, and both are needed:
 
 The same reasoning is why the minimum flow allowance is a rate rather than a
 per-interval quantity. A quantity accumulates; a rate cannot.
+
+### When Accumulation Is Acceptable
+
+Accumulative mode ([tollgate-vouchers.md](tollgate-vouchers.md#accumulative-a-running-budget))
+breaks this rule on purpose. A payer's unspent units stay its own until it
+moves them, so it is selling volume, not bandwidth. That is the right product
+when buyers think in volume — a phone on a data pack, a sensor that sends a
+little now and then — and when the operator is willing to carry what it costs.
+It is acceptable only as the operator's explicit choice, per node or per peer,
+and only with both of its bounds in place:
+
+- **`accounting.rate_cap`**, so a stockpile is spent no faster than the cap,
+  however large it is. This takes the place of the window as the limit on how
+  fast a claim can be presented.
+- **`accounting.max_budget`**, so no peer holds more than that unspent at
+  once. This takes the place of `max_window_ms` as the limit on how much can be
+  stored. `accounting.hold_seconds` limits how long.
+
+What it reintroduces, which those bounds limit but do not remove:
+
+- **Hoarding and off-peak stockpiling.** A buyer can buy whenever vouchers are
+  cheap or the link is quiet and spend at the busiest hour, and every buyer
+  can do the same at the same hour. The provider cannot refuse it then: the
+  budget is already sold, and accumulative mode has no committed rate for
+  admission control to check. At peak, N accumulative peers can each draw up
+  to their rate cap, and if N caps exceed the link, every peer on it —
+  superseding ones included — gets less than it paid for. An operator selling
+  in this mode has to size the caps against the link, or accept that the link
+  is shared at peak.
+- **The provider holds more prepaid value.** A superseding payer has paid at
+  most one window ahead. An accumulative payer may have paid up to
+  `max_budget` ahead, for up to `hold_seconds`. If the provider defaults,
+  disappears or loses its disk, the payer loses all of it, not one window. The
+  provider, for its part, owes service it has already been paid for, which is
+  a liability it has to keep on disk and honor.
+- **Repricing by the back door.** A budget carried into a new session is
+  drawn at that session's received multiplier, so raising the multiplier
+  between sessions reprices units already sold (an open problem in
+  [tollgate-vouchers.md](tollgate-vouchers.md#open-problems)).
+
+Superseding mode stays the default because it needs none of this weighed.
 
 ---
 
@@ -152,7 +193,7 @@ deposit, or an operator allowlist. None is specified.
 | Never pay a peer a bonus to send or accept traffic | Peers profiting from traffic nobody wants |
 | No price-aware routing | Cheapest route being a blackhole |
 | Metrics never price inputs | A peer degrading its link to move its own price |
-| Unspent capacity expires, and windows are capped | Buying capacity off-peak to present at peak |
+| Unspent capacity expires, and windows are capped — or, in accumulative mode by the operator's choice, each peer's speed and stored budget are capped instead | Buying capacity off-peak to present at peak |
 | Free peering not transitive | Laundered free transit |
 | Locks survive every swap | Locks removed by swapping through change |
 | Aggregate caps on anything granted per peer | Free identities multiplying anything given away |
