@@ -96,10 +96,11 @@ something is. Two examples, each with its own `tollgated` instance:
 |---|---|---|
 | The enforcer | The controller of a charge point for electric cars, or of a smart plug: a relay that switches the outlet on and off, a power limit, and an energy meter | A tap controller: a valve on each tap, and a flow meter |
 | The payer | The customer's phone, running a TollGate client. It reaches `tollgated` over FIPS, which proves its key | A session key held by a kiosk on the premises, which takes the customer's money, as the proxy in [Delegated Bindings](#delegated-bindings) holds one per phone |
+| The instance's unit, `mint.unit` | `wh`, watt-hours | `ml`, millilitres |
 | `enforcer.identity` | `pubkey` | `address`; the kiosk is on the same machine or LAN, and nothing needs proving |
 | The subject | The phone's 32-byte key. The instance serves one charge point, so a key bound here is a customer at this charge point | Delegated: the kiosk is a trusted local client, and asks for a binding that names the tap the customer is standing at, say the bytes `tap-3`. The enforcer says `delegated: true` in its `hello`, and acts only on delegated subjects |
-| `set(peer, rate)` | A rate switches the outlet on and caps its power. `0` switches it off. `null` switches it on with no cap | A rate opens the valve and limits the flow. `0` closes it. `null` opens it with no limit |
-| `counters` | The energy the meter recorded | The volume the flow meter recorded |
+| `set(peer, rate)` | A rate, in Wh per second, switches the outlet on and caps its power: 1 Wh per second is 3.6 kW. `0` switches it off. `null` switches it on with no cap | A rate, in ml per second, opens the valve and limits the flow. `0` closes it. `null` opens it with no limit |
+| `counters` | The energy the meter recorded, in Wh | The volume the flow meter recorded, in ml |
 | The grant runs out | `tollgated` sends `set(peer, 0)`, and the outlet switches off | `tollgated` sends `set(peer, 0)`, and the valve closes |
 
 The rules already set out apply unchanged. A subject belongs to at most one
@@ -110,11 +111,16 @@ switches off and every valve closes, as any enforcer goes back to closed.
 **Only one direction flows here.** Power and beer go to the customer, so what
 the meter records is `delivered`, and `received` stays `0`.
 
-**Both examples need a unit other than the byte, and this protocol has none
-yet.** `set` carries bytes per second, `counters` carry bytes, and the vouchers
-a node sells today are in the unit `byte`. Electricity is sold in watt-hours
-(Wh), and beer in millilitres (ml). How an enforcer would say which unit it
-counts in is an [open problem](#open-problems).
+**Each instance counts in its own unit.** The vouchers an instance sells are
+in its mint's unit, `mint.unit`
+([tollgate-configuration.md](tollgate-configuration.md#mint)), and the wire
+protocol already names that unit to every peer, in
+[Announce](tollgate-protocol.md#0x00-announce) and
+[Offer](tollgate-protocol.md#0x01-offer). The enforcer is configured to count
+in the same unit. So `set` carries a rate in units per second, and `counters`
+carry units. For network traffic the unit is `byte`. For the charge point it is
+`wh`, and for the tap `ml`. The enforcer states its unit in its `hello`, as a
+check ([Units](#units)).
 
 ### Where the Trust Comes From
 
@@ -179,12 +185,15 @@ what that file will say.
 
 | Message | Direction | Meaning |
 |---|---|---|
-| `hello(version, identity, delegated)` | enforcer → tollgated | The first message on every connection. It states the identity the enforcer was built for (`pubkey` or `address`), and says whether it accepts delegated bindings. `tollgated` only checks the identity against its own `enforcer.identity` ([Identity](#identity)) |
+| `hello(version, identity, delegated, unit)` | enforcer → tollgated | The first message on every connection. It states the identity the enforcer was built for (`pubkey` or `address`), says whether it accepts delegated bindings, and names the unit it counts in, such as `byte` or `ml`. `tollgated` only checks the identity against its own `enforcer.identity` ([Identity](#identity)), and the unit against its own ([Units](#units)) |
 | `bind(peer, [subject, delegated])` | tollgated → enforcer | Every subject this payer holds. It replaces any earlier set; an empty list unbinds them all |
-| `set(peer, rate)` | tollgated → enforcer | The payer's state: `0` is closed; a number is open and shaped to that many bytes per second; `null` is open and unshaped |
+| `set(peer, rate)` | tollgated → enforcer | The payer's state: `0` is closed; a number is open and shaped to that many units per second; `null` is open and unshaped |
 | `remove(peer)` | tollgated → enforcer | Forget the payer. Its subjects go back to closed |
-| `counters(peer, delivered, received)` | enforcer → tollgated | Bytes carried to and from the payer's subjects, counted from the start of this connection |
+| `counters(peer, delivered, received)` | enforcer → tollgated | Units carried to and from the payer's subjects, counted from the start of this connection |
 | `conflict(peer, subject)` | enforcer → tollgated | The enforcer refused to bind `subject` to `peer`. See [Conflicts](#conflicts) |
+
+A **unit** here is always the instance's own unit, the one its vouchers are
+in. For network traffic it is the byte.
 
 The messages from `tollgated` stand in for the calls on `Enforcer`, the trait
 every built-in enforcer implements, and the one `tollgated` uses to enforce and
@@ -226,7 +235,7 @@ node's own addresses; a proxy serves its payment page to anyone.
 enforcer                               tollgated
   │  (listening; everyone closed)          │
   │◄────────────── connect ────────────────│
-  │── hello(1, identity, delegated) ──────►│  check against enforcer.identity
+  │── hello(1, identity, delegated, unit) ►│  check identity and unit
   │                                        │  (differs: startup error)
   │◄──── bind + set, every payer ──────────│  full state
   │                                        │
@@ -241,9 +250,11 @@ enforcer                               tollgated
 </details>
 
 **The enforcer speaks first, with `hello`.** `tollgated` sends nothing until
-it has one. It closes a connection whose `version` it does not speak.
-Otherwise it sends the **full state**: a `bind` and a `set` for every payer it
-tracks. After that, every message reports a change.
+it has one. It closes a connection whose `version` it does not speak, and
+refuses an enforcer whose identity or unit differs from its own
+([Identity](#identity), [Units](#units)). Otherwise it sends the **full
+state**: a `bind` and a `set` for every payer it tracks. After that, every
+message reports a change.
 
 **`bind` replaces.** It always carries every subject the payer holds, so
 sending it twice does no harm. `tollgated` binds a payer when the payer's
@@ -302,7 +313,8 @@ trying to reconnect, about once a second. Meanwhile:
   they left off once the enforcer is back
 
 The same holds before the first connection. A `tollgated` with an external
-enforcer starts selling when it has a `hello` it accepts, not when it starts.
+enforcer starts selling when it has a `hello` it accepts, one whose identity
+and unit match its own, not when it starts.
 
 What an outage costs a payer is the rest of its current grant: it paid for a
 window the enforcer stopped carrying. That loss is bounded by one grant, and
@@ -359,7 +371,8 @@ at the other end of the traffic, so it is built for `pubkey`. One that matches
 addresses is built for `address`. It states which in its `hello`, and
 `tollgated` compares that with `enforcer.identity`. Nothing is negotiated: the
 config is the one place the identity is decided. Since the wire carries no
-subject kinds, this is the one check that the two ends of a pairing agree.
+subject kinds, this is the one check that the two ends of a pairing agree on
+what a subject is.
 
 **A mismatch is a startup error, not a silent hole.** `tollgated` refuses to
 start in either of these cases, and says why:
@@ -385,6 +398,32 @@ keys. The instance checks no keys, and binds source addresses. Left to run,
 the mistake would show up long after startup, if at all: as a stream of
 protocol errors, or as an enforcer treating bytes nobody checked as a proven
 key. Running on regardless is never the answer; refusing at startup is.
+
+---
+
+## Units
+
+**The unit is set by the instance, not by this protocol.** It is the
+instance's own unit, `mint.unit`
+([tollgate-configuration.md](tollgate-configuration.md#mint)): `byte` for
+network traffic, `wh` for electricity, `ml` for a tap. The operator configures
+the enforcer to count in that unit, when pairing the two. Nothing is
+negotiated.
+
+**The enforcer's `hello` names its unit, as a check**, the same way it states
+its identity. `tollgated` compares it with its own unit, as plain text.
+
+**A mismatch is a startup error.** If the units differ, `tollgated` refuses to
+start, and the error names both. Take a tap whose controller counts litres,
+paired with an instance that sells millilitres. Every `counters` report would
+be read as a thousand times too small, and every rate `tollgated` sent would
+pour a thousand times too much. That has to stop the node at startup, not
+show up on an invoice.
+
+**A reconnecting enforcer may not change its unit either.** As with the
+identity, `tollgated` is already running by then. It refuses that enforcer,
+logs both units, and stays in the not-selling state described under
+[Failure Rules](#failure-rules).
 
 ---
 
@@ -504,12 +543,17 @@ binding = [subject, delegated: bool]
 ; The same words as enforcer.identity in tollgated's config.
 identity = "pubkey" / "address"
 
+; The instance's unit, as mint.unit in tollgated's config: "byte", "wh",
+; "ml". Compared as plain text.
+unit = tstr
+
 ; 0x20 -- enforcer -> tollgated. First message on every connection.
 hello = {
   0: 0x20,
   1: u8,                          ; version; 1
   2: identity,                    ; must equal tollgated's enforcer.identity
   3: bool,                        ; accepts delegated bindings
+  4: unit,                        ; must equal tollgated's own unit
   * uint => any,
 }
 
@@ -525,7 +569,7 @@ bind = {
 set = {
   0: 0x22,
   1: payer,
-  2: u64 / null,                  ; 0 closed, n bytes/s shaped, null unshaped
+  2: u64 / null,                  ; 0 closed, n units/s shaped, null unshaped
   * uint => any,
 }
 
@@ -540,8 +584,8 @@ remove = {
 counters = {
   0: 0x24,
   1: payer,
-  2: u64,                         ; delivered: to the payer's subjects
-  3: u64,                         ; received: from them
+  2: u64,                         ; delivered: units to the payer's subjects
+  3: u64,                         ; received: units from them
   * uint => any,
 }
 
@@ -578,11 +622,11 @@ enforcer:
 The enforcer starts and says what it was built for:
 
 ```
-hello(1, identity: address, delegated: false)
+hello(1, identity: address, delegated: false, unit: byte)
 ```
 
-That matches the config, so `tollgated` sends its full state, which is empty
-so far.
+Both match: the identity is the config's, and `byte` is the instance's unit,
+`mint.unit`. So `tollgated` sends its full state, which is empty so far.
 
 A laptop running TollGate, with key `02ab…`, connects to `tollgated` from
 `192.168.1.23`. That source address is all `tollgated` has, and it is
@@ -663,10 +707,11 @@ enforcer:
 ```
 
 The node runs FIPS and `tollgated` listens on its `fips0` address, so `pubkey`
-is allowed. The enforcer connects and agrees:
+is allowed. The instance sells traffic, so its unit is `byte`. The enforcer
+connects and agrees on both:
 
 ```
-hello(1, identity: pubkey, delegated: false)
+hello(1, identity: pubkey, delegated: false, unit: byte)
 ```
 
 A peer whose connection does not come from the FIPS address of the key it
@@ -739,7 +784,6 @@ handed bytes that are neither.
 | Counters after `remove` | Whether a payer's counts start again from zero when it is removed and later bound again on the same connection. The implementation assumes they do |
 | A `hello` version `tollgated` does not speak | Whether this is a startup refusal, like an identity mismatch, or a closed connection that `tollgated` retries. The implementation retries |
 | Who sets the counters interval | `counters` are sent once a second by default. Whether the enforcer picks the interval, or `tollgated` asks for one, is not yet settled |
-| Units other than bytes | `set` rates are bytes per second, `counters` are bytes, and vouchers are in the unit `byte`. An enforcer that sells something else, such as electricity or beer ([Beyond Network Traffic](#beyond-network-traffic)), would need to declare its unit; vouchers would be in that unit, and rates per second in it: Wh per second for power (1 Wh/s is 3.6 kW), ml per second for flow. How the unit is declared, and checked against the node's own, is not settled |
 
 ---
 
@@ -763,7 +807,8 @@ handed bytes that are neither.
 | Counters | Running totals per payer for the life of the connection, sent every tick. On a reconnect `tollgated` adds the previous connection's last totals | A running total survives a lost report. Carrying totals across a reconnect keeps core's totals from going backwards |
 | Identity | One setting, `enforcer.identity: pubkey \| address`. Defaults: `address` for `ip` and `loopback`, `pubkey` for `fips`; `external` must write it. `pubkey` needs a network that proves keys, today FIPS, or `tollgated` refuses to start | Who a peer is decides what is bound, so it belongs in the config with the rest of the pairing. An external enforcer could match either, so it gets no default. Believing an announced key while the enforcer takes its subjects as proven keys opens a paying peer's traffic to anyone; so `pubkey` never means an announced key |
 | Identity names | `pubkey` and `address`, not `fips` and `claimed` | Named for what a peer is. FIPS is the only network that proves keys today, but a tunnel keyed by the TollGate key could too, and should not need a setting named after FIPS. `address` says what is actually trusted, where `claimed` said only what was not |
-| The `hello` identity | A check only. If it differs from the config, `tollgated` refuses to start and names both; a reconnecting enforcer that changes it is refused | With no kinds on the wire, it is the one check that the two ends of a pairing agree. It replaces an earlier design where the enforcer chose the identity and the operator could optionally pin it. Two places deciding one thing meant reading both to know which applied, and an unpinned instance trusted whatever the enforcer asked for. Now nothing is negotiated |
+| The `hello` identity | A check only. If it differs from the config, `tollgated` refuses to start and names both; a reconnecting enforcer that changes it is refused | With no kinds on the wire, it is the one check that the two ends of a pairing agree on what a subject is. It replaces an earlier design where the enforcer chose the identity and the operator could optionally pin it. Two places deciding one thing meant reading both to know which applied, and an unpinned instance trusted whatever the enforcer asked for. Now nothing is negotiated |
+| Unit | Implied by the instance: its own unit, `mint.unit`. The enforcer counts in it, and `set` and `counters` are in it. `hello` names the enforcer's unit as a check; on a mismatch `tollgated` refuses to start and names both, and a reconnecting enforcer that changes it is refused | Each instance sells one thing, in one unit, and the wire protocol already names that unit in Announce and Offer. The operator pairs instance and enforcer, so there is nothing to negotiate, and a second place deciding the unit could only disagree with the first. The check is there because a disagreement costs real money: a tap counting litres for an instance selling ml would bill a thousand times off. For network traffic the unit is `byte`, so nothing changes there |
 | Scope | External enforcers sell a service this node delivers; paid FIPS peer links stay on the built-in `fips` enforcer | Traffic passing between neighbors is controlled by the FIPS node itself, neighbor by neighbor. An enforcer sells what its own traffic delivers, to any payer that can reach this node |
 | Deriving subjects | The enforcer's job | `tollgated` stays free of the details of every kind of traffic |
 | Delegated bindings | Through `tollgated`, flagged, refusable in `hello` | One party tells the enforcer who has paid. An enforcer that takes no third party's word says so once |

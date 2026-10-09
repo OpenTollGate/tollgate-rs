@@ -133,7 +133,7 @@ The name `pubkey` is not tied to FIPS on purpose. Another network that proves ke
 | `loopback` | `address` |
 | `external` | *(none: it must be written)* |
 
-`external` has no default because `tollgated` cannot tell what the external enforcer matches, or which network its peers arrive over. The enforcer states the identity it was built for when it connects. That is only a check: if it differs from this setting, `tollgated` refuses to start and names both ([tollgate-enforcer-protocol.md](tollgate-enforcer-protocol.md#identity)).
+`external` has no default because `tollgated` cannot tell what the external enforcer matches, or which network its peers arrive over. The enforcer states the identity it was built for when it connects. That is only a check: if it differs from this setting, `tollgated` refuses to start and names both ([tollgate-enforcer-protocol.md](tollgate-enforcer-protocol.md#identity)). It also names the unit it counts in, which must be this node's [`mint.unit`](#mint), checked the same way ([Units](tollgate-enforcer-protocol.md#units)).
 
 This is not the top-level [`identity`](#identity) block, which holds this node's own key.
 
