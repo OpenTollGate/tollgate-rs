@@ -8,6 +8,9 @@
 #   3. tollgate-fips-test   — both binaries, plus the entrypoint that
 #                             starts the mesh before anything else
 #
+# `IMAGE_TAG` builds all three under another tag instead of `latest`, as
+# build.sh does.
+#
 # Step 2 needs a FIPS checkout at `reference/fips`, which is not part of this
 # repository. Without one there is nothing to build against, and the script
 # says so rather than producing an image that would fail at run time.
@@ -26,26 +29,28 @@ if [[ ! -f "$FIPS/Cargo.toml" ]]; then
 fi
 
 export DOCKER_BUILDKIT=1
+TAG="${IMAGE_TAG:-latest}"
 
 "$TESTING_DIR/scripts/build.sh"
 
 # The daemon is built from `git archive` rather than from the working tree: the
 # tree carries a `target/` of several gigabytes that docker would upload as
 # build context every time, and the archive is exactly the committed state.
-echo "building fips-node:latest from $FIPS ..."
+echo "building fips-node:$TAG from $FIPS ..."
 CONTEXT="$(mktemp -d)"
 trap 'rm -rf "$CONTEXT"' EXIT
 git -C "$FIPS" archive --format=tar "${FIPS_REF:-HEAD}" | tar -x -C "$CONTEXT"
 
 docker build \
-    -t fips-node:latest \
+    -t "fips-node:$TAG" \
     -f "$TESTING_DIR/docker/Dockerfile.fipsd" \
     "$CONTEXT"
 
-echo "building tollgate-fips-test:latest ..."
+echo "building tollgate-fips-test:$TAG ..."
 docker build \
-    -t tollgate-fips-test:latest \
+    -t "tollgate-fips-test:$TAG" \
+    --build-arg "TAG=$TAG" \
     -f "$TESTING_DIR/docker/Dockerfile.fips" \
     "$TESTING_DIR/docker"
 
-echo "done: tollgate-fips-test:latest"
+echo "done: tollgate-fips-test:$TAG"

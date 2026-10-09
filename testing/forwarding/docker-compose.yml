@@ -58,11 +58,11 @@ services:
         ipv6_address: fd00:29::10
 
   gateway:
-    image: tollgate-test:latest
+    image: tollgate-test:${IMAGE_TAG:-latest}
     entrypoint: ["/bin/sh", "-c"]
     # Masquerade toward the upstream segment before starting, so the origin
     # replies to the gateway rather than to a client it has no route to. This
-    # is the operator's network setup, not the adapter's: a separate table, so
+    # is the operator's network setup, not the enforcer's: a separate table, so
     # tollgated re-creating its own on startup leaves it alone.
     #
     # NAT does not disturb the metering. On the way out the forward hook still
@@ -81,7 +81,7 @@ services:
         nft add chain inet tollgate_nat postrouting
         '{ type nat hook postrouting priority 100; }' &&
         nft add rule inet tollgate_nat postrouting oifname "$$transit" masquerade &&
-        exec tollgate-node -c /run/gateway.yaml --control-socket /run/tollgate.sock
+        exec tollgate-node -c /run/gateway.yaml
     volumes:
       - ./gateway.yaml:/etc/tollgate/gateway.yaml:ro
     environment:
@@ -101,7 +101,7 @@ services:
         ipv6_address: fd00:29::20
 
   client:
-    image: tollgate-test:latest
+    image: tollgate-test:${IMAGE_TAG:-latest}
     entrypoint: ["/bin/sh", "-c"]
     # A sequence with one element, so the whole script reaches `sh -c` as a
     # single argument rather than being split into words.
@@ -109,7 +109,7 @@ services:
       - >
         ip route replace 172.29.0.0/24 via 172.28.0.20 &&
         exec tollgate-node -c /etc/tollgate/client.yaml
-        --control-socket /run/tollgate.sock --demand 2000000
+        --demand 2000000
     volumes:
       - ./client.yaml:/etc/tollgate/client.yaml:ro
     environment:
@@ -127,7 +127,7 @@ services:
   # routes to the origin's segment through the gateway in each, and nothing
   # running but the traffic the test sends from it.
   phone:
-    image: tollgate-test:latest
+    image: tollgate-test:${IMAGE_TAG:-latest}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >
@@ -148,13 +148,11 @@ services:
   # phone's IPv4 address and MAC. It buys nothing until the test recreates it
   # with PHONE_DEMAND set.
   phone-node:
-    image: tollgate-test:latest
+    image: tollgate-test:${IMAGE_TAG:-latest}
     network_mode: "service:phone"
     command:
       - -c
       - /etc/tollgate/phone.yaml
-      - --control-socket
-      - /run/tollgate.sock
       - --demand
       - "${PHONE_DEMAND:-0}"
     volumes:

@@ -13,7 +13,7 @@
 # same distinction the kernel topology draws with a separate interface, here
 # drawn by the protocol.
 x-mesh-node: &mesh-node
-  image: tollgate-fips-test:latest
+  image: tollgate-fips-test:${IMAGE_TAG:-latest}
   # fipsd creates a TUN device and puts an address on it.
   cap_add: [NET_ADMIN]
   devices:
@@ -55,8 +55,6 @@ services:
       - tollgate-node
       - -c
       - /etc/tollgate/gateway.yaml
-      - --control-socket
-      - /run/tollgate.sock
     networks:
       mesh:
         ipv4_address: 172.30.0.20
@@ -76,7 +74,6 @@ services:
         head -c 200000000 /dev/zero > /srv/blob &&
         (cd /srv && python3 -m http.server 8080 --bind :: &) &&
         exec tollgate-node -c /etc/tollgate/origin.yaml
-        --control-socket /run/tollgate.sock
     networks:
       mesh:
         ipv4_address: 172.30.0.10
@@ -91,8 +88,6 @@ services:
       - tollgate-node
       - -c
       - /etc/tollgate/client.yaml
-      - --control-socket
-      - /run/tollgate.sock
       - --demand
       - "2000000"
     networks:

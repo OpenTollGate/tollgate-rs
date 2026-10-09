@@ -26,6 +26,25 @@ use tollgate_protocol::PubKey;
 /// address can never be confused with a routable one.
 const ADDRESS_PREFIX: u8 = 0xfd;
 
+/// Whether this machine runs FIPS: its interface, `fips0`, is there, or its
+/// control socket is where FIPS puts it by default.
+///
+/// What `enforcer.identity: pubkey` needs under any enforcer but `fips`, which
+/// reaches the FIPS node itself and fails to start without one.
+pub fn running() -> bool {
+    if std::path::Path::new("/sys/class/net/fips0").exists() {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        crate::enforcer::Fips::default_socket_path().exists()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 /// The npub and node address FIPS knows a key by.
 pub fn names(peer: PubKey) -> (String, String) {
     let x_only = &peer.0[1..];

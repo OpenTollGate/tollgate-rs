@@ -48,13 +48,13 @@ buying:
   #
   # demand: 2000000
 
-forwarding:
+enforcer:
   # macOS has no nftables and no tc, so the kernel forwarding path cannot be
-  # gated the way it is on a router. This mode meters and shapes a socket of
+  # gated the way it is on a router. This enforcer meters and shapes a socket of
   # its own instead: the protocol, the payments and the shaping are real, and
   # nobody else's packets cross it. Right for developing against, for watching
   # with tolltop, and for a node that buys transit rather than selling it.
-  mode: loopback
+  kind: loopback
 
 network:
   # Loopback by default: nothing needs to reach this node until it is peering.

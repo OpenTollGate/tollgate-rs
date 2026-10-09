@@ -46,18 +46,18 @@ tollgate::wait_for "the gateway to shape the client to what it bought" 60 \
 # one it wrote into its config really is the client's side.
 edge="$(docker compose -f "$COMPOSE" exec -T gateway awk '/^  interface:/ {print $2}' /run/gateway.yaml)"
 [[ -n "$edge" ]] || tollgate::fail "the gateway's config names no interface"
-docker compose -f "$COMPOSE" exec -T gateway ip -br addr show "$edge" | grep -q "172.28.0.20" \
+docker compose -f "$COMPOSE" exec -T gateway ip -br addr show "$edge" | grep "172.28.0.20" >/dev/null \
   || tollgate::fail "$edge is not the interface facing the client"
 
 # Every packet has to cross the gateway, or the measurement below would be of
 # a path that was never shaped.
-docker compose -f "$COMPOSE" exec -T client ip route get 172.29.0.10 | grep -q "via 172.28.0.20" \
+docker compose -f "$COMPOSE" exec -T client ip route get 172.29.0.10 | grep "via 172.28.0.20" >/dev/null \
   || tollgate::fail "the client is not routing to the origin through the gateway"
 
 # The kernel is really doing the work: rules and a class exist for this peer.
 docker compose -f "$COMPOSE" exec -T gateway nft list table inet tollgate >/dev/null 2>&1 \
   || tollgate::fail "the gateway installed no nftables table"
-docker compose -f "$COMPOSE" exec -T gateway tc class show dev "$edge" | grep -q htb \
+docker compose -f "$COMPOSE" exec -T gateway tc class show dev "$edge" | grep htb >/dev/null \
   || tollgate::fail "the gateway installed no tc class"
 
 # Time a real download through the gateway, and check what actually arrived.
@@ -118,8 +118,13 @@ p=(docker compose -f "$COMPOSE" exec -T phone)
 gw=(docker compose -f "$COMPOSE" exec -T gateway)
 
 # Whether an element is in one of the gateway's sets or maps.
-in_set() { "${gw[@]}" nft list set inet tollgate "$1" 2>/dev/null | grep -q "$2"; }
-in_map() { "${gw[@]}" nft list map inet tollgate "$1" 2>/dev/null | grep -q "$2"; }
+#
+# Here and wherever a check reads `docker compose exec` through grep, grep
+# reads to the end rather than `-q`: `-q` exits at the first match, docker's
+# next write then fails on the closed pipe, and under `pipefail` an element
+# that is there reads as missing.
+in_set() { "${gw[@]}" nft list set inet tollgate "$1" 2>/dev/null | grep "$2" >/dev/null; }
+in_map() { "${gw[@]}" nft list map inet tollgate "$1" 2>/dev/null | grep "$2" >/dev/null; }
 
 # Pull from the origin over IPv6 for `$1` seconds; prints "code bytes speed".
 fetch6() {
@@ -131,7 +136,7 @@ fetch6() {
 # gateway has a neighbour entry tying the address to the phone's MAC.
 "${p[@]}" ping -6 -c 2 -W 1 fd00:28::20 >/dev/null \
   || tollgate::fail "the phone cannot reach the gateway over IPv6"
-"${p[@]}" ip -6 route get fd00:29::10 | grep -q "via fd00:28::20" \
+"${p[@]}" ip -6 route get fd00:29::10 | grep "via fd00:28::20" >/dev/null \
   || tollgate::fail "the phone is not routing to the origin through the gateway"
 phone_mac="$("${p[@]}" cat /sys/class/net/eth0/address)"
 
@@ -164,7 +169,7 @@ tollgate::wait_for "the phone's IPv6 to be allowed" 30 \
 # for the ipv6 protocol pointing at that mark.
 in_map mark6 "$PHONE6" || tollgate::fail "no mark6 element for $PHONE6"
 mark="$("${gw[@]}" nft list map inet tollgate mark6 | grep -o "$PHONE6 : 0x[0-9a-f]*" | awk '{print $3}')"
-"${gw[@]}" tc filter show dev "$edge" protocol ipv6 | grep -q "handle $mark" \
+"${gw[@]}" tc filter show dev "$edge" protocol ipv6 | grep "handle $mark" >/dev/null \
   || tollgate::fail "no tc ipv6 filter selects the phone's mark $mark"
 in_map down6_tx "$PHONE6" || tollgate::fail "no down6_tx counter element for $PHONE6"
 

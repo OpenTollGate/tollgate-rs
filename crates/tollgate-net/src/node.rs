@@ -16,15 +16,17 @@ use tollgate_core::buyer::BuyerPolicy;
 use tollgate_core::config::{NodePolicy, PeerPolicy};
 use tollgate_core::session::Sessions;
 use tollgate_core::{Action, Event, Millis};
-use tollgate_protocol::{ChannelUpdate, Message, PubKey, ReasonCode, TopUp, TopUpReject};
+use tollgate_protocol::{
+    ChannelUpdate, Message, PubKey, ReasonCode, RefusedUpdate, TopUp, TopUpReject,
+};
 use tracing::{debug, info, warn};
 
-use crate::adapter::ResourceAdapter;
 use crate::channel::{self, ChannelBackend, MintNotAccepted};
 use crate::control;
+use crate::enforcer::Enforcer;
 use crate::identity::Identity;
 use crate::settle::{Backoff, Settler};
-use crate::wire::{self, Identify, Wire};
+use crate::wire::{self, PeerIdentity, Wire};
 
 /// How often the node samples its meters and ticks core.
 ///
@@ -40,6 +42,13 @@ const TICK: Duration = Duration::from_millis(100);
 /// abandoned: the channel is lost to its refund timelock, as it would be to a
 /// power cut.
 const SHUTDOWN_SETTLE_GRACE: Duration = Duration::from_secs(5);
+
+/// Most channel fundings held per peer while the enforcer is not selling.
+///
+/// A peer normally has one in flight — its first channel or a rollover — so
+/// this is room for both and a repeat; past it a peer is only making the node
+/// hold its bytes.
+const MAX_DEFERRED_FUNDINGS: usize = 4;
 
 /// A peer the operator has said something about.
 #[derive(Debug, Clone)]
@@ -68,9 +77,9 @@ pub struct NodeConfig {
     pub buyer: BuyerPolicy,
     /// Control-plane listen address.
     pub listen: SocketAddr,
-    /// Whether a peer's announced key has to agree with the address it
-    /// connects from.
-    pub identify: Identify,
+    /// Who a connecting peer is: its proven key, or the address it connects
+    /// from. `enforcer.identity`.
+    pub peer_identity: PeerIdentity,
     /// The URL peers reach this node's mint on, advertised in our Offer.
     pub mint_url: String,
     /// Where this node reaches that mint itself.
@@ -88,7 +97,7 @@ pub struct NodeConfig {
 impl NodeConfig {
     /// Where the loopback data plane listens, one port above the control plane.
     ///
-    /// Only meaningful for the loopback adapter: a kernel adapter forwards real
+    /// Only meaningful for the loopback enforcer: a kernel enforcer forwards real
     /// traffic and has no socket of its own.
     pub fn data_listen(&self) -> SocketAddr {
         let mut addr = self.listen;
@@ -101,12 +110,15 @@ impl NodeConfig {
 pub struct Node {
     identity: Identity,
     sessions: Sessions,
-    adapter: Arc<dyn ResourceAdapter>,
+    enforcer: Arc<dyn Enforcer>,
     channels: Arc<dyn ChannelBackend>,
     /// Settlements, and the retries of the ones that fail.
     settler: Settler,
     /// Outbound queue per connected peer.
     links: HashMap<PubKey, mpsc::Sender<Message>>,
+    /// Channel fundings a peer sent while the enforcer was not selling to it,
+    /// verified once it is. See [`Enforcer::selling`].
+    deferred: HashMap<PubKey, Vec<Vec<u8>>>,
     /// What the node is doing, republished each tick for the control socket.
     published: control::Published,
     started: Instant,
@@ -117,7 +129,7 @@ impl Node {
     pub fn new(
         config: &NodeConfig,
         channels: Arc<dyn ChannelBackend>,
-        adapter: Arc<dyn ResourceAdapter>,
+        enforcer: Arc<dyn Enforcer>,
     ) -> Self {
         let mut sessions = Sessions::new(
             config.identity.pubkey(),
@@ -134,10 +146,11 @@ impl Node {
         Self {
             identity: config.identity.clone(),
             sessions,
-            adapter,
+            enforcer,
             settler: Settler::new(Arc::clone(&channels), Backoff::DEFAULT),
             channels,
             links: HashMap::new(),
+            deferred: HashMap::new(),
             published: Default::default(),
             started: Instant::now(),
         }
@@ -157,9 +170,9 @@ impl Node {
         Arc::clone(&self.published)
     }
 
-    /// The adapter, so a demo or a test can set demand and read counters.
-    pub fn adapter(&self) -> Arc<dyn ResourceAdapter> {
-        Arc::clone(&self.adapter)
+    /// The enforcer, so a demo or a test can set demand and read counters.
+    pub fn enforcer(&self) -> Arc<dyn Enforcer> {
+        Arc::clone(&self.enforcer)
     }
 
     /// This node's identity.
@@ -209,26 +222,26 @@ impl Node {
         info!(
             pubkey = %self.identity.pubkey(),
             control = %local,
-            identify = ?config.identify,
+            identity = %config.peer_identity,
             "node listening"
         );
 
         // Refusing every connection is the correct behaviour here and a baffling
         // one to debug, so say it once at startup rather than once per peer.
-        if config.identify == Identify::Fips && local.is_ipv4() {
+        if config.peer_identity == PeerIdentity::Pubkey && local.is_ipv4() {
             warn!(
                 control = %local,
                 "listening on IPv4 while checking mesh identity: no peer on fips0 can reach this"
             );
         }
 
-        tokio::spawn(wire::listen(control, wire_tx.clone(), config.identify));
+        tokio::spawn(wire::listen(control, wire_tx.clone(), config.peer_identity));
 
         for peer in &config.peers {
             spawn_dialer(
                 peer.clone(),
                 wire_tx.clone(),
-                config.identify,
+                config.peer_identity,
                 config.connector.clone(),
             );
         }
@@ -285,15 +298,39 @@ impl Node {
                 self.links.insert(peer, tx);
                 // Tie the key the protocol knows to the address the kernel
                 // knows, before anything is gated or shaped for this peer.
-                self.adapter.register(peer, addr.ip());
+                self.enforcer.register(peer, addr.ip());
                 self.dispatch(Event::PeerConnected { peer }, done).await;
             }
             Wire::PeerDown { peer } => {
                 self.links.remove(&peer);
-                self.adapter.remove(peer);
+                self.deferred.remove(&peer);
+                self.enforcer.remove(peer);
                 self.dispatch(Event::PeerDisconnected { peer }, done).await;
             }
             Wire::Message { peer, msg } => {
+                // Nothing is sold while the enforcer cannot enforce it: the
+                // capacity this node can deliver is zero, and the payer is told
+                // so as it would be at any other ceiling. Its money is untouched,
+                // since nothing is ratcheted, and core never hears of it.
+                if let Message::TopUp(ref t) = msg
+                    && !self.enforcer.selling(peer)
+                {
+                    let reject = TopUpReject {
+                        refused: t
+                            .updates
+                            .iter()
+                            .map(|u| RefusedUpdate {
+                                channel_id: u.channel_id,
+                                cumulative: u.cumulative,
+                            })
+                            .collect(),
+                        max_rate_available: 0,
+                        reason: ReasonCode::RateExceedsCapacity,
+                    };
+                    log_refusal(peer, &reject, Side::Sent);
+                    self.send(peer, Message::TopUpReject(reject)).await;
+                    return;
+                }
                 // Core trusts what it is handed, so the signature is checked
                 // here — before the message reaches anything that acts on it.
                 // Every update in the purchase, since it is honored or refused
@@ -333,7 +370,7 @@ impl Node {
     fn publish(&self, config: &NodeConfig) {
         self.published.store(Arc::new(control::snapshot(
             &self.sessions,
-            self.adapter.as_ref(),
+            self.enforcer.as_ref(),
             &hex::encode(self.identity.pubkey().0),
             &config.mint_url,
             self.started.elapsed().as_millis() as u64,
@@ -343,15 +380,36 @@ impl Node {
 
     /// Sample the meters and tick core.
     async fn on_tick(&mut self, done: &mpsc::Sender<Event>) {
-        for peer in self.adapter.peers() {
-            let counters = self.adapter.counters(peer);
+        self.release_deferred(done).await;
+        for peer in self.enforcer.peers() {
+            let counters = self.enforcer.counters(peer);
             self.dispatch(Event::Metered { peer, counters }, done).await;
 
-            let rate = self.adapter.demand(peer);
+            let rate = self.enforcer.demand(peer);
             self.dispatch(Event::DemandObserved { peer, rate }, done)
                 .await;
         }
         self.dispatch(Event::Tick, done).await;
+    }
+
+    /// Verify the fundings held back from peers the enforcer now sells to.
+    async fn release_deferred(&mut self, done: &mpsc::Sender<Event>) {
+        if self.deferred.is_empty() {
+            return;
+        }
+        let ready: Vec<PubKey> = self
+            .deferred
+            .keys()
+            .copied()
+            .filter(|peer| self.enforcer.selling(*peer))
+            .collect();
+        for peer in ready {
+            for funding in self.deferred.remove(&peer).unwrap_or_default() {
+                debug!(%peer, "verifying a channel funding held while not selling");
+                self.execute(Action::VerifyFunding { peer, funding }, done)
+                    .await;
+            }
+        }
     }
 
     /// Feed one event to core and carry out everything it asks for.
@@ -418,12 +476,12 @@ impl Node {
 
             Action::SetAccess { peer, access } => {
                 debug!(%peer, ?access, "access changed");
-                self.adapter.set_access(peer, access);
+                self.enforcer.set_access(peer, access);
             }
 
             Action::SetShapingRate { peer, rate } => {
                 debug!(%peer, rate, "shaping rate changed");
-                self.adapter.set_shaping_rate(peer, rate);
+                self.enforcer.set_shaping_rate(peer, rate);
             }
 
             Action::FundChannel {
@@ -432,6 +490,13 @@ impl Node {
                 mint_url,
                 capacity,
             } => {
+                // No new money goes out while this node cannot sell. Core is
+                // not told: it asks again once its funding timeout passes, and
+                // a failure reported now would have it ask every tick.
+                if !self.enforcer.selling(peer) {
+                    debug!(%peer, request, "not funding a channel while not selling");
+                    return;
+                }
                 let channels = Arc::clone(&self.channels);
                 let done = done.clone();
                 let started = self.started;
@@ -460,6 +525,19 @@ impl Node {
             }
 
             Action::VerifyFunding { peer, funding } => {
+                // Held, not refused: refusing a funding ends the session, and
+                // a session already running is kept through an outage. Verified
+                // on the first tick the enforcer sells to this peer again.
+                if !self.enforcer.selling(peer) {
+                    let held = self.deferred.entry(peer).or_default();
+                    if held.len() < MAX_DEFERRED_FUNDINGS {
+                        debug!(%peer, "holding a channel funding while not selling");
+                        held.push(funding);
+                    } else {
+                        warn!(%peer, "dropping a channel funding: too many held while not selling");
+                    }
+                    return;
+                }
                 let channels = Arc::clone(&self.channels);
                 let done = done.clone();
                 let started = self.started;
@@ -537,7 +615,8 @@ impl Node {
             Action::DropPeer { peer } => {
                 info!(%peer, "dropping peer");
                 self.links.remove(&peer);
-                self.adapter.remove(peer);
+                self.deferred.remove(&peer);
+                self.enforcer.remove(peer);
             }
         }
     }
@@ -619,7 +698,7 @@ fn log_refusal(peer: PubKey, reject: &TopUpReject, side: Side) {
 fn spawn_dialer(
     peer: PeerConfig,
     wire_tx: mpsc::Sender<Wire>,
-    identify: Identify,
+    identity: PeerIdentity,
     connector: Option<wire::Connector>,
 ) {
     let Some(endpoint) = peer.endpoint.clone() else {
@@ -631,7 +710,7 @@ fn spawn_dialer(
                 &endpoint,
                 peer.pubkey,
                 wire_tx.clone(),
-                identify,
+                identity,
                 connector.as_ref(),
             );
             if let Err(e) = dialed.await {

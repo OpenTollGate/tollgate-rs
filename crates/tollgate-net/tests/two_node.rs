@@ -18,12 +18,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tollgate_core::buyer::BuyerPolicy;
 use tollgate_core::config::{GrantPolicy, NodePolicy, PeerPolicy};
-use tollgate_net::adapter::{Loopback, ResourceAdapter};
 use tollgate_net::channel::{ChannelBackend, FundedChannel, LocalChannels, VerifiedChannel};
+use tollgate_net::enforcer::{Enforcer, Loopback};
 use tollgate_net::identity::Identity;
 use tollgate_net::node::{Node, NodeConfig, PeerConfig};
 use tollgate_net::settle::Backoff;
-use tollgate_net::wire::Identify;
+use tollgate_net::wire::PeerIdentity;
 use tollgate_protocol::{ChannelId, PubKey, Signature};
 
 /// How long to wait for something the protocol does on its own: a peering, a
@@ -92,7 +92,7 @@ async fn bind_planes() -> (TcpListener, TcpListener) {
 /// A node a test started.
 struct Spawned {
     pubkey: PubKey,
-    adapter: Arc<Loopback>,
+    enforcer: Arc<Loopback>,
     /// What the node publishes, which is where a session either appears or
     /// does not.
     published: tollgate_net::control::Published,
@@ -131,7 +131,7 @@ async fn spawn_node_with(
         listen,
         // These tests talk plain IP on loopback, where an address commits to
         // nothing there is to check.
-        identify: Identify::Claimed,
+        peer_identity: PeerIdentity::Address,
         // Unused here: these tests drive `LocalChannels`, so no mint is served
         // and nothing binds this.
         mint_local: "http://127.0.0.1/unused".into(),
@@ -141,10 +141,10 @@ async fn spawn_node_with(
         peers,
     };
 
-    let adapter = Arc::new(Loopback::new());
-    let node = Node::new(&config, channels, adapter.clone());
+    let enforcer = Arc::new(Loopback::new());
+    let node = Node::new(&config, channels, enforcer.clone());
     let published = node.published();
-    spawn_loopback_plane(&config, data, adapter.clone());
+    spawn_loopback_plane(&config, data, enforcer.clone());
     tokio::spawn(async move {
         if let Err(e) = node.run_on(control, config, std::future::pending()).await {
             eprintln!("node stopped: {e}");
@@ -153,7 +153,7 @@ async fn spawn_node_with(
 
     Spawned {
         pubkey,
-        adapter,
+        enforcer,
         published,
         endpoint: listen.to_string(),
     }
@@ -161,16 +161,16 @@ async fn spawn_node_with(
 
 /// Start the loopback data plane for a node: a listener, and a dialer per peer.
 ///
-/// The node does not do this itself, because a kernel adapter forwards real
+/// The node does not do this itself, because a kernel enforcer forwards real
 /// traffic and has no socket of its own.
-fn spawn_loopback_plane(config: &NodeConfig, data: TcpListener, adapter: Arc<Loopback>) {
+fn spawn_loopback_plane(config: &NodeConfig, data: TcpListener, enforcer: Arc<Loopback>) {
     let local = config.identity.pubkey();
-    tokio::spawn(tollgate_net::dataplane::listen(data, adapter.clone()));
+    tokio::spawn(tollgate_net::dataplane::listen(data, enforcer.clone()));
     for peer in &config.peers {
         let Some(endpoint) = peer.endpoint.clone() else {
             continue;
         };
-        tollgate_net::dataplane::keep_dialing(endpoint, local, peer.pubkey, adapter.clone());
+        tollgate_net::dataplane::keep_dialing(endpoint, local, peer.pubkey, enforcer.clone());
     }
 }
 
@@ -201,11 +201,11 @@ async fn wait_for(label: &str, mut check: impl FnMut() -> bool) {
 /// The divisor is the time that really passed, not the time asked for: a
 /// sleep on a loaded machine overruns, and dividing by the nominal window
 /// would credit the overrun's bytes to a shorter interval.
-async fn measure_download(adapter: &Loopback, peer: PubKey, window: Duration) -> u64 {
-    let before = adapter.counters(peer).received;
+async fn measure_download(enforcer: &Loopback, peer: PubKey, window: Duration) -> u64 {
+    let before = enforcer.counters(peer).received;
     let started = Instant::now();
     tokio::time::sleep(window).await;
-    let after = adapter.counters(peer).received;
+    let after = enforcer.counters(peer).received;
     let elapsed_ms = started.elapsed().as_millis().max(1) as u64;
     (after - before) * 1_000 / elapsed_ms
 }
@@ -218,7 +218,7 @@ async fn connected_pair() -> (PubKey, Arc<Loopback>, PubKey, Arc<Loopback>) {
     // up front. A listener learns who is calling from the Announce.
     let client = spawn_node("https://client.example/mint", vec![dial(&provider)]).await;
 
-    let probe = Arc::clone(&provider.adapter);
+    let probe = Arc::clone(&provider.enforcer);
     let client_key = client.pubkey;
     wait_for("the provider to see the client", move || {
         probe.peers().contains(&client_key)
@@ -227,36 +227,36 @@ async fn connected_pair() -> (PubKey, Arc<Loopback>, PubKey, Arc<Loopback>) {
 
     (
         provider.pubkey,
-        provider.adapter,
+        provider.enforcer,
         client.pubkey,
-        client.adapter,
+        client.enforcer,
     )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_client_that_wants_bandwidth_buys_it_and_gets_it() {
-    let (provider, provider_adapter, client, client_adapter) = connected_pair().await;
+    let (provider, provider_enforcer, client, client_enforcer) = connected_pair().await;
 
     // Nothing bought yet: the client is held at the minimum flow allowance,
     // which is what leaves it able to send the TopUp that changes that.
     assert!(
-        provider_adapter.shaping_rate(client) <= 4_096,
+        provider_enforcer.shaping_rate(client) <= 4_096,
         "an unpaid peer should be at the allowance, not above it"
     );
 
     // Traffic appears.
     const WANTED: u64 = 2_000_000;
-    client_adapter.set_demand(provider, WANTED);
+    client_enforcer.set_demand(provider, WANTED);
 
     // 125% headroom on 2 MB/s.
-    let probe = Arc::clone(&provider_adapter);
+    let probe = Arc::clone(&provider_enforcer);
     wait_for(
         "the provider to shape the client to what it bought",
         move || probe.shaping_rate(client) == 2_500_000,
     )
     .await;
 
-    let throughput = measure_download(&client_adapter, provider, Duration::from_secs(2)).await;
+    let throughput = measure_download(&client_enforcer, provider, Duration::from_secs(2)).await;
     assert!(
         throughput > WANTED,
         "the client bought 2.5 MB/s and measured only {throughput} B/s"
@@ -267,26 +267,26 @@ async fn a_client_that_wants_bandwidth_buys_it_and_gets_it() {
 async fn a_traffic_spike_raises_the_purchased_rate() {
     // The point of the whole exercise: the algorithm notices demand climbing
     // and buys more, without anything being negotiated or acknowledged.
-    let (provider, provider_adapter, client, client_adapter) = connected_pair().await;
+    let (provider, provider_enforcer, client, client_enforcer) = connected_pair().await;
 
-    client_adapter.set_demand(provider, 1_000_000);
-    let probe = Arc::clone(&provider_adapter);
+    client_enforcer.set_demand(provider, 1_000_000);
+    let probe = Arc::clone(&provider_enforcer);
     wait_for("the first purchase", move || {
         probe.shaping_rate(client) == 1_250_000
     })
     .await;
 
-    let before = measure_download(&client_adapter, provider, Duration::from_secs(2)).await;
+    let before = measure_download(&client_enforcer, provider, Duration::from_secs(2)).await;
 
     // Demand jumps sixteenfold.
-    client_adapter.set_demand(provider, 16_000_000);
-    let probe = Arc::clone(&provider_adapter);
+    client_enforcer.set_demand(provider, 16_000_000);
+    let probe = Arc::clone(&provider_enforcer);
     wait_for("the rate to be raised", move || {
         probe.shaping_rate(client) == 20_000_000
     })
     .await;
 
-    let after = measure_download(&client_adapter, provider, Duration::from_secs(2)).await;
+    let after = measure_download(&client_enforcer, provider, Duration::from_secs(2)).await;
     assert!(
         after > before * 4,
         "throughput should have followed the purchase: {before} B/s -> {after} B/s"
@@ -297,18 +297,18 @@ async fn a_traffic_spike_raises_the_purchased_rate() {
 async fn a_client_that_stops_buying_falls_back_to_the_allowance() {
     // Non-payment enforces itself. Nothing detects it, no message announces it,
     // and there is no delivered-but-unpaid balance to chase.
-    let (provider, provider_adapter, client, client_adapter) = connected_pair().await;
+    let (provider, provider_enforcer, client, client_enforcer) = connected_pair().await;
 
-    client_adapter.set_demand(provider, 4_000_000);
-    let probe = Arc::clone(&provider_adapter);
+    client_enforcer.set_demand(provider, 4_000_000);
+    let probe = Arc::clone(&provider_enforcer);
     wait_for("the purchase", move || {
         probe.shaping_rate(client) == 5_000_000
     })
     .await;
 
-    client_adapter.set_demand(provider, 0);
+    client_enforcer.set_demand(provider, 0);
 
-    let probe = Arc::clone(&provider_adapter);
+    let probe = Arc::clone(&provider_enforcer);
     wait_for("the grant to lapse back to the allowance", move || {
         probe.shaping_rate(client) == 4_096
     })
@@ -319,18 +319,18 @@ async fn a_client_that_stops_buying_falls_back_to_the_allowance() {
 async fn both_directions_are_bought_and_shaped_independently() {
     // Two channels is the default. Each side pays for what it received, so both
     // owe, both fund, and each buys on its own schedule.
-    let (provider, provider_adapter, client, client_adapter) = connected_pair().await;
+    let (provider, provider_enforcer, client, client_enforcer) = connected_pair().await;
 
-    client_adapter.set_demand(provider, 1_000_000);
-    provider_adapter.set_demand(client, 4_000_000);
+    client_enforcer.set_demand(provider, 1_000_000);
+    provider_enforcer.set_demand(client, 4_000_000);
 
-    let probe = Arc::clone(&provider_adapter);
+    let probe = Arc::clone(&provider_enforcer);
     wait_for("the client's purchase", move || {
         probe.shaping_rate(client) == 1_250_000
     })
     .await;
 
-    let probe = Arc::clone(&client_adapter);
+    let probe = Arc::clone(&client_enforcer);
     wait_for("the provider's purchase", move || {
         probe.shaping_rate(provider) == 5_000_000
     })
@@ -369,8 +369,8 @@ async fn a_channel_that_fills_up_rolls_over_and_buying_continues() {
     .await;
     let provider_hex = hex::encode(provider.pubkey.0);
     let client_published = client.published;
-    let (provider, provider_adapter) = (provider.pubkey, provider.adapter);
-    let (client, client_adapter) = (client.pubkey, client.adapter);
+    let (provider, provider_enforcer) = (provider.pubkey, provider.enforcer);
+    let (client, client_enforcer) = (client.pubkey, client.enforcer);
 
     // Every channel the client pays the provider on, in the order it used
     // them, as its own published snapshot shows them.
@@ -394,11 +394,11 @@ async fn a_channel_that_fills_up_rolls_over_and_buying_continues() {
         }
     };
 
-    let probe = Arc::clone(&provider_adapter);
+    let probe = Arc::clone(&provider_enforcer);
     wait_for("the peering", move || probe.peers().contains(&client)).await;
 
-    client_adapter.set_demand(provider, 2_000_000);
-    let probe = Arc::clone(&provider_adapter);
+    client_enforcer.set_demand(provider, 2_000_000);
+    let probe = Arc::clone(&provider_enforcer);
     wait_for("the first purchase", move || {
         probe.shaping_rate(client) == 2_500_000
     })
@@ -409,9 +409,9 @@ async fn a_channel_that_fills_up_rolls_over_and_buying_continues() {
     // boundary before the checks below, instead of measuring a window too
     // short to reach one. A client that stopped buying after a rollover is
     // held at the 4 KB/s allowance and would need hours to get here.
-    let start = client_adapter.counters(provider).received;
+    let start = client_enforcer.counters(provider).received;
     let started = Instant::now();
-    let probe = Arc::clone(&client_adapter);
+    let probe = Arc::clone(&client_enforcer);
     let note = note_channel;
     wait_for("three channels' worth of traffic", move || {
         note();
@@ -441,7 +441,7 @@ async fn a_channel_that_fills_up_rolls_over_and_buying_continues() {
     // renewal can land a tick late on a loaded machine and let one grant lapse
     // for a moment, so this waits for the bought rate rather than sampling a
     // single instant; a client that could no longer buy never gets back to it.
-    let probe = Arc::clone(&provider_adapter);
+    let probe = Arc::clone(&provider_enforcer);
     wait_for("the client to still be shaped at what it buys", move || {
         probe.shaping_rate(client) == 2_500_000
     })
@@ -574,7 +574,7 @@ async fn spawn_flaky_node(
         policy,
         buyer: buyer_policy(),
         listen,
-        identify: Identify::Claimed,
+        peer_identity: PeerIdentity::Address,
         // Unused here: these tests drive `LocalChannels`, so no mint is served
         // and nothing binds this.
         mint_local: "http://127.0.0.1/unused".into(),
@@ -589,13 +589,13 @@ async fn spawn_flaky_node(
         attempts: Mutex::default(),
         settled: AtomicU32::new(0),
     });
-    let adapter = Arc::new(Loopback::new());
-    let node = Node::new(&config, backend.clone(), adapter.clone()).with_settle_backoff(Backoff {
+    let enforcer = Arc::new(Loopback::new());
+    let node = Node::new(&config, backend.clone(), enforcer.clone()).with_settle_backoff(Backoff {
         initial: Duration::from_millis(10),
         max: Duration::from_millis(100),
     });
     let published = node.published();
-    spawn_loopback_plane(&config, data, adapter.clone());
+    spawn_loopback_plane(&config, data, enforcer.clone());
     tokio::spawn(async move {
         if let Err(e) = node.run_on(control, config, std::future::pending()).await {
             eprintln!("node stopped: {e}");
@@ -603,7 +603,7 @@ async fn spawn_flaky_node(
     });
     let spawned = Spawned {
         pubkey,
-        adapter,
+        enforcer,
         published,
         endpoint: listen.to_string(),
     };
@@ -631,12 +631,12 @@ async fn a_settlement_that_fails_is_retried_until_it_succeeds() {
     )
     .await;
     let (provider, client) = (provider_node.pubkey, client_node.pubkey);
-    let client_adapter = Arc::clone(&client_node.adapter);
+    let client_enforcer = Arc::clone(&client_node.enforcer);
 
-    let probe = Arc::clone(&provider_node.adapter);
+    let probe = Arc::clone(&provider_node.enforcer);
     wait_for("the peering", move || probe.peers().contains(&client)).await;
 
-    client_adapter.set_demand(provider, 2_000_000);
+    client_enforcer.set_demand(provider, 2_000_000);
 
     // Both ends settle a drained channel: the provider to claim what it
     // earned, the client to retire it. Each has three failures to get past.
@@ -780,7 +780,7 @@ async fn a_link_that_blips_resumes_its_channels_instead_of_funding_new_ones() {
     )
     .await;
     let provider = provider_node.pubkey;
-    let provider_adapter = Arc::clone(&provider_node.adapter);
+    let provider_enforcer = Arc::clone(&provider_node.enforcer);
     let provider_published = provider_node.published.clone();
 
     // The client reaches the provider only through the relay.
@@ -800,10 +800,10 @@ async fn a_link_that_blips_resumes_its_channels_instead_of_funding_new_ones() {
     )
     .await;
     let client = client_node.pubkey;
-    let client_adapter = Arc::clone(&client_node.adapter);
+    let client_enforcer = Arc::clone(&client_node.enforcer);
 
-    client_adapter.set_demand(provider, 1_000_000);
-    let probe = Arc::clone(&provider_adapter);
+    client_enforcer.set_demand(provider, 1_000_000);
+    let probe = Arc::clone(&provider_enforcer);
     wait_for("the first purchase", move || {
         probe.shaping_rate(client) == 1_250_000
     })
@@ -840,8 +840,8 @@ async fn a_link_that_blips_resumes_its_channels_instead_of_funding_new_ones() {
         !probe.load().peers.is_empty()
     })
     .await;
-    client_adapter.set_demand(provider, 1_000_000);
-    let probe = Arc::clone(&provider_adapter);
+    client_enforcer.set_demand(provider, 1_000_000);
+    let probe = Arc::clone(&provider_enforcer);
     wait_for("buying to resume", move || {
         probe.shaping_rate(client) == 1_250_000
     })

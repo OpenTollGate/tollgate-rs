@@ -1,6 +1,6 @@
 //! Gating and shaping the kernel's own forwarding path.
 //!
-//! This is the adapter that carries somebody else's packets. Two mechanisms,
+//! This is the enforcer that carries somebody else's packets. Two mechanisms,
 //! because access and rate are different questions:
 //!
 //! - **nftables** decides *whether* a packet is forwarded, and counts what was.
@@ -83,7 +83,7 @@
 //!   is already counted by address.
 //!
 //! No new interface is needed for it: the host registers the IPv4 address as
-//! before, and the adapter learns the rest from the kernel on the same
+//! before, and the enforcer learns the rest from the kernel on the same
 //! refresh that tells customers from upstreams. An address seen once stays
 //! the peer's until another MAC claims it, so an idle privacy address that
 //! drops out of the neighbour table is not left ungated.
@@ -113,7 +113,7 @@ use tollgate_core::meter::Counters;
 use tollgate_protocol::PubKey;
 use tracing::{debug, info, warn};
 
-use super::ResourceAdapter;
+use super::Enforcer;
 
 /// The nftables table everything lives in, so teardown is one command.
 const TABLE: &str = "tollgate";
@@ -134,7 +134,7 @@ const TABLE: &str = "tollgate";
 /// buyer renews on.
 const BURST_MS: u64 = 10;
 
-/// High bits of the packet mark this adapter sets, with the peer's class in the
+/// High bits of the packet mark this enforcer sets, with the peer's class in the
 /// low bits.
 ///
 /// The mark is a field the whole box shares, so a bare small integer would be
@@ -230,7 +230,7 @@ enum Metering {
 
 /// Gates with nftables, shapes with `tc`.
 #[derive(Debug)]
-pub struct Nftables {
+pub struct Ip {
     /// Interface facing the peers, where their classes live.
     interface: String,
     peers: Mutex<HashMap<PubKey, Peer>>,
@@ -240,21 +240,21 @@ pub struct Nftables {
     refreshed: Mutex<Option<Instant>>,
 }
 
-impl Nftables {
+impl Ip {
     /// Set up the table, the base chain and the root qdisc.
     ///
-    /// Fails rather than degrading: an adapter that cannot install rules would
+    /// Fails rather than degrading: an enforcer that cannot install rules would
     /// forward everything while reporting that it was gating, which is worse
     /// than not starting.
     pub fn new(interface: &str) -> Result<Self> {
-        let adapter = Self {
+        let enforcer = Self {
             interface: interface.to_string(),
             peers: Mutex::new(HashMap::new()),
             next_classid: Mutex::new(2),
             refreshed: Mutex::new(None),
         };
-        adapter.install()?;
-        Ok(adapter)
+        enforcer.install()?;
+        Ok(enforcer)
     }
 
     fn install(&self) -> Result<()> {
@@ -953,7 +953,7 @@ fn normalize_mac(mac: &str) -> Option<String> {
     valid.then(|| mac.to_ascii_lowercase())
 }
 
-impl ResourceAdapter for Nftables {
+impl Enforcer for Ip {
     fn register(&self, peer: PubKey, addr: IpAddr) {
         let mut peers = self.peers.lock().expect("not poisoned");
         if peers.contains_key(&peer) {
@@ -1235,7 +1235,7 @@ impl ResourceAdapter for Nftables {
     }
 }
 
-impl Drop for Nftables {
+impl Drop for Ip {
     fn drop(&mut self) {
         // Leaving rules behind would silently gate traffic for a node that is
         // no longer running.
@@ -1267,7 +1267,7 @@ fn gate(peer: PubKey, entry: &mut Peer) {
             // Its IPv6, if it has a link, follows. A failure there is logged
             // and not retried off this verdict: the IPv4 set is what the
             // verdict is recorded against, and the next change moves both.
-            let (delivered, received) = Nftables::counter_names(peer);
+            let (delivered, received) = Ip::counter_names(peer);
             let mark = MARK_BASE | entry.classid as u32;
             let link = entry.link.as_ref();
             let applied = apply_elements(
@@ -1349,8 +1349,8 @@ mod tests {
     fn counter_names_are_distinct_per_peer_and_per_direction() {
         // They are how a counter is found again without keeping kernel handles,
         // so a collision would silently merge two peers' traffic.
-        let (a_in, a_out) = Nftables::counter_names(peer(1));
-        let (b_in, b_out) = Nftables::counter_names(peer(2));
+        let (a_in, a_out) = Ip::counter_names(peer(1));
+        let (b_in, b_out) = Ip::counter_names(peer(2));
 
         assert_ne!(a_in, a_out, "the two directions must not share a counter");
         assert_ne!(a_in, b_in, "two peers must not share a counter");
@@ -1361,7 +1361,7 @@ mod tests {
     fn counter_names_are_valid_nftables_identifiers() {
         // nftables will not accept a name starting with a digit, which a raw
         // hex key often would.
-        let (delivered, received) = Nftables::counter_names(peer(0xAB));
+        let (delivered, received) = Ip::counter_names(peer(0xAB));
         for name in [delivered, received] {
             assert!(name.chars().next().is_some_and(|c| c.is_ascii_alphabetic()));
             assert!(name.chars().all(|c| c.is_ascii_alphanumeric()));

@@ -130,7 +130,7 @@ install -m 0644 "$FILES_DIR/lib/upgrade/keep.d/tollgate" "$DATA_DIR/lib/upgrade/
 
 PKG_SIZE=$(du -sk "$DATA_DIR" | cut -f1)
 
-# Dependencies are what the nftables adapter actually shells out to and what
+# Dependencies are what the `ip` enforcer actually shells out to and what
 # the kernel needs to honour it: nft for the gate and the counters, tc for the
 # shaper, ip for the routes and neighbours an upstream is counted by (BusyBox's
 # has no JSON output), sch_htb for the class the shaper installs, and

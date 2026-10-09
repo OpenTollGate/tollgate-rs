@@ -37,12 +37,12 @@ tollgate::wait_for "a route from the client to the origin" 90 \
 
 # Every node's fips0 address is the one its key says it should be. If this
 # drifts, the identity check below is comparing against the wrong thing.
-compose exec -T gateway ip -6 -br addr show fips0 | grep -qi "$GATEWAY_FIPS" \
+compose exec -T gateway ip -6 -br addr show fips0 | grep -i "$GATEWAY_FIPS" >/dev/null \
   || tollgate::fail "the gateway's fips0 address is not the one its key derives"
 
 # Nothing crosses the gateway by accident: the client reaches the origin only
 # through it, so what the download measures is a policy this node applies.
-compose exec -T client ip -6 route get "$ORIGIN_FIPS" | grep -q "dev fips0" \
+compose exec -T client ip -6 route get "$ORIGIN_FIPS" | grep "dev fips0" >/dev/null \
   || tollgate::fail "the client is not routing to the origin over the mesh"
 
 tollgate::wait_for "the client to be paying" 180 \

@@ -59,9 +59,9 @@ pub enum Action {
         updates: Vec<ChannelUpdate>,
     },
 
-    /// Change what the resource adapter delivers for a peer.
+    /// Change what the enforcer delivers for a peer.
     ///
-    /// In FIPS the adapter also infers reachability advertisement from this —
+    /// In FIPS the enforcer also infers reachability advertisement from this —
     /// see [`AccessLevel::advertise`] — so there is no second call to keep in
     /// step with it.
     SetAccess {
@@ -73,7 +73,7 @@ pub enum Action {
 
     /// Shape a peer to this many units per second.
     ///
-    /// Already includes the minimum flow allowance as its floor, so the adapter
+    /// Already includes the minimum flow allowance as its floor, so the enforcer
     /// applies one number and needs to know nothing about grants.
     SetShapingRate {
         /// The peer.

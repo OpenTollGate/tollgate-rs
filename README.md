@@ -141,20 +141,21 @@ tollgate-core (lib)                Pure logic, resource-agnostic
     │
     ├── tollgate-net (this repo)   Network forwarding
     │     ├── Linux / OpenWrt / macOS
-    │     ├── Resource adapter: nftables + tc, FIPS, or loopback
+    │     ├── Enforcer: ip (nftables + tc), FIPS, loopback, or external
     │     ├── Cashu mint, market and wallet (cdk)
     │     └── Spilman channels (cdk-spilman)
     │
     └── tollgate-net-esp32 (separate project)
           ├── ESP-IDF / constrained runtime
-          └── Its own wallet and resource adapter
+          └── Its own wallet and enforcer
 ```
 
-In `tollgate-net`, a `ResourceAdapter` enforces what core decides — an
+In `tollgate-net`, an `Enforcer` enforces what core decides — an
 access level and a shaping rate per peer — and a `ChannelBackend` carries
-the money. `nftables` gates and shapes the kernel's forwarding path on
-Linux; `fips` hands the same decisions to a FIPS node; `loopback` shapes a
-socket of its own and runs anywhere. ESP32 lives in a separate project due
+the money. `ip` gates and shapes the kernel's forwarding path on Linux,
+with nftables and `tc`; `fips` hands the same decisions to a FIPS node;
+`external` hands them to a separate program over the enforcer protocol, on
+a Unix socket; `loopback` shapes a socket of its own and runs anywhere. ESP32 lives in a separate project due
 to fundamentally different runtime constraints.
 
 ## Prior Work

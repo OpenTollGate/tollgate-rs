@@ -15,6 +15,12 @@ testing/peering/test.sh           # run one topology
 SKIP_BUILD=1 testing/purchase/test.sh
 ```
 
+`IMAGE_TAG=mine testing/scripts/build.sh` builds `tollgate-test:mine` instead,
+so two checkouts building at once do not overwrite each other's image; every
+topology's compose file names `tollgate-test:${IMAGE_TAG:-latest}`, so the same
+`IMAGE_TAG` then runs it. `build-fips.sh` takes it too, for all three of its
+images.
+
 ## What each one asserts
 
 | Test | Asserts |
@@ -25,6 +31,7 @@ SKIP_BUILD=1 testing/purchase/test.sh
 | `rollover/` | Channels sized to exhaust in seconds, so the test runs through several. Buying continues across each boundary. |
 | `allowance/` | A client that buys nothing stays on the minimum flow allowance — not blocked, because that allowance is what lets a peer with no vouchers acquire some. |
 | `forwarding/` | The gateway carries somebody else's packets: the client pulls a large file from a third host, every packet crosses the gateway, and nftables and `tc` hold it to the rate it bought. A dual-stack customer's IPv6 is dropped before it pays, forwarded, shaped and counted once it has, and dropped again when its grant lapses. Asserts bytes, not elapsed time. |
+| `external/` | The enforcement is a separate program: `enforcer.kind: external` against `stub-enforcer`, which speaks the enforcer protocol and carries nothing. The gateway runs as the instance `ip`, and the two find each other at `/run/tollgate-ip/enforcer.sock` from that name alone. The enforcer starts closed, is told the client's address before anything is sold and opens it at what it bought; its counts draw the grant down; with the enforcer stopped nothing is sold and the session is kept; a restarted enforcer is sent the full state and the totals never go backwards. A gateway refuses to start behind an enforcer built for another identity or counting another unit, naming both, and refuses `identity: pubkey` where nothing proves a key. |
 | `fips/` | The same claim with the enforcement in a FIPS mesh instead of the local kernel — three nodes, all traffic over `fips0`, the gateway the only node the other two can reach. Also asserts what only a mesh can: the peer that gets the grant is the peer that holds the key. |
 
 ## Where a node's vouchers come from
@@ -64,6 +71,9 @@ SKIP_BUILD=1 testing/fips/test.sh
 
 `fipsd` is built from a FIPS checkout at `reference/fips`, which is not part of
 this repository; point `FIPS_CHECKOUT` elsewhere if yours lives somewhere else.
+It needs the per-peer transit policy, which FIPS `master` does not have yet:
+`FIPS_REF=feat/per-peer-transit-policy` builds that branch whatever the
+checkout has checked out.
 The image is built from `git archive` rather than from the working tree, so
 only committed state reaches it — and docker is not asked to upload a
 multi-gigabyte `target/` as build context.
@@ -90,7 +100,7 @@ Each node runs three listeners and a socket:
 | `4747` | TollGate control plane — the protocol itself |
 | `4748` | data plane — the bytes being bought and sold |
 | `3338` | this node's Cashu mint, and the market endpoint that sells its vouchers |
-| `/run/tollgate.sock` | snapshot for `tolltop` and for these tests |
+| `/run/tollgate-<instance>/control.sock` | snapshot for `tolltop` and for these tests; the instance is `default` unless the topology names it |
 
 The mint has to be reachable **by the peer**, because a peer funds its channel
 against it — which is why the configs name compose service names rather than

@@ -12,10 +12,13 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use tollgate_net::channel::{SpilmanChannels, SpilmanConfig};
-use tollgate_net::config::{File, ForwardingMode};
+use tollgate_net::config::{EnforcerKind, File};
 use tollgate_net::node::Node;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
+use tracing_subscriber::registry::LookupSpan;
 
 #[derive(Parser, Debug)]
 #[command(name = "tollgated", about = "A TollGate node")]
@@ -51,27 +54,60 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     report: u64,
 
-    /// Where to serve the control socket that `tolltop` reads.
+    /// This instance's name: letters, digits and `-`. Wins over `instance` in
+    /// the file; unset there too, it is `default`. It names the runtime
+    /// directory, `/run/tollgate-<instance>/`, that holds the instance's
+    /// sockets, and every log line.
     #[arg(long)]
-    control_socket: Option<PathBuf>,
+    instance: Option<String>,
+}
+
+/// Every log line, prefixed with the instance's name: one machine may run
+/// several, and their logs often land in one place.
+struct Instanced<F> {
+    name: String,
+    inner: F,
+}
+
+impl<S, N, F> FormatEvent<S, N> for Instanced<F>
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+    F: FormatEvent<S, N>,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        write!(writer, "[{}] ", self.name)?;
+        self.inner.format_event(ctx, writer, event)
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        // Colour only for a human at a terminal. Redirected to a file or a
-        // pipe, escape codes land in the middle of every field and make the
-        // output unreadable to anything that tries to parse it.
-        .with_ansi(std::io::stderr().is_terminal())
-        .init();
-
     let args = Args::parse();
 
     let file = match &args.config {
         Some(path) => File::load(path)?,
         None => serde_yaml::from_str("{}").expect("the empty document is valid"),
     };
+    let instance = file.instance(args.instance.as_deref())?;
+
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        // Colour only for a human at a terminal. Redirected to a file or a
+        // pipe, escape codes land in the middle of every field and make the
+        // output unreadable to anything that tries to parse it.
+        .with_ansi(std::io::stderr().is_terminal())
+        .event_format(Instanced {
+            name: instance.clone(),
+            inner: tracing_subscriber::fmt::format(),
+        })
+        .init();
+
     let config = file.resolve().context("resolve configuration")?;
 
     if args.show_identity {
@@ -80,10 +116,27 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Created if it is missing and can be: it holds this instance's sockets.
+    let runtime_dir = tollgate_net::instance::runtime_dir(&instance);
     info!(
+        %instance,
+        runtime_dir = %runtime_dir.display(),
         pubkey = %hex::encode(config.identity.pubkey().0),
         "starting"
     );
+
+    // `pubkey` means the network proved each peer's key, and today only FIPS
+    // does. The `fips` enforcer reaches the FIPS node itself; any other kind
+    // has to find one here, or this node would be believing announced keys.
+    if config.peer_identity == tollgate_net::wire::PeerIdentity::Pubkey
+        && file.enforcer.kind != EnforcerKind::Fips
+        && !tollgate_net::fips::running()
+    {
+        anyhow::bail!(
+            "enforcer.identity is pubkey, but this node runs no FIPS, the only network \
+             that proves a peer's key today; use identity: address, or run FIPS"
+        );
+    }
 
     // The mint is `mintd`, its own daemon: this node only advertises it and
     // settles at it. Nothing it issues is decided here.
@@ -140,13 +193,13 @@ async fn main() -> Result<()> {
     );
 
     // Which thing actually delivers. The loopback shaper carries a socket of
-    // its own and forwards nobody's traffic; the kernel adapter gates and
+    // its own and forwards nobody's traffic; the kernel enforcer gates and
     // shapes the real forwarding path.
-    let adapter: Arc<dyn tollgate_net::adapter::ResourceAdapter> = match file.forwarding.mode {
-        ForwardingMode::Loopback => {
-            let loopback = Arc::new(tollgate_net::adapter::Loopback::new());
+    let enforcer: Arc<dyn tollgate_net::enforcer::Enforcer> = match file.enforcer.kind {
+        EnforcerKind::Loopback => {
+            let loopback = Arc::new(tollgate_net::enforcer::Loopback::new());
 
-            // The loopback data plane belongs to the loopback adapter, so it is
+            // The loopback data plane belongs to the loopback enforcer, so it is
             // started here rather than by the node.
             let data = tokio::net::TcpListener::bind(config.data_listen())
                 .await
@@ -168,55 +221,80 @@ async fn main() -> Result<()> {
             loopback
         }
         #[cfg(target_os = "linux")]
-        ForwardingMode::Nftables => {
-            let interface = file.forwarding.interface.clone();
-            let adapter = tollgate_net::adapter::Nftables::new(&interface).with_context(|| {
+        EnforcerKind::Ip => {
+            let interface = file.enforcer.interface.clone();
+            let enforcer = tollgate_net::enforcer::Ip::new(&interface).with_context(|| {
                 format!("set up nftables and tc on {interface}; CAP_NET_ADMIN is required")
             })?;
             info!(%interface, "gating and shaping the kernel forwarding path");
-            Arc::new(adapter)
+            Arc::new(enforcer)
         }
         #[cfg(not(target_os = "linux"))]
-        ForwardingMode::Nftables => {
-            anyhow::bail!("forwarding.mode: nftables needs Linux")
+        EnforcerKind::Ip => {
+            anyhow::bail!("enforcer.kind: ip needs Linux")
         }
         #[cfg(unix)]
-        ForwardingMode::Fips => {
-            let socket = if file.forwarding.fips_socket.is_empty() {
-                tollgate_net::adapter::Fips::default_socket_path()
+        EnforcerKind::Fips => {
+            let socket = if file.enforcer.fips_socket.is_empty() {
+                tollgate_net::enforcer::Fips::default_socket_path()
             } else {
-                file.forwarding.fips_socket.clone().into()
+                file.enforcer.fips_socket.clone().into()
             };
-            let adapter = tollgate_net::adapter::Fips::new(&socket, config.policy.minimum_flow)
+            let enforcer = tollgate_net::enforcer::Fips::new(&socket, config.policy.minimum_flow)
                 .with_context(|| {
-                    format!(
-                        "reach the FIPS control socket at {}; is fipsd running?",
-                        socket.display()
-                    )
-                })?;
+                format!(
+                    "reach the FIPS control socket at {}; is fipsd running?",
+                    socket.display()
+                )
+            })?;
             info!(
                 socket = %socket.display(),
                 allowance = config.policy.minimum_flow,
                 "setting transit policy on the FIPS node"
             );
-            Arc::new(adapter)
+            Arc::new(enforcer)
         }
         #[cfg(not(unix))]
-        ForwardingMode::Fips => {
-            anyhow::bail!("forwarding.mode: fips needs a Unix control socket")
+        EnforcerKind::Fips => {
+            anyhow::bail!("enforcer.kind: fips needs a Unix control socket")
+        }
+        // A program of its own enforces, and this node tells it who has paid
+        // for what. Nothing listens until it has said hello: an enforcer built
+        // for another identity, or counting in another unit, is a reason not
+        // to start at all.
+        #[cfg(unix)]
+        EnforcerKind::External => {
+            let socket = file.enforcer.socket_path(&runtime_dir);
+            info!(socket = %socket.display(), "waiting for the enforcer to say hello");
+            let enforcer = tollgate_net::enforcer::External::connect(
+                &socket,
+                tollgate_net::enforcer::Expected {
+                    identity: config.peer_identity,
+                    unit: config.policy.unit.clone(),
+                },
+            )
+            .await?;
+            info!(
+                socket = %socket.display(),
+                identity = %config.peer_identity,
+                "enforcing through the external enforcer"
+            );
+            Arc::new(enforcer)
+        }
+        #[cfg(not(unix))]
+        EnforcerKind::External => {
+            anyhow::bail!("enforcer.kind: external needs a Unix socket")
         }
     };
 
-    let node = Node::new(&config, channels, adapter.clone());
+    let node = Node::new(&config, channels, enforcer.clone());
 
     // Anything watching this node reads here. A Unix socket rather than a port:
     // it is operational state for a local tool, not something a peer acts on.
     {
         let published = node.published();
-        let path = args
-            .control_socket
-            .clone()
-            .unwrap_or_else(tollgate_net::control::default_socket_path);
+        let path = file.control_socket_path(&runtime_dir);
+        info!(control = %path.display(), "control socket");
         tokio::spawn(async move {
             if let Err(e) =
                 tollgate_net::control::serve(&path, published, std::future::pending()).await
@@ -240,14 +318,14 @@ async fn main() -> Result<()> {
     };
     if demand > 0 || args.ramp > 0 {
         info!(demand, "wanting");
-        let adapter = Arc::clone(&adapter);
+        let enforcer = Arc::clone(&enforcer);
         let (base, ramp, interval) = (demand, args.ramp, args.ramp_interval.max(1));
         tokio::spawn(async move {
             let mut steps = 0u64;
             loop {
                 let demand = base.saturating_add(ramp.saturating_mul(steps));
-                for peer in adapter.peers() {
-                    adapter.set_demand(peer, demand);
+                for peer in enforcer.peers() {
+                    enforcer.set_demand(peer, demand);
                 }
                 tokio::time::sleep(Duration::from_secs(interval)).await;
                 if ramp > 0 {
@@ -258,14 +336,14 @@ async fn main() -> Result<()> {
     }
 
     if args.report > 0 {
-        let adapter = Arc::clone(&adapter);
+        let enforcer = Arc::clone(&enforcer);
         let period = Duration::from_secs(args.report);
         tokio::spawn(async move {
             let mut last: std::collections::HashMap<_, (u64, u64)> = Default::default();
             loop {
                 tokio::time::sleep(period).await;
-                for peer in adapter.peers() {
-                    let now = adapter.counters(peer);
+                for peer in enforcer.peers() {
+                    let now = enforcer.counters(peer);
                     let (was_delivered, was_received) = last
                         .insert(peer, (now.delivered, now.received))
                         .unwrap_or((0, 0));
@@ -273,8 +351,8 @@ async fn main() -> Result<()> {
                     let secs = period.as_secs().max(1);
                     info!(
                         peer = %peer,
-                        shaped = adapter.shaping_rate(peer),
-                        demand = adapter.demand(peer),
+                        shaped = enforcer.shaping_rate(peer),
+                        demand = enforcer.demand(peer),
                         down = (now.received - was_received) / secs,
                         up = (now.delivered - was_delivered) / secs,
                         "link"

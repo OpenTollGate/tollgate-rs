@@ -17,16 +17,16 @@ services:
     volumes:
       - ../mint/mintd.toml:/etc/cdk/mintd.toml:ro
   gateway:
-    image: tollgate-test:latest
-    command: ["-c", "/etc/tollgate/gateway.yaml", "--control-socket", "/run/tollgate.sock"]
+    image: tollgate-test:${IMAGE_TAG:-latest}
+    command: ["-c", "/etc/tollgate/gateway.yaml"]
     volumes:
       - ./gateway.yaml:/etc/tollgate/gateway.yaml:ro
     environment:
       RUST_LOG: "${RUST_LOG:-tollgate_net=debug,info}"
 
   client:
-    image: tollgate-test:latest
-    command: ["-c", "/etc/tollgate/client.yaml", "--control-socket", "/run/tollgate.sock", "--demand", "8000000"]
+    image: tollgate-test:${IMAGE_TAG:-latest}
+    command: ["-c", "/etc/tollgate/client.yaml", "--demand", "8000000"]
     volumes:
       - ./client.yaml:/etc/tollgate/client.yaml:ro
     environment:
@@ -39,9 +39,9 @@ services:
   # phase still sees one buyer. max_rate is node-wide: this one should be
   # refused what `client` already holds, not sold a cap of its own.
   client2:
-    image: tollgate-test:latest
+    image: tollgate-test:${IMAGE_TAG:-latest}
     profiles: ["second-buyer"]
-    command: ["-c", "/etc/tollgate/client.yaml", "--control-socket", "/run/tollgate.sock", "--demand", "2000000"]
+    command: ["-c", "/etc/tollgate/client.yaml", "--demand", "2000000"]
     volumes:
       - ./client2.yaml:/etc/tollgate/client.yaml:ro
     environment:

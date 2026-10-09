@@ -58,6 +58,22 @@ impl FrameReader {
     /// Call in a loop until it returns `None` — a single read may carry several
     /// messages.
     pub fn next_message(&mut self) -> Option<Result<Message, Error>> {
+        self.next_with(crate::codec::decode)
+    }
+
+    /// The same, for the enforcer socket: take the next complete
+    /// [`EnforcerMessage`](crate::enforcer::EnforcerMessage). Same framing,
+    /// different messages.
+    pub fn next_enforcer_message(
+        &mut self,
+    ) -> Option<Result<crate::enforcer::EnforcerMessage, crate::enforcer::Error>> {
+        self.next_with(crate::enforcer::decode)
+    }
+
+    fn next_with<T, E>(
+        &mut self,
+        decode: impl FnOnce(&[u8]) -> Result<T, E>,
+    ) -> Option<Result<T, E>> {
         if self.buf.len() < 2 {
             return None;
         }
@@ -66,7 +82,7 @@ impl FrameReader {
             return None;
         }
 
-        let result = crate::codec::decode(&self.buf[2..2 + len]);
+        let result = decode(&self.buf[2..2 + len]);
         // Consume the frame whether or not it decoded: the length prefix was
         // intact, so the stream stays in sync and one bad message does not
         // poison every message behind it.

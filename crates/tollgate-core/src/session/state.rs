@@ -102,7 +102,7 @@ pub struct PeerSession {
     /// When the meter was last sampled, so a delta can become a rate.
     pub last_meter_at: Millis,
 
-    /// Shaping rate last handed to the adapter, so we only emit a change when
+    /// Shaping rate last handed to the enforcer, so we only emit a change when
     /// it actually changes. A shaper call per meter reading would be a lot of
     /// churn for a number that mostly stays put.
     pub applied_rate: Option<u64>,
@@ -146,7 +146,7 @@ impl PeerSession {
     /// Start a new session over the state kept from the last one.
     ///
     /// Everything about the connection starts again — the opening sequence,
-    /// what the adapter was told, the meter and the demand, which were
+    /// what the enforcer was told, the meter and the demand, which were
     /// readings of the old link. The channels in both directions are kept, and
     /// nothing else: the grants are zeroed on both sides as they are for any
     /// session that starts.

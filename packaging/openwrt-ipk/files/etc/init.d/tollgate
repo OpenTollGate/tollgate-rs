@@ -2,7 +2,7 @@
 # TollGate node — procd init script for OpenWrt
 
 USE_PROCD=1
-# After the network and the firewall: the adapter installs its own nftables
+# After the network and the firewall: the enforcer installs its own nftables
 # table and tc classes on the forwarding path, and fw4 flushing afterwards
 # would take them with it.
 START=96
@@ -10,7 +10,6 @@ STOP=10
 
 PROG=/usr/bin/tollgated
 CONFIG=/etc/tollgate/tollgate.yaml
-SOCKET=/run/tollgate.sock
 MINT=/usr/bin/mintd
 MINT_CONFIG=/etc/tollgate/mint.yaml
 MINT_SOCKET=/run/mintd.sock
@@ -43,7 +42,9 @@ start_service() {
 	procd_close_instance
 
 	procd_open_instance node
-	procd_set_param command "$PROG" --config "$CONFIG" --control-socket "$SOCKET"
+	procd_set_param command "$PROG" --config "$CONFIG" --instance default
+	# Its control socket is /run/tollgate-default/control.sock, in a runtime
+	# directory tollgated makes for itself; tolltop finds it there.
 	# Respawn: restart after 5 s, give up after 5 consecutive failures within
 	# an hour, then reset the counter and try again. A node that cannot start
 	# is usually a node whose config names an interface that is not there.
@@ -54,7 +55,7 @@ start_service() {
 }
 
 stop_service() {
-	# The adapter tears its own table down on a clean exit; this is for the
+	# The enforcer tears its own table down on a clean exit; this is for the
 	# case where it did not get one.
 	nft delete table inet tollgate 2>/dev/null || true
 }

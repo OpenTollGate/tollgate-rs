@@ -25,91 +25,54 @@ use tollgate_core::access::AccessLevel;
 use tollgate_core::session::{Phase, Sessions};
 use tracing::debug;
 
-use crate::adapter::ResourceAdapter;
-
-/// Where a control socket might live, best first.
-///
-/// Four places, for four ways of running a node. `/run` is where a Linux
-/// service manager puts it — systemd's `RuntimeDirectory=`, and the path the
-/// container images and the OpenWrt package use. `/usr/local/var/run` is the
-/// macOS package's equivalent, since `/run` there is neither writable nor
-/// something launchd populates. `XDG_RUNTIME_DIR` is where a node run by a
-/// person on their own machine belongs, and `/tmp` is the fallback that exists
-/// everywhere.
-///
-/// The daemon creates the first of these it can, and a reader looks for the
-/// first that is already there. That asymmetry is the point: a tool should find
-/// a running node without being told where it put its socket.
-fn socket_candidates() -> Vec<PathBuf> {
-    let mut paths = vec![
-        PathBuf::from("/run/tollgate.sock"),
-        PathBuf::from("/usr/local/var/run/tollgate.sock"),
-    ];
-    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR")
-        && !xdg.is_empty()
-    {
-        paths.push(PathBuf::from(format!("{xdg}/tollgate.sock")));
-    }
-    paths.push(PathBuf::from("/tmp/tollgated.sock"));
-    paths
-}
-
-/// Where this node should put its control socket unless told otherwise.
-///
-/// The first candidate whose directory we can actually write to. A daemon that
-/// picked a path it could not create would fail at startup over something an
-/// operator never asked for.
-pub fn default_socket_path() -> PathBuf {
-    for path in socket_candidates() {
-        let Some(dir) = path.parent() else {
-            continue;
-        };
-        // Writability is asked of the directory rather than assumed from the
-        // user id: a container runs as root and a laptop does not, and both are
-        // ordinary ways to run this.
-        if dir
-            .metadata()
-            .map(|m| !m.permissions().readonly())
-            .unwrap_or(false)
-            && std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(dir.join(".tollgate-write-test"))
-                .map(|_| {
-                    let _ = std::fs::remove_file(dir.join(".tollgate-write-test"));
-                })
-                .is_ok()
-        {
-            return path;
-        }
-    }
-    PathBuf::from("/tmp/tollgated.sock")
-}
+use crate::enforcer::Enforcer;
 
 /// Where a running node's control socket already is.
 ///
-/// Returns the first candidate that exists, so `tolltop` with no arguments
-/// finds a node started with no arguments — and finds one inside a container,
-/// where the socket is in `/run` because that is where a service manager puts
-/// it.
-pub fn find_socket() -> Result<PathBuf> {
-    let candidates = socket_candidates();
-    for path in &candidates {
+/// With an instance named, that instance's `control.sock`, in the first
+/// runtime directory that has one. Without, every running instance is listed
+/// (`tollgate-*/control.sock`) and the one found is used; several are a
+/// question only the caller can answer. The asymmetry with the daemon, which
+/// creates the first directory it can, is the point: a tool should find a
+/// running node without being told where it put its socket.
+pub fn find_socket(instance: Option<&str>) -> Result<PathBuf> {
+    let looked = || {
+        crate::instance::bases()
+            .iter()
+            .map(|b| b.join("tollgate-*").join(crate::instance::CONTROL_SOCKET))
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if let Some(instance) = instance {
+        crate::instance::validate(instance)?;
         // Existence, not connectability: a socket that is there but not
         // answering is a node that is starting or has just died, and saying so
         // is more useful than moving on to a stale path somewhere else.
-        if path.exists() {
-            return Ok(path.clone());
+        return crate::instance::find_control_socket(instance).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no control socket for instance {instance:?}; looked in {}. Is it \
+                 running, and did it put its socket somewhere else? Pass --socket if so.",
+                looked()
+            )
+        });
+    }
+    let mut running = crate::instance::control_sockets();
+    match running.len() {
+        0 => anyhow::bail!(
+            "no control socket found; looked in {}. Is a node running, and did it \
+             put its socket somewhere else? Pass --socket if so.",
+            looked()
+        ),
+        1 => Ok(running.remove(0).1),
+        _ => {
+            let names: Vec<&str> = running.iter().map(|(i, _)| i.as_str()).collect();
+            anyhow::bail!(
+                "several instances are running ({}); pass --instance to pick one",
+                names.join(", ")
+            )
         }
     }
-
-    let looked: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
-    anyhow::bail!(
-        "no control socket found; looked in {}. Is a node running, and did it \
-         put its socket somewhere else? Pass --socket if so.",
-        looked.join(", ")
-    )
 }
 
 /// Everything one node is currently doing.
@@ -188,7 +151,7 @@ pub type Published = Arc<ArcSwap<Snapshot>>;
 /// Build a snapshot of everything the node is doing right now.
 pub fn snapshot(
     sessions: &Sessions,
-    adapter: &dyn ResourceAdapter,
+    enforcer: &dyn Enforcer,
     pubkey: &str,
     mint_url: &str,
     uptime_ms: u64,
@@ -199,7 +162,7 @@ pub fn snapshot(
     let peers = sessions
         .peers()
         .map(|session| {
-            let counters = adapter.counters(session.peer);
+            let counters = enforcer.counters(session.peer);
             let grant = &session.grant;
 
             PeerSnapshot {
@@ -218,7 +181,7 @@ pub fn snapshot(
                 }
                 .into(),
 
-                shaped_rate: adapter.shaping_rate(session.peer),
+                shaped_rate: enforcer.shaping_rate(session.peer),
                 authorized: grant.authorized(),
                 consumed: grant.consumed(),
                 grant_expires_in_ms: if grant.is_live(now) {
@@ -463,33 +426,23 @@ mod tests {
     }
 
     #[test]
-    fn a_service_managed_socket_is_looked_for_first() {
-        // /run is where a service manager puts it and is not writable by an
-        // ordinary user, which is what makes finding one there meaningful.
-        let candidates = socket_candidates();
-        assert_eq!(
-            candidates.first().unwrap(),
-            &PathBuf::from("/run/tollgate.sock")
+    fn an_instance_that_is_not_running_says_where_it_looked() {
+        // The old failure was "/tmp/tollgated.sock: No such file or directory",
+        // which told an operator nothing about the other places a node might
+        // have put it.
+        let name = format!("not-running-{}", std::process::id());
+        let e = find_socket(Some(&name)).expect_err("nothing runs under that name");
+        let message = format!("{e}");
+        assert!(
+            message.contains("/run/tollgate-*/control.sock"),
+            "{message}"
         );
-        assert_eq!(
-            candidates.last().unwrap(),
-            &PathBuf::from("/tmp/tollgated.sock"),
-            "the fallback that exists everywhere goes last"
-        );
+        assert!(message.contains("--socket"), "{message}");
     }
 
     #[test]
-    fn a_socket_that_is_not_anywhere_says_where_it_looked() {
-        // The old failure was "/tmp/tollgated.sock: No such file or directory",
-        // which told an operator nothing about the two other places a node
-        // might have put it.
-        let Err(e) = find_socket() else {
-            // A node really is running on this machine; nothing to assert.
-            return;
-        };
-        let message = format!("{e}");
-        assert!(message.contains("/run/tollgate.sock"), "{message}");
-        assert!(message.contains("--socket"), "{message}");
+    fn an_instance_name_that_is_not_one_is_refused() {
+        assert!(find_socket(Some("../etc")).is_err());
     }
 
     #[tokio::test]

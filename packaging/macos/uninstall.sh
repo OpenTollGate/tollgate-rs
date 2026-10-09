@@ -21,7 +21,8 @@ done
 rm -f /usr/local/bin/tollgated /usr/local/bin/tolltop /usr/local/bin/mintd /usr/local/bin/minttop \
     /usr/local/bin/merchantd /usr/local/bin/merchanttop
 rm -rf /usr/local/var/log/tollgate
-rm -f /usr/local/var/run/tollgate.sock /usr/local/var/run/mintd.sock \
+rm -rf /usr/local/var/run/tollgate-default
+rm -f /usr/local/var/run/mintd.sock \
     /usr/local/var/run/merchantd.sock /usr/local/var/run/merchantd-control.sock
 pkgutil --forget com.tollgate.pkg 2>/dev/null || true
 

@@ -19,7 +19,7 @@ use tollgate_core::grant::units_in;
 use tollgate_core::meter::Counters;
 use tollgate_protocol::PubKey;
 
-use super::ResourceAdapter;
+use super::Enforcer;
 
 /// How much of an unused second the bucket will hold onto.
 ///
@@ -29,7 +29,7 @@ use super::ResourceAdapter;
 /// under one window.
 const BURST_MS: u64 = 250;
 
-/// One peer's link, as the adapter sees it.
+/// One peer's link, as the enforcer sees it.
 #[derive(Debug, Clone, Copy)]
 struct Link {
     access: AccessLevel,
@@ -64,13 +64,13 @@ pub struct Loopback {
 }
 
 impl Loopback {
-    /// An adapter with no peers.
+    /// An enforcer with no peers.
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl ResourceAdapter for Loopback {
+impl Enforcer for Loopback {
     /// Nothing is gated by address here, so the address is not needed.
     fn register(&self, _peer: PubKey, _addr: IpAddr) {}
 
@@ -192,27 +192,27 @@ mod tests {
 
     #[test]
     fn the_bucket_refills_at_the_shaped_rate() {
-        let adapter = Loopback::new();
-        adapter.set_access(peer(), AccessLevel::Active);
-        adapter.set_shaping_rate(peer(), 1_000_000);
+        let enforcer = Loopback::new();
+        enforcer.set_access(peer(), AccessLevel::Active);
+        enforcer.set_shaping_rate(peer(), 1_000_000);
 
         assert_eq!(
-            adapter.take_allowance(peer(), 100),
+            enforcer.take_allowance(peer(), 100),
             100_000,
             "100 ms at 1 M/s"
         );
-        assert_eq!(adapter.take_allowance(peer(), 50), 50_000);
+        assert_eq!(enforcer.take_allowance(peer(), 50), 50_000);
     }
 
     #[test]
     fn an_idle_peer_cannot_bank_capacity_and_then_burst() {
         // This is the token bucket standing in for "capacity left unused early
         // is not banked for later".
-        let adapter = Loopback::new();
-        adapter.set_access(peer(), AccessLevel::Active);
-        adapter.set_shaping_rate(peer(), 1_000_000);
+        let enforcer = Loopback::new();
+        enforcer.set_access(peer(), AccessLevel::Active);
+        enforcer.set_shaping_rate(peer(), 1_000_000);
 
-        let after_idling = adapter.take_allowance(peer(), 60_000);
+        let after_idling = enforcer.take_allowance(peer(), 60_000);
         assert_eq!(
             after_idling,
             units_in(1_000_000, BURST_MS),
@@ -222,14 +222,14 @@ mod tests {
 
     #[test]
     fn a_rate_rise_does_not_release_tokens_banked_at_the_old_rate() {
-        let adapter = Loopback::new();
-        adapter.set_access(peer(), AccessLevel::Active);
-        adapter.set_shaping_rate(peer(), 1_000);
-        adapter.take_allowance(peer(), 10_000);
+        let enforcer = Loopback::new();
+        enforcer.set_access(peer(), AccessLevel::Active);
+        enforcer.set_shaping_rate(peer(), 1_000);
+        enforcer.take_allowance(peer(), 10_000);
 
-        adapter.set_shaping_rate(peer(), 100_000_000);
+        enforcer.set_shaping_rate(peer(), 100_000_000);
         assert_eq!(
-            adapter.take_allowance(peer(), 0),
+            enforcer.take_allowance(peer(), 0),
             0,
             "the bucket was trimmed to the new rate's burst, and nothing has accrued yet"
         );
@@ -237,21 +237,21 @@ mod tests {
 
     #[test]
     fn a_blocked_peer_with_no_allowance_gets_nothing() {
-        let adapter = Loopback::new();
-        adapter.set_access(peer(), AccessLevel::None);
-        adapter.set_shaping_rate(peer(), 0);
-        assert_eq!(adapter.take_allowance(peer(), 1_000), 0);
+        let enforcer = Loopback::new();
+        enforcer.set_access(peer(), AccessLevel::None);
+        enforcer.set_shaping_rate(peer(), 0);
+        assert_eq!(enforcer.take_allowance(peer(), 1_000), 0);
     }
 
     #[test]
     fn a_blocked_peer_still_gets_the_minimum_flow_allowance() {
         // The allowance is what breaks the bootstrap circle: a peer holding no
         // vouchers has to be able to reach a mint to acquire some.
-        let adapter = Loopback::new();
-        adapter.set_access(peer(), AccessLevel::None);
-        adapter.set_shaping_rate(peer(), 4_096);
+        let enforcer = Loopback::new();
+        enforcer.set_access(peer(), AccessLevel::None);
+        enforcer.set_shaping_rate(peer(), 4_096);
         assert_eq!(
-            adapter.take_allowance(peer(), 1_000),
+            enforcer.take_allowance(peer(), 1_000),
             1_024,
             "capped by the burst"
         );
@@ -259,13 +259,13 @@ mod tests {
 
     #[test]
     fn counters_accumulate_in_both_directions() {
-        let adapter = Loopback::new();
-        adapter.record_delivered(peer(), 1_000);
-        adapter.record_delivered(peer(), 500);
-        adapter.record_received(peer(), 200);
+        let enforcer = Loopback::new();
+        enforcer.record_delivered(peer(), 1_000);
+        enforcer.record_delivered(peer(), 500);
+        enforcer.record_received(peer(), 200);
 
         assert_eq!(
-            adapter.counters(peer()),
+            enforcer.counters(peer()),
             Counters {
                 delivered: 1_500,
                 received: 200

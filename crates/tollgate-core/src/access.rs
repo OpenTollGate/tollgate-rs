@@ -1,6 +1,6 @@
 //! The delivery gate.
 //!
-//! Core decides *what* to enforce; the host's resource adapter decides *how* —
+//! Core decides *what* to enforce; the host's enforcer decides *how* —
 //! a FIPS delivery filter, an nftables rule, a token bucket. The level says
 //! whether a peer is in a TollGate session and whether it is metered; with the
 //! shaping rate it says whether the peer is carried and advertised. How much a
@@ -32,14 +32,14 @@ pub enum AccessLevel {
 
 impl AccessLevel {
     /// Whether the peer is in a TollGate session, so resources may be delivered
-    /// for or through it beyond the minimum flow allowance. The gate an adapter
+    /// for or through it beyond the minimum flow allowance. The gate an enforcer
     /// applies is [`carried`](Self::carried).
     pub fn delivery_allowed(self) -> bool {
         matches!(self, Self::Active | Self::Free)
     }
 
     /// Whether a peer's traffic is carried at all, given the rate core shaped
-    /// it to. This is the gate every adapter applies.
+    /// it to. This is the gate every enforcer applies.
     ///
     /// Not the same question as [`delivery_allowed`](Self::delivery_allowed).
     /// A peer that is not paying is still carried at the minimum flow

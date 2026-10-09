@@ -10,8 +10,8 @@
 		<string>/usr/local/bin/tollgated</string>
 		<string>--config</string>
 		<string>/usr/local/etc/tollgate/tollgate.yaml</string>
-		<string>--control-socket</string>
-		<string>/usr/local/var/run/tollgate.sock</string>
+		<string>--instance</string>
+		<string>default</string>
 	</array>
 
 	<key>RunAtLoad</key>

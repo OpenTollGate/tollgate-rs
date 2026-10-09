@@ -31,6 +31,11 @@ struct Args {
     #[arg(short, long)]
     socket: Option<PathBuf>,
 
+    /// Which instance to watch, by name: its socket is
+    /// `/run/tollgate-<instance>/control.sock`. Needed only when several run.
+    #[arg(short, long, conflicts_with = "socket")]
+    instance: Option<String>,
+
     /// How often to refresh, in milliseconds.
     #[arg(long, default_value_t = 500)]
     interval: u64,
@@ -91,12 +96,12 @@ impl App {
 fn main() -> Result<()> {
     let args = Args::parse();
     // Looked for rather than assumed: a node run by a service manager puts its
-    // socket in /run, one run by a person puts it under XDG_RUNTIME_DIR, and a
-    // tool that only knew about /tmp would report "no such file" about a node
-    // that is running perfectly well.
+    // runtime directory in /run, one run by a person under XDG_RUNTIME_DIR,
+    // and a tool that only knew one of them would report "no such file" about
+    // a node that is running perfectly well.
     let socket = match args.socket {
         Some(path) => path,
-        None => control::find_socket()?,
+        None => control::find_socket(args.instance.as_deref())?,
     };
     let interval = Duration::from_millis(args.interval.max(50));
 

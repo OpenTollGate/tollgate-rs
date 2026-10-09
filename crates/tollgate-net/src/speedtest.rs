@@ -16,7 +16,7 @@
 //!
 //! Serving the bytes from the node itself turns that around. The client pulls
 //! from an address on the mesh, so the flow crosses exactly the hops that were
-//! paid for and nothing else. Under `forwarding.mode: fips` that is also the
+//! paid for and nothing else. Under `enforcer.kind: fips` that is also the
 //! honest number in the other direction: FIPS is enforcing the transit policy
 //! this node set for that peer, so what the page reads is the grant in force,
 //! not an unshaped side channel around it.

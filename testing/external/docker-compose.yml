@@ -1,0 +1,122 @@
+# A gateway that enforces nothing itself: `enforcer.kind: external` hands every
+# payer's subjects and rate to a separate program over the enforcer protocol.
+# The enforcer here is `stub-enforcer`, which carries nothing but reports
+# made-up counts, so the test sees the whole protocol from both sides without
+# any traffic.
+#
+# The gateway runs as the instance `ip`, so both ends find the socket at
+# /run/tollgate-ip/enforcer.sock: the instance's runtime directory, a volume
+# the two containers share.
+services:
+  # The money. Unused on the funding path, like every topology's; kept so the
+  # configs match the others.
+  sat-mint:
+    # Pinned: mintd's CLI and config format change between releases.
+    image: cashubtc/mintd:0.18.1
+    command:
+      - sh
+      - -c
+      - cdk-mintd config init --new-mint --file /etc/cdk/mintd.toml && exec cdk-mintd
+    environment:
+      MINT_MNEMONIC: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    volumes:
+      - ../mint/mintd.toml:/etc/cdk/mintd.toml:ro
+
+  # The enforcer: listens, built for identity address and counting bytes, as a
+  # LAN firewall would be.
+  enforcer:
+    image: tollgate-test:${IMAGE_TAG:-latest}
+    # So a stop is a stop, not ten seconds of a PID 1 ignoring SIGTERM.
+    init: true
+    entrypoint: ["stub-enforcer"]
+    command:
+      - --socket
+      - /run/tollgate-ip/enforcer.sock
+      - --identity
+      - address
+      - --unit
+      - byte
+      - --carry
+      - --state
+      - /run/tollgate-ip/state.json
+    volumes:
+      - ip-run:/run/tollgate-ip
+
+  gateway:
+    image: tollgate-test:${IMAGE_TAG:-latest}
+    command: ["-c", "/etc/tollgate/gateway.yaml", "--instance", "ip"]
+    volumes:
+      - ./gateway.yaml:/etc/tollgate/gateway.yaml:ro
+      - ip-run:/run/tollgate-ip
+    environment:
+      RUST_LOG: "${RUST_LOG:-tollgate_net=debug,info}"
+    depends_on:
+      - enforcer
+
+  client:
+    image: tollgate-test:${IMAGE_TAG:-latest}
+    command: ["-c", "/etc/tollgate/client.yaml", "--demand", "2000000"]
+    volumes:
+      - ./client.yaml:/etc/tollgate/client.yaml:ro
+    environment:
+      RUST_LOG: "${RUST_LOG:-tollgate_net=debug,info}"
+    depends_on:
+      - gateway
+      - sat-mint
+
+  # Enforcers that disagree with the gateway's config, each in a runtime
+  # directory of its own, so that starting a node against one does not replace
+  # the gateway's connection. Built for pubkey:
+  enforcer-pubkey:
+    profiles: ["mismatch"]
+    image: tollgate-test:${IMAGE_TAG:-latest}
+    init: true
+    entrypoint: ["stub-enforcer"]
+    command: ["--socket", "/run/tollgate-ip/enforcer.sock", "--identity", "pubkey", "--unit", "byte"]
+    volumes:
+      - pubkey-run:/run/tollgate-ip
+
+  # ...and counting millilitres.
+  enforcer-ml:
+    profiles: ["mismatch"]
+    image: tollgate-test:${IMAGE_TAG:-latest}
+    init: true
+    entrypoint: ["stub-enforcer"]
+    command: ["--socket", "/run/tollgate-ip/enforcer.sock", "--identity", "address", "--unit", "ml"]
+    volumes:
+      - ml-run:/run/tollgate-ip
+
+  # The gateway's own config, against each of them. Neither may start.
+  gateway-identity:
+    profiles: ["mismatch"]
+    image: tollgate-test:${IMAGE_TAG:-latest}
+    command: ["-c", "/etc/tollgate/gateway.yaml", "--instance", "ip"]
+    volumes:
+      - ./gateway.yaml:/etc/tollgate/gateway.yaml:ro
+      - pubkey-run:/run/tollgate-ip
+    depends_on:
+      - enforcer-pubkey
+
+  gateway-unit:
+    profiles: ["mismatch"]
+    image: tollgate-test:${IMAGE_TAG:-latest}
+    command: ["-c", "/etc/tollgate/gateway.yaml", "--instance", "ip"]
+    volumes:
+      - ./gateway.yaml:/etc/tollgate/gateway.yaml:ro
+      - ml-run:/run/tollgate-ip
+    depends_on:
+      - enforcer-ml
+
+  # A node told its peers prove their keys, on a network that proves none. It
+  # may not start either, enforcer or no enforcer.
+  gateway-pubkey:
+    profiles: ["mismatch"]
+    image: tollgate-test:${IMAGE_TAG:-latest}
+    command: ["-c", "/etc/tollgate/gateway-pubkey.yaml", "--instance", "fips-exit"]
+    volumes:
+      - ./gateway-pubkey.yaml:/etc/tollgate/gateway-pubkey.yaml:ro
+
+volumes:
+  ip-run:
+  pubkey-run:
+  ml-run:

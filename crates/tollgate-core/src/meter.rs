@@ -31,7 +31,7 @@ impl Counters {
 
     /// What grew since `earlier`.
     ///
-    /// Saturating, so a counter that resets (an adapter restart, a
+    /// Saturating, so a counter that resets (an enforcer restart, a
     /// re-registered peer) reports no growth for one sample instead of
     /// underflowing into an enormous one.
     pub fn delta_since(self, earlier: Self) -> Self {

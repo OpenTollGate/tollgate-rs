@@ -1,0 +1,25 @@
+# Sells access, enforced by a program it does not contain. Started with
+# `--instance ip`, so it reaches the enforcer at /run/tollgate-ip/enforcer.sock
+# without being told where that is.
+identity:
+  secret_key: "78d684aa33cd91c862ca9dd42e969b97e511bf36d4848e6a90d967bc174199c1"
+mint:
+  url: "http://gateway:3338"
+  unit: "byte"
+vouchers:
+  accepted_mints:
+    - "http://gateway:3338"
+  received_multiplier: 0
+access:
+  # No allowance: an unpaid payer is closed at the enforcer, `set(peer, 0)`,
+  # and a lapsed grant closes it again.
+  minimum_flow:
+    enabled: false
+grants:
+  window_range_ms: [200, 30000]
+enforcer:
+  kind: external
+  # External has no default: a LAN firewall knows peers by address.
+  identity: address
+network:
+  listen: "0.0.0.0:4747"

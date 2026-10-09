@@ -18,12 +18,21 @@ use tracing::warn;
 use crate::channel::Settle;
 use crate::identity::Identity;
 use crate::node::{NodeConfig, PeerConfig};
-use crate::wire::Identify;
+use crate::wire::PeerIdentity;
 
 /// The whole configuration file.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct File {
+    /// This instance's name: letters, digits and `-`. Unset is
+    /// [`crate::instance::DEFAULT`]. `--instance` wins over it. See
+    /// [`crate::instance`].
+    pub instance: Option<String>,
+    /// Where `tolltop` and trusted local clients reach this instance. Empty
+    /// means `control.sock` in the instance's runtime directory,
+    /// `/run/tollgate-<instance>/`; set it only to put the socket somewhere
+    /// else.
+    pub control_socket: String,
     /// Node identity.
     pub identity: IdentitySection,
     /// This node's own mint, and the unit it denominates in.
@@ -42,8 +51,8 @@ pub struct File {
     pub buying: BuyingSection,
     /// Where to listen.
     pub network: NetworkSection,
-    /// What actually delivers the resource.
-    pub forwarding: ForwardingSection,
+    /// What enforces delivery: a built-in enforcer, or an external one.
+    pub enforcer: EnforcerSection,
     /// A byte source clients can measure this node against.
     pub speedtest: SpeedtestSection,
     /// Per-peer overrides, keyed by hex-encoded compressed pubkey.
@@ -399,9 +408,10 @@ impl Default for BuyingSection {
 pub struct NetworkSection {
     /// Control-plane listen address. The data plane is the next port up.
     ///
-    /// Under `forwarding.mode: fips` this has to be somewhere mesh peers reach
-    /// — the node's own `fips0` address, or `[::]` — because a connection from
-    /// anywhere else cannot prove whose key it is announcing and is refused.
+    /// Under `enforcer.identity: pubkey` this has to be somewhere mesh peers
+    /// reach — the node's own `fips0` address, or `[::]` — because a
+    /// connection from anywhere else cannot prove whose key it is announcing;
+    /// `tollgated` refuses to start otherwise.
     pub listen: String,
 }
 
@@ -413,53 +423,131 @@ impl Default for NetworkSection {
     }
 }
 
-/// What actually delivers the resource.
+/// What enforces delivery: lets a paying peer's traffic through, shapes it to
+/// the rate it bought, and counts what it carried.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct ForwardingSection {
-    /// `loopback`, `nftables` or `fips`.
+pub struct EnforcerSection {
+    /// `loopback`, `ip`, `fips` or `external`.
     ///
     /// `loopback` shapes and meters a socket of its own and forwards nobody's
-    /// traffic — right for a demo or a test, and it runs anywhere. `nftables`
-    /// gates and shapes the kernel's forwarding path, which is what actually
-    /// sells transit, and needs Linux with `CAP_NET_ADMIN`. `fips` sells
-    /// transit across a FIPS mesh instead, leaving the enforcement to the FIPS
-    /// node and reaching it over its control socket — and, because a mesh
-    /// address names a key, it is also the only mode in which a peer's
-    /// announced identity is checked rather than believed.
-    pub mode: ForwardingMode,
+    /// traffic — right for a demo or a test, and it runs anywhere. `ip` gates
+    /// and shapes the kernel's forwarding path with nftables and `tc`, which is
+    /// what actually sells transit, and needs Linux with `CAP_NET_ADMIN`.
+    /// `fips` sells transit across a FIPS mesh instead, leaving the enforcement
+    /// to the FIPS node and reaching it over its control socket. `external`
+    /// hands the enforcement to a separate program listening on
+    /// [`Self::socket`], over the enforcer protocol
+    /// (`docs/design/core/tollgate-enforcer-protocol.md`).
+    pub kind: EnforcerKind,
     /// Interface facing the peers, where their `tc` classes live.
     ///
-    /// Only `nftables` uses this.
+    /// Only `ip` uses this.
     pub interface: String,
     /// FIPS control socket to drive. Only `fips` uses this; empty means the
     /// same default path the FIPS daemon itself resolves.
     pub fips_socket: String,
+    /// The external enforcer's Unix socket. Only `external` uses this; empty
+    /// means `enforcer.sock` in the instance's runtime directory,
+    /// `/run/tollgate-<instance>/`. Its permissions should admit `tollgated`
+    /// alone: reaching it is the power to open the traffic.
+    pub socket: String,
+    /// Who a connecting peer is: `pubkey` or `address`. Unset takes the
+    /// kind's default — see [`Self::identity`].
+    #[serde(with = "identity_name")]
+    pub identity: Option<PeerIdentity>,
 }
 
-impl Default for ForwardingSection {
+impl Default for EnforcerSection {
     fn default() -> Self {
         Self {
             // The default has to run everywhere and gate nothing it does not
             // own: a node that silently installed firewall rules because of a
             // missing config line would be a nasty surprise.
-            mode: ForwardingMode::Loopback,
+            kind: EnforcerKind::Loopback,
             interface: "eth0".into(),
             fips_socket: String::new(),
+            socket: String::new(),
+            identity: None,
         }
     }
 }
 
-/// Which adapter enforces access and rate.
+impl EnforcerSection {
+    /// Who a connecting peer is: what `identity` says, or the kind's default
+    /// — `address` for `ip` and `loopback`, `pubkey` for `fips`.
+    ///
+    /// `external` has no default: `tollgated` cannot tell what an external
+    /// enforcer matches, or which network its peers arrive over, so any
+    /// default would be wrong for some enforcer.
+    pub fn identity(&self) -> Result<PeerIdentity> {
+        if let Some(identity) = self.identity {
+            return Ok(identity);
+        }
+        Ok(match self.kind {
+            EnforcerKind::Loopback | EnforcerKind::Ip => PeerIdentity::Address,
+            EnforcerKind::Fips => PeerIdentity::Pubkey,
+            EnforcerKind::External => bail!(
+                "enforcer.kind: external needs enforcer.identity, pubkey or address: \
+                 tollgated cannot tell what an external enforcer matches"
+            ),
+        })
+    }
+
+    /// The external enforcer's socket, given the instance's runtime directory:
+    /// `socket` if set, else `enforcer.sock` in it.
+    pub fn socket_path(&self, runtime_dir: &Path) -> PathBuf {
+        if self.socket.is_empty() {
+            runtime_dir.join(crate::instance::ENFORCER_SOCKET)
+        } else {
+            PathBuf::from(&self.socket)
+        }
+    }
+}
+
+/// `enforcer.identity` as its words, `pubkey` and `address`.
+mod identity_name {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use crate::wire::PeerIdentity;
+
+    pub fn serialize<S: Serializer>(
+        identity: &Option<PeerIdentity>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match identity {
+            Some(identity) => serializer.serialize_str(identity.as_str()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<PeerIdentity>, D::Error> {
+        Option::<String>::deserialize(deserializer)?
+            .map(|name| {
+                PeerIdentity::from_name(&name).ok_or_else(|| {
+                    serde::de::Error::custom(format!(
+                        "enforcer.identity {name:?} is neither pubkey nor address"
+                    ))
+                })
+            })
+            .transpose()
+    }
+}
+
+/// Which enforcer applies access and rate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ForwardingMode {
+pub enum EnforcerKind {
     /// A shaper and meter over a dedicated socket.
     Loopback,
     /// nftables and `tc` on the kernel forwarding path.
-    Nftables,
+    Ip,
     /// Per-peer transit policy on a FIPS node, over its control socket.
     Fips,
+    /// A separate program, over the enforcer protocol on a Unix socket.
+    External,
 }
 
 /// A byte source clients can measure this node against.
@@ -555,6 +643,27 @@ enum Lead {
 }
 
 impl File {
+    /// This instance's name: `cli`, which is `--instance`, if given; else
+    /// `instance` in the file; else [`crate::instance::DEFAULT`]. Refused
+    /// unless it is letters, digits and `-`.
+    pub fn instance(&self, cli: Option<&str>) -> Result<String> {
+        let name = cli
+            .or(self.instance.as_deref())
+            .unwrap_or(crate::instance::DEFAULT);
+        crate::instance::validate(name)?;
+        Ok(name.to_owned())
+    }
+
+    /// Where to serve the control socket, given the instance's runtime
+    /// directory: `control_socket` if set, else `control.sock` in it.
+    pub fn control_socket_path(&self, runtime_dir: &Path) -> PathBuf {
+        if self.control_socket.is_empty() {
+            runtime_dir.join(crate::instance::CONTROL_SOCKET)
+        } else {
+            PathBuf::from(&self.control_socket)
+        }
+    }
+
     /// Read a configuration file.
     pub fn load(path: &Path) -> Result<Self> {
         let text =
@@ -685,27 +794,45 @@ impl File {
             });
         }
 
-        // Not a knob of its own: what makes an announced key checkable is the
-        // network carrying the control plane, and that is what `forwarding.mode`
-        // already says. A FIPS node therefore verifies from the first
-        // connection, with no second setting to forget.
-        let identify = match self.forwarding.mode {
-            ForwardingMode::Fips => Identify::Fips,
-            ForwardingMode::Loopback | ForwardingMode::Nftables => Identify::Claimed,
-        };
+        // Who a peer is decides what an enforcer is told. `pubkey` means the
+        // network proved the key, which only a mesh peers reach can do; a
+        // node listening anywhere else would be believing announced keys,
+        // which `pubkey` never means.
+        let peer_identity = self.enforcer.identity()?;
+        if peer_identity == PeerIdentity::Pubkey && !reached_over_a_mesh(listen) {
+            bail!(
+                "enforcer.identity is pubkey, but network.listen ({listen}) is not an \
+                 address mesh peers reach: listen on the node's fips0 address, or on \
+                 [::], or use identity: address"
+            );
+        }
 
         Ok(NodeConfig {
             identity,
             policy,
             buyer,
             listen,
-            identify,
+            peer_identity,
             mint_url: self.mint.url.clone(),
             mint_local: self.mint.local_url().to_owned(),
             connector: None,
             channel_ttl_seconds: self.channels.ttl_seconds,
             peers,
         })
+    }
+}
+
+/// Whether `listen` is somewhere peers on a FIPS mesh reach: every IPv6
+/// address (`[::]`), or one in `fd00::/8`, where FIPS addresses live.
+///
+/// `fd00::/8` is FIPS's range but not only FIPS's, so this refuses what cannot
+/// be a mesh address rather than proving one is; a connection that does not
+/// come from the FIPS address of the key it announces is still refused, one by
+/// one, on the wire.
+pub fn reached_over_a_mesh(listen: SocketAddr) -> bool {
+    match listen.ip() {
+        std::net::IpAddr::V6(v6) => v6.is_unspecified() || v6.octets()[0] == 0xfd,
+        std::net::IpAddr::V4(_) => false,
     }
 }
 
@@ -767,25 +894,147 @@ mod tests {
         assert_eq!(file.resolve().expect("resolve").policy.minimum_flow, 0);
     }
 
-    #[test]
-    fn a_fips_node_checks_a_peers_key_against_its_address() {
-        let file: File = serde_yaml::from_str("forwarding:\n  mode: fips\n").expect("parse");
-        assert_eq!(file.resolve().expect("resolve").identify, Identify::Fips);
+    fn resolved(yaml: &str) -> Result<NodeConfig> {
+        serde_yaml::from_str::<File>(yaml).expect("parse").resolve()
     }
 
     #[test]
-    fn a_node_on_plain_ip_has_nothing_to_check_a_key_against() {
-        // Including nftables, which gates by address: there the announced key is
-        // taken on trust, and the operator has to wrap the link itself.
-        for mode in ["loopback", "nftables"] {
-            let yaml = format!("forwarding:\n  mode: {mode}\n");
-            let file: File = serde_yaml::from_str(&yaml).expect("parse");
+    fn each_kind_has_its_default_identity() {
+        // A firewall knows peers by address, and plain IP proves no keys.
+        for kind in ["loopback", "ip"] {
+            let config = resolved(&format!("enforcer:\n  kind: {kind}\n")).expect("resolve");
+            assert_eq!(config.peer_identity, PeerIdentity::Address, "{kind}");
+        }
+        // FIPS proves the key behind every connection.
+        let config = resolved("enforcer:\n  kind: fips\nnetwork:\n  listen: \"[::]:4747\"\n")
+            .expect("resolve");
+        assert_eq!(config.peer_identity, PeerIdentity::Pubkey);
+    }
+
+    #[test]
+    fn an_external_enforcer_must_be_told_the_identity() {
+        let e = resolved("enforcer:\n  kind: external\n").expect_err("no default");
+        assert!(format!("{e:#}").contains("enforcer.identity"), "{e:#}");
+
+        let config =
+            resolved("enforcer:\n  kind: external\n  identity: address\n").expect("resolve");
+        assert_eq!(config.peer_identity, PeerIdentity::Address);
+    }
+
+    #[test]
+    fn an_identity_is_pubkey_or_address() {
+        for word in ["fips", "claimed", "Pubkey", "mac"] {
+            let yaml = format!("enforcer:\n  kind: external\n  identity: {word}\n");
+            assert!(serde_yaml::from_str::<File>(&yaml).is_err(), "{word}");
+        }
+        // The old section is gone, not an alias.
+        assert!(serde_yaml::from_str::<File>("forwarding:\n  mode: fips\n").is_err());
+        assert!(serde_yaml::from_str::<File>("enforcer:\n  kind: nftables\n").is_err());
+    }
+
+    #[test]
+    fn pubkey_is_refused_where_no_mesh_peer_can_prove_its_key() {
+        // The default listen is IPv4: nothing arriving there proves a key.
+        for yaml in [
+            "enforcer:\n  kind: fips\n",
+            "enforcer:\n  kind: external\n  identity: pubkey\n",
+            "enforcer:\n  kind: ip\n  identity: pubkey\nnetwork:\n  listen: \"10.0.0.1:4747\"\n",
+            "enforcer:\n  kind: external\n  identity: pubkey\nnetwork:\n  listen: \"[2001:db8::1]:4747\"\n",
+        ] {
+            let e = resolved(yaml).expect_err(yaml);
+            assert!(format!("{e:#}").contains("network.listen"), "{yaml}: {e:#}");
+        }
+        // Every address, or one in the FIPS range, is where mesh peers reach.
+        for listen in [
+            "[::]:4747",
+            "[fd10:93b2:8586:6046:e42d:c089:3228:ccff]:4747",
+        ] {
+            let yaml = format!(
+                "enforcer:\n  kind: external\n  identity: pubkey\nnetwork:\n  listen: \"{listen}\"\n"
+            );
             assert_eq!(
-                file.resolve().expect("resolve").identify,
-                Identify::Claimed,
-                "{mode}"
+                resolved(&yaml).expect("resolve").peer_identity,
+                PeerIdentity::Pubkey,
+                "{listen}"
             );
         }
+        // Address believes nothing it needs proven, so it runs anywhere.
+        let config = resolved("enforcer:\n  kind: fips\n  identity: address\n").expect("resolve");
+        assert_eq!(config.peer_identity, PeerIdentity::Address);
+    }
+
+    #[test]
+    fn the_enforcer_socket_follows_from_the_instance_name() {
+        let file: File = serde_yaml::from_str(
+            "instance: fips-exit\nenforcer:\n  kind: external\n  identity: address\n",
+        )
+        .expect("parse");
+        let dir = crate::instance::dir_in(Path::new("/run"), &file.instance(None).expect("name"));
+        assert_eq!(
+            file.enforcer.socket_path(&dir),
+            PathBuf::from("/run/tollgate-fips-exit/enforcer.sock")
+        );
+        // The flag names the instance, and so the socket.
+        let dir =
+            crate::instance::dir_in(Path::new("/run"), &file.instance(Some("ip")).expect("name"));
+        assert_eq!(
+            file.enforcer.socket_path(&dir),
+            PathBuf::from("/run/tollgate-ip/enforcer.sock")
+        );
+
+        let moved: File = serde_yaml::from_str(
+            "enforcer:\n  kind: external\n  identity: address\n  socket: /srv/enf.sock\n",
+        )
+        .expect("parse");
+        assert_eq!(
+            moved.enforcer.socket_path(&dir),
+            PathBuf::from("/srv/enf.sock")
+        );
+    }
+
+    #[test]
+    fn an_unnamed_instance_is_called_default() {
+        let file: File = serde_yaml::from_str("{}").expect("parse");
+        assert_eq!(file.instance(None).expect("name"), "default");
+    }
+
+    #[test]
+    fn the_instance_flag_wins_over_the_file() {
+        let file: File = serde_yaml::from_str("instance: ip\n").expect("parse");
+        assert_eq!(file.instance(None).expect("name"), "ip");
+        assert_eq!(file.instance(Some("fips-exit")).expect("name"), "fips-exit");
+
+        // Checked wherever it came from: it becomes part of a path.
+        assert!(file.instance(Some("../etc")).is_err());
+        let bad: File = serde_yaml::from_str("instance: fips_exit\n").expect("parse");
+        assert!(bad.instance(None).is_err());
+        assert_eq!(bad.instance(Some("fips-exit")).expect("name"), "fips-exit");
+    }
+
+    #[test]
+    fn the_control_socket_follows_from_the_instance_name() {
+        let file: File = serde_yaml::from_str("instance: fips-exit\n").expect("parse");
+        let name = file.instance(None).expect("name");
+        let dir = crate::instance::dir_in(Path::new("/run"), &name);
+        assert_eq!(
+            file.control_socket_path(&dir),
+            PathBuf::from("/run/tollgate-fips-exit/control.sock")
+        );
+
+        let unnamed: File = serde_yaml::from_str("{}").expect("parse");
+        let dir =
+            crate::instance::dir_in(Path::new("/run"), &unnamed.instance(None).expect("name"));
+        assert_eq!(
+            unnamed.control_socket_path(&dir),
+            PathBuf::from("/run/tollgate-default/control.sock")
+        );
+
+        let moved: File =
+            serde_yaml::from_str("control_socket: /srv/tg/control.sock\n").expect("parse");
+        assert_eq!(
+            moved.control_socket_path(&dir),
+            PathBuf::from("/srv/tg/control.sock")
+        );
     }
 
     #[test]
