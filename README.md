@@ -61,8 +61,9 @@ buys is a rate. The seller shapes the buyer to exactly that rate. A
 purchase takes effect on arrival — the signed channel state is
 cumulative, so a lost message costs nothing — and raising a rate
 mid-window forfeits what was left of the grant in force. A seller can
-instead sell volume: in its accumulative mode each purchase adds to a
-running budget that only traffic draws down. A peer that has
+instead sell volume: in its accumulative mode each purchase adds to what
+is left and restarts a long window, so the buyer holds a running budget
+that only traffic draws down until that window ends. A peer that has
 bought nothing is held at a small minimum flow, enough to reach a mint
 and buy.
 

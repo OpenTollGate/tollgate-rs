@@ -35,8 +35,8 @@ A Spilman channel is already a prepaid instrument — funding it is money commit
 ### Grants On A Channel
 
 The example is in superseding mode, the default. In accumulative mode the
-TopUps are the same signed updates without a window, and each adds to A's
-budget instead of replacing the grant before it
+TopUps are the same signed updates with the same window field, and each adds
+to A's budget instead of replacing the grant before it
 ([tollgate-vouchers.md](tollgate-vouchers.md#two-accounting-modes)). The
 channel cannot tell the difference: either way it carries a rising cumulative
 total.
@@ -104,7 +104,7 @@ The funding process follows the Cashu Spilman protocol:
 ### Active
 
 Both channels are funded and verified. Each side buys grants on its own channel:
-- A payer sends TopUp whenever it wants capacity: in superseding mode at least once per window if it wants continuous service, in accumulative mode whenever its budget runs low
+- A payer sends TopUp whenever it wants capacity: in superseding mode at least once per window if it wants continuous service, in accumulative mode whenever its budget runs low or its deadline is near
 - The provider verifies, ratchets its claim, and shapes to `grant / window` (superseding) or to the peer's rate cap while it has budget (accumulative)
 - Nothing is acknowledged and the two directions never synchronize
 
@@ -163,15 +163,17 @@ This is a decision about a relationship, not a price — there is no delivery pr
 
 ## What the Grant Window Is For
 
-Windows exist only in superseding mode. An accumulative provider takes no
-window, so what this section says the window does is done there by other
-settings: `min_topup_gap_ms` bounds signature checks, `rate_cap` bounds speed,
-and `max_budget` bounds how far ahead a payer has paid
-([tollgate-protocol.md](tollgate-protocol.md#0x01-offer)).
+The window is **not** a settlement clock and not a renegotiation point. In
+superseding mode, the default, it is the denominator of a rate: a grant of
+`n` units over a window of `w` buys `n / w`
+([tollgate-vouchers.md](tollgate-vouchers.md)). What follows is about that
+mode.
 
-The window is **not** a settlement clock and not a renegotiation point. It is
-the denominator of a rate: a grant of `n` units over a window of `w` buys
-`n / w` ([tollgate-vouchers.md](tollgate-vouchers.md)).
+In accumulative mode the window is only how long a budget lasts, and it is
+weeks or months long. What this section says the window does is done there by
+other settings: `min_topup_gap_ms` bounds signature checks, `rate_cap` bounds
+speed, and `max_budget` bounds how far ahead a payer has paid
+([tollgate-protocol.md](tollgate-protocol.md#0x01-offer)).
 
 It is chosen by the payer, per grant, inside the range the provider advertised.
 Nothing is agreed between the two sides, and no boundary is shared — each side
@@ -318,17 +320,17 @@ If mint connectivity is lost during rollover:
 
 ## Reboot / State Loss
 
-Nodes are not expected to persist runtime state between restarts. On reboot, a node loses metering counters, grant state, channel tracking, and any signed TopUps it was holding. The exception is accumulative budgets: a provider writes each payer's remaining budget to disk with its channel backups, because that budget is already paid for ([Grant State](tollgate-protocol.md#grant-state)). The identity key survives (it's in the config file), so the rebooted node has the same pubkey and can be recognized by peers.
+Nodes are not expected to persist runtime state between restarts. On reboot, a node loses metering counters, grant state, channel tracking, and any signed TopUps it was holding. The exception is accumulative budgets: a provider writes each payer's remaining budget and its deadline to disk with its channel backups, because that budget is already paid for ([Grant State](tollgate-protocol.md#grant-state)). The identity key survives (it's in the config file), so the rebooted node has the same pubkey and can be recognized by peers.
 
 The remaining peer (still online) is the only party that holds the latest channel state. Two scenarios apply, after a third that needs no recovery at all:
 
 ### Blip: both sides still hold state
 
-A dropped link is not a reboot. After an unclean disconnect each side holds the session for `stale_timeout_seconds`, and a peer that reconnects inside that time resumes both channels where they were: nothing is funded, and what was signed on them still counts. Superseding grants are zeroed as for any new session, so each payer buys again as soon as the Offer arrives. An accumulative budget is not: it is restored, and the provider's Balance tells the payer what it is. The resume is confirmed with ChannelReady, not a new message — see Reconnection in [tollgate-protocol.md](tollgate-protocol.md#raw-tcp). A session held past the grace period is given up, and its incoming channels are settled. A held channel does not wait for that if its own settle point comes first: the receiver settles it at `expiry − safety_margin/2`, held or not, since past its expiry the payer can take it back through the refund path, and a resume then funds a new one in its place.
+A dropped link is not a reboot. After an unclean disconnect each side holds the session for `stale_timeout_seconds`, and a peer that reconnects inside that time resumes both channels where they were: nothing is funded, and what was signed on them still counts. Superseding grants are zeroed as for any new session, so each payer buys again as soon as the Offer arrives. An accumulative budget is not: it is restored if its deadline has not passed, and the provider's Balance tells the payer what it is. The resume is confirmed with ChannelReady, not a new message — see Reconnection in [tollgate-protocol.md](tollgate-protocol.md#raw-tcp). A session held past the grace period is given up, and its incoming channels are settled. A held channel does not wait for that if its own settle point comes first: the receiver settles it at `expiry − safety_margin/2`, held or not, since past its expiry the payer can take it back through the refund path, and a resume then funds a new one in its place.
 
 ### Friendly recovery
 
-The online peer recognizes the reconnecting pubkey and shares back the channel state for both directions: channel IDs, cumulative balances, and signatures. The rebooted peer validates every signature before trusting any of it. If validation succeeds, both channels resume — the rebooted peer knows how much of its outgoing channel is spent, and holds the latest signed TopUp for its incoming channel. Superseding grants do not survive: the rebooted peer starts with no allowance for anyone, and each payer buys again. Accumulative budgets do, from disk, whether or not the channels resume.
+The online peer recognizes the reconnecting pubkey and shares back the channel state for both directions: channel IDs, cumulative balances, and signatures. The rebooted peer validates every signature before trusting any of it. If validation succeeds, both channels resume — the rebooted peer knows how much of its outgoing channel is spent, and holds the latest signed TopUp for its incoming channel. Superseding grants do not survive: the rebooted peer starts with no allowance for anyone, and each payer buys again. Accumulative budgets do, from disk, until their deadlines, whether or not the channels resume.
 
 This requires a protocol message (proposed `ChannelSync`) that the online peer sends after Announce when it detects a reconnecting pubkey with live channels. Not yet specified in [tollgate-protocol.md](tollgate-protocol.md) — **future work**.
 
@@ -336,7 +338,7 @@ This requires a protocol message (proposed `ChannelSync`) that the online peer s
 
 The online peer stays silent about the old channels. The rebooted peer falls back to a fresh session with new channels.
 
-`tollgated` keeps **channel backups on disk** — for each live channel, what it needs to settle or reclaim it: the funding, the keys, and the latest signed update. Beside them it keeps each accumulative payer's remaining budget, for `accounting.hold_seconds` after that payer's last session. Settling a channel does not touch it: the settlement collects the money that bought the budget, spent or not. After a reboot it recovers from them where it can:
+`tollgated` keeps **channel backups on disk** — for each live channel, what it needs to settle or reclaim it: the funding, the keys, and the latest signed update. Beside them it keeps each accumulative payer's remaining budget and its deadline, until that deadline. The budget lives in this node's state, not in any channel: settling a channel does not touch it, because the settlement collects the money that bought the budget, spent or not. After a reboot it recovers from them where it can:
 
 - **Outgoing channel** (rebooted peer was sender): the online peer holds the rebooted peer's last signed TopUp and can settle with the mint. The rebooted peer reclaims any remainder via Spilman's refund timelock after expiry, using its backup, then swaps it and reuses or deposits it like change. No loss beyond what was legitimately owed.
 - **Incoming channel** (rebooted peer was receiver): the backup holds the latest signed update it received, so it can still settle before expiry. What it loses is only what arrived after the last backup was written. **Without a backup, the rebooted peer loses all earned income on that channel**: the online peer waits for expiry and reclaims the full channel via the refund path.
@@ -363,7 +365,9 @@ The sender initiates a **rollover** when a channel enters the safety margin befo
 safety_margin = max(60 seconds, 2 × max_window_ms)
 ```
 
-`max_window_ms` is the **receiver's**, from its Offer, so both ends of a channel arrive at the same margin without negotiating it — provided they share the 60-second floor (`channels.safety_margin_seconds`), which is not advertised. A receiver selling in accumulative mode advertises no window, so the margin is the floor alone.
+`max_window_ms` is the **receiver's**, from its Offer, so both ends of a channel arrive at the same margin without negotiating it — provided they share the 60-second floor (`channels.safety_margin_seconds`), which is not advertised.
+
+**Accumulative windows are exempt.** A receiver selling in accumulative mode advertises windows of a month or a year, and they do not count: its margin is the floor alone, and `channels.ttl_seconds` need not be four times its longest window. A superseding grant is spent within its window, so the margin has to cover it. An accumulative budget is not tied to a channel at all. It lives in the receiver's state, persisted beside the channel backups, and survives reconnects, rollover, settlement and restarts until its own deadline ([Grant State](tollgate-protocol.md#grant-state)).
 
 Within the safety margin:
 1. Sender initiates rollover (RolloverInit) to create a new channel
@@ -556,13 +560,13 @@ A payer that receives less than it bought has no protocol recourse: the grant wa
 | Rollover threshold | 80% capacity (configurable, default 20% overlap) | New channel ready before old exhausts |
 | Rollover drain | Old channel drains to 100%, then new channel continues | No wasted capacity |
 | Stale session timeout | 60 seconds (configurable) | Close the connection to a peer that has gone silent; a lapsed payment ends the TollGate session but not the connection. The same time is the grace period for resuming channels after an unclean disconnect |
-| Grant window | Payer chooses per grant, inside a provider-advertised range (superseding only) | It is the denominator of a rate, not a settlement clock. Nothing is negotiated and no boundary is shared |
-| Accumulative budget and channels | Kept per payer, apart from any channel; untouched by rollover and settlement, written to disk beside the channel backups | The budget was paid for by updates the provider already holds, so a channel ending is no reason to take it. Keeping it apart from channels is what lets it survive a reconnect that funds a new one |
+| Grant window | Payer chooses per grant, inside a provider-advertised range, in both modes | In superseding mode it is the denominator of a rate, in accumulative mode how long a budget lasts; in neither is it a settlement clock. Nothing is negotiated and no boundary is shared |
+| Accumulative budget and channels | Kept per payer in node state, apart from any channel, until its deadline; untouched by rollover and settlement, written to disk beside the channel backups; its window does not count toward the safety margin | The budget was paid for by updates the provider already holds, so a channel ending is no reason to take it. Keeping it apart from channels is what lets it survive a reconnect that funds a new one, and what lets its window run for months without months-long channels |
 | Provider delivery exposure | None | Payment lands before the traffic it covers, so a peer that vanishes leaves nothing unpaid |
 | Under-delivery | No recourse in the channel layer | The grant is consumed whether or not packets arrive. The remedy is to stop buying, and the channel layer's job is only to make leaving cheap |
 | Channel capacity | Start small, grow with relationship | Don't over-commit to new peers |
 | Channel TTL | 1 hour default, configurable | Balance between overhead and capital lockup |
-| Safety margin | max(60s, 2×max_window_ms) before expiry — triggers rollover | Create new channel, settle old before expiry |
+| Safety margin | max(60s, 2×max_window_ms) before expiry for a superseding receiver, the floor alone for an accumulative one — triggers rollover | Create new channel, settle old before expiry |
 | Settlement | Only receiver submits to mint | Receiver holds the signed proof |
 | Funding source | `tollgated` asks `merchantd` (`fund`) | The protocol daemon holds nothing of value |
 | After settlement | Own-mint share burned at `mintd`; another mint's kept (deposited with `merchantd`) or burned, per mint; funder's change and reclaimed refunds swapped for fresh proofs, then reused for the next channel in that mint or deposited | Delivered claims are cancelled; value lives only in `merchantd` ([tollgate-daemons.md](tollgate-daemons.md)) |

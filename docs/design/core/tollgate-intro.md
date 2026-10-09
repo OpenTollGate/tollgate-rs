@@ -65,9 +65,9 @@ A peer arrives already holding vouchers for the node it wants service from, or i
 
 1. **Channel establishment**: The peers open Spilman channels (one per direction). Each peer manages rollover for its own outgoing channel — only the funder needs to initiate, since only the funder puts up new funds. Each channel is funded in one of the mints the counterparty lists — usually its own, which is always reachable over the peering link.
 
-2. **Buying capacity**: The payer sends a **TopUp** — a signed channel update carrying a cumulative total. What it buys depends on the provider's **accounting mode**, which the provider names in its Offer ([tollgate-vouchers.md](tollgate-vouchers.md#two-accounting-modes)):
-   - **Superseding**, the default: the TopUp also carries a **window** to spend the new units in, and the rate is one divided by the other. A new grant replaces the one in force, so raising the rate mid-window forfeits the remainder; that is what makes the product bandwidth rather than a stored quantity of bytes. Selling time — an hour at a fixed speed — is this mode with the rate held steady.
-   - **Accumulative**: the TopUp adds its units to a running budget, which only traffic draws down. No window and no forfeit: units not used today are still there tomorrow, for as long as the provider holds them (a day by default). The provider caps each peer's speed and how much it may hold, because this mode lets a buyer stockpile ([tollgate-hazards.md](tollgate-hazards.md#when-accumulation-is-acceptable)).
+2. **Buying capacity**: The payer sends a **TopUp** — a signed channel update carrying a cumulative total, and a **window** to spend the new units in. Whatever is left at the end of the window is forfeit. What else the TopUp does depends on the provider's **accounting mode**, which the provider names in its Offer ([tollgate-vouchers.md](tollgate-vouchers.md#two-accounting-modes)):
+   - **Superseding**, the default: the rate is the units divided by the window. A new grant replaces the one in force, so raising the rate mid-window forfeits the remainder; that is what makes the product bandwidth rather than a stored quantity of bytes. Windows are seconds long. Selling time — an hour at a fixed speed — is this mode with the rate held steady.
+   - **Accumulative**: the units add to what is left, a running budget that only traffic draws down, and the window — weeks long here — restarts from the new purchase. Units not used today are still there tomorrow, until the deadline. The provider caps each peer's speed and how much it may hold, because this mode lets a buyer stockpile ([tollgate-hazards.md](tollgate-hazards.md#when-the-window-can-be-long)).
 
    Nothing is acknowledged, so a payer can buy and use what it bought in the same breath.
 
@@ -219,7 +219,7 @@ The three daemons normally run on one machine and talk over local sockets; why t
 
 ## What a Node Advertises
 
-A node's offer is short: the mints whose vouchers it will take, most preferred first; the unit it denominates in; its accounting mode, with the range of grant windows it will accept (superseding) or the speed and budget limits it applies (accumulative); and one unsigned multiplier saying how welcome the peer's uploads are.
+A node's offer is short: the mints whose vouchers it will take, most preferred first; the unit it denominates in; the range of grant windows it will accept; its accounting mode, with the speed and budget limits it applies in accumulative mode; and one unsigned multiplier saying how welcome the peer's uploads are.
 
 There are no products, no rate tables, and no price anywhere. Delivery costs one voucher per unit, and the peer already holds the vouchers.
 
