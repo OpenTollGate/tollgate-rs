@@ -16,6 +16,9 @@ use tollgate_net::config::{File, ForwardingMode};
 use tollgate_net::node::Node;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
+use tracing_subscriber::registry::LookupSpan;
 
 #[derive(Parser, Debug)]
 #[command(name = "tollgated", about = "A TollGate node")]
@@ -51,27 +54,60 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     report: u64,
 
-    /// Where to serve the control socket that `tolltop` reads.
+    /// This instance's name: letters, digits and `-`. Wins over `instance` in
+    /// the file; unset there too, it is `default`. It names the runtime
+    /// directory, `/run/tollgate-<instance>/`, that holds the instance's
+    /// sockets, and every log line.
     #[arg(long)]
-    control_socket: Option<PathBuf>,
+    instance: Option<String>,
+}
+
+/// Every log line, prefixed with the instance's name: one machine may run
+/// several, and their logs often land in one place.
+struct Instanced<F> {
+    name: String,
+    inner: F,
+}
+
+impl<S, N, F> FormatEvent<S, N> for Instanced<F>
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+    F: FormatEvent<S, N>,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        write!(writer, "[{}] ", self.name)?;
+        self.inner.format_event(ctx, writer, event)
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        // Colour only for a human at a terminal. Redirected to a file or a
-        // pipe, escape codes land in the middle of every field and make the
-        // output unreadable to anything that tries to parse it.
-        .with_ansi(std::io::stderr().is_terminal())
-        .init();
-
     let args = Args::parse();
 
     let file = match &args.config {
         Some(path) => File::load(path)?,
         None => serde_yaml::from_str("{}").expect("the empty document is valid"),
     };
+    let instance = file.instance(args.instance.as_deref())?;
+
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        // Colour only for a human at a terminal. Redirected to a file or a
+        // pipe, escape codes land in the middle of every field and make the
+        // output unreadable to anything that tries to parse it.
+        .with_ansi(std::io::stderr().is_terminal())
+        .event_format(Instanced {
+            name: instance.clone(),
+            inner: tracing_subscriber::fmt::format(),
+        })
+        .init();
+
     let mut config = file.resolve().context("resolve configuration")?;
 
     if args.show_identity {
@@ -80,7 +116,11 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Created if it is missing and can be: it holds this instance's sockets.
+    let runtime_dir = tollgate_net::instance::runtime_dir(&instance);
     info!(
+        %instance,
+        runtime_dir = %runtime_dir.display(),
         pubkey = %hex::encode(config.identity.pubkey().0),
         "starting"
     );
@@ -233,10 +273,8 @@ async fn main() -> Result<()> {
     // it is operational state for a local tool, not something a peer acts on.
     {
         let published = node.published();
-        let path = args
-            .control_socket
-            .clone()
-            .unwrap_or_else(tollgate_net::control::default_socket_path);
+        let path = file.control_socket_path(&runtime_dir);
+        info!(control = %path.display(), "control socket");
         tokio::spawn(async move {
             if let Err(e) =
                 tollgate_net::control::serve(&path, published, std::future::pending()).await

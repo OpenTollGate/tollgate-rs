@@ -15,7 +15,7 @@ services:
       - ../mint/mintd.toml:/etc/cdk/mintd.toml:ro
   gateway:
     image: tollgate-test:latest
-    command: ["-c", "/etc/tollgate/gateway.yaml", "--control-socket", "/run/tollgate.sock"]
+    command: ["-c", "/etc/tollgate/gateway.yaml"]
     volumes:
       - ./gateway.yaml:/etc/tollgate/gateway.yaml:ro
     environment:
@@ -23,7 +23,7 @@ services:
 
   client:
     image: tollgate-test:latest
-    command: ["-c", "/etc/tollgate/client.yaml", "--control-socket", "/run/tollgate.sock", "--demand", "1000000"]
+    command: ["-c", "/etc/tollgate/client.yaml", "--demand", "1000000"]
     volumes:
       - ./client-no-charge.yaml:/etc/tollgate/client.yaml:ro
     environment:

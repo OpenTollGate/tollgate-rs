@@ -38,7 +38,7 @@ services:
 
   gateway:
     image: tollgate-test:${IMAGE_TAG:-latest}
-    command: ["-c", "/etc/tollgate/gateway.yaml", "--control-socket", "/run/tollgate.sock"]
+    command: ["-c", "/etc/tollgate/gateway.yaml"]
     volumes:
       - ./gateway.yaml:/etc/tollgate/gateway.yaml:ro
       - gate:/run/gate
@@ -49,7 +49,7 @@ services:
 
   client:
     image: tollgate-test:${IMAGE_TAG:-latest}
-    command: ["-c", "/etc/tollgate/client.yaml", "--control-socket", "/run/tollgate.sock", "--demand", "2000000"]
+    command: ["-c", "/etc/tollgate/client.yaml", "--demand", "2000000"]
     volumes:
       - ./client.yaml:/etc/tollgate/client.yaml:ro
     environment:
@@ -74,7 +74,7 @@ services:
   gateway-pinned:
     profiles: ["mismatch"]
     image: tollgate-test:${IMAGE_TAG:-latest}
-    command: ["-c", "/etc/tollgate/gateway-pinned.yaml", "--control-socket", "/run/tollgate.sock"]
+    command: ["-c", "/etc/tollgate/gateway-pinned.yaml"]
     volumes:
       - ./gateway-pinned.yaml:/etc/tollgate/gateway-pinned.yaml:ro
       - gate-fips:/run/gate

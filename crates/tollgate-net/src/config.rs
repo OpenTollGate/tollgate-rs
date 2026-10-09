@@ -24,6 +24,15 @@ use crate::wire::Identify;
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct File {
+    /// This instance's name: letters, digits and `-`. Unset is
+    /// [`crate::instance::DEFAULT`]. `--instance` wins over it. See
+    /// [`crate::instance`].
+    pub instance: Option<String>,
+    /// Where `tolltop` and trusted local clients reach this instance. Empty
+    /// means `control.sock` in the instance's runtime directory,
+    /// `/run/tollgate-<instance>/`; set it only to put the socket somewhere
+    /// else.
+    pub control_socket: String,
     /// Node identity.
     pub identity: IdentitySection,
     /// This node's own mint, and the unit it denominates in.
@@ -569,6 +578,27 @@ enum Lead {
 }
 
 impl File {
+    /// This instance's name: `cli`, which is `--instance`, if given; else
+    /// `instance` in the file; else [`crate::instance::DEFAULT`]. Refused
+    /// unless it is letters, digits and `-`.
+    pub fn instance(&self, cli: Option<&str>) -> Result<String> {
+        let name = cli
+            .or(self.instance.as_deref())
+            .unwrap_or(crate::instance::DEFAULT);
+        crate::instance::validate(name)?;
+        Ok(name.to_owned())
+    }
+
+    /// Where to serve the control socket, given the instance's runtime
+    /// directory: `control_socket` if set, else `control.sock` in it.
+    pub fn control_socket_path(&self, runtime_dir: &Path) -> PathBuf {
+        if self.control_socket.is_empty() {
+            runtime_dir.join(crate::instance::CONTROL_SOCKET)
+        } else {
+            PathBuf::from(&self.control_socket)
+        }
+    }
+
     /// Read a configuration file.
     pub fn load(path: &Path) -> Result<Self> {
         let text =
@@ -857,6 +887,51 @@ mod tests {
             let file: File = serde_yaml::from_str(&yaml).expect("parse");
             assert!(file.resolve().is_err(), "{mode}");
         }
+    }
+
+    #[test]
+    fn an_unnamed_instance_is_called_default() {
+        let file: File = serde_yaml::from_str("{}").expect("parse");
+        assert_eq!(file.instance(None).expect("name"), "default");
+    }
+
+    #[test]
+    fn the_instance_flag_wins_over_the_file() {
+        let file: File = serde_yaml::from_str("instance: ip\n").expect("parse");
+        assert_eq!(file.instance(None).expect("name"), "ip");
+        assert_eq!(file.instance(Some("fips-exit")).expect("name"), "fips-exit");
+
+        // Checked wherever it came from: it becomes part of a path.
+        assert!(file.instance(Some("../etc")).is_err());
+        let bad: File = serde_yaml::from_str("instance: fips_exit\n").expect("parse");
+        assert!(bad.instance(None).is_err());
+        assert_eq!(bad.instance(Some("fips-exit")).expect("name"), "fips-exit");
+    }
+
+    #[test]
+    fn the_control_socket_follows_from_the_instance_name() {
+        let file: File = serde_yaml::from_str("instance: fips-exit\n").expect("parse");
+        let name = file.instance(None).expect("name");
+        let dir = crate::instance::dir_in(Path::new("/run"), &name);
+        assert_eq!(
+            file.control_socket_path(&dir),
+            PathBuf::from("/run/tollgate-fips-exit/control.sock")
+        );
+
+        let unnamed: File = serde_yaml::from_str("{}").expect("parse");
+        let dir =
+            crate::instance::dir_in(Path::new("/run"), &unnamed.instance(None).expect("name"));
+        assert_eq!(
+            unnamed.control_socket_path(&dir),
+            PathBuf::from("/run/tollgate-default/control.sock")
+        );
+
+        let moved: File =
+            serde_yaml::from_str("control_socket: /srv/tg/control.sock\n").expect("parse");
+        assert_eq!(
+            moved.control_socket_path(&dir),
+            PathBuf::from("/srv/tg/control.sock")
+        );
     }
 
     #[test]

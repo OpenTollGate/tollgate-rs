@@ -12,6 +12,19 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 ### Added
 
+- Named instances: one machine runs `tollgated` once per task, each under a
+  name, `instance:` in the config or `--instance` on the command line, which
+  wins (letters, digits and `-`; unset is `default`). Each instance keeps its
+  sockets in a runtime directory of its own, `/run/tollgate-<instance>/`,
+  created if missing — `/usr/local/var/run` for the macOS package,
+  `$XDG_RUNTIME_DIR` by hand, the temporary directory as a last resort. The
+  control socket is `control.sock` in it, so `/run/tollgate.sock` is now
+  `/run/tollgate-default/control.sock`; `control_socket:` moves it, and
+  tollgated's `--control-socket` flag is gone. `tolltop` finds the one running
+  instance by listing `tollgate-*/control.sock`, or the one named with
+  `--instance`. Every log line starts with the instance's name. The packages,
+  the demo and the test topologies follow.
+
 - `forwarding.mode: external`: a node whose enforcement is a separate program,
   a **gate**, reached over the Unix socket at `forwarding.gate_socket`
   (`docs/design/core/tollgate-gate-protocol.md`). A new use case is a new gate

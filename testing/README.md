@@ -96,7 +96,7 @@ Each node runs three listeners and a socket:
 | `4747` | TollGate control plane — the protocol itself |
 | `4748` | data plane — the bytes being bought and sold |
 | `3338` | this node's Cashu mint, and the market endpoint that sells its vouchers |
-| `/run/tollgate.sock` | snapshot for `tolltop` and for these tests |
+| `/run/tollgate-<instance>/control.sock` | snapshot for `tolltop` and for these tests; the instance is `default` unless the topology names it |
 
 The mint has to be reachable **by the peer**, because a peer funds its channel
 against it — which is why the configs name compose service names rather than

@@ -31,6 +31,8 @@
 //! - [`config`] — the YAML the operator writes.
 //! - [`control`] — a local socket publishing what the node is doing, which is
 //!   what `tolltop` reads.
+//! - [`instance`] — named instances, and the runtime directory each keeps its
+//!   sockets in.
 
 pub mod channel;
 pub mod client;
@@ -40,6 +42,7 @@ pub mod dataplane;
 pub mod enforcer;
 pub mod fips;
 pub mod identity;
+pub mod instance;
 pub mod market;
 pub mod merchant;
 pub mod mint;

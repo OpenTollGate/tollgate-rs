@@ -47,9 +47,11 @@ tollgate::logs() {
 tollgate::snapshot() {
   local service="$1"
   # The socket writes one JSON snapshot and closes, so netcat reads it whole.
-  # It is not HTTP, which is why curl is not the tool here.
+  # It is not HTTP, which is why curl is not the tool here. Each container runs
+  # one instance, whatever its name, so the glob finds its control socket the
+  # way tolltop does.
   docker compose -f "$COMPOSE" exec -T "$service" \
-    nc -U -w 2 /run/tollgate.sock </dev/null 2>/dev/null || echo '{}'
+    sh -c 'nc -U -w 2 /run/tollgate-*/control.sock' </dev/null 2>/dev/null || echo '{}'
 }
 
 # One field of one peer, via jq. Prints nothing if there is no such peer yet.

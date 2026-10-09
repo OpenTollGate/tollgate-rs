@@ -20,7 +20,7 @@ make -C packaging clean
 | Wallet | `/etc/tollgate/wallet.sqlite` | `/usr/local/var/lib/tollgate/wallet.sqlite` |
 | Mint database | `/etc/tollgate/mint.sqlite` | `/usr/local/var/lib/tollgate/mint.sqlite` |
 | Service | procd, `/etc/init.d/tollgate` | launchd, `com.tollgate.daemon` |
-| Control socket | `/run/tollgate.sock` | `/usr/local/var/run/tollgate.sock` |
+| Control socket | `/run/tollgate-default/control.sock` | `/usr/local/var/run/tollgate-default/control.sock` |
 | Forwarding mode | `nftables` — the real thing | `loopback` — a socket of its own |
 
 `tolltop` finds the socket without being told where it is, on both.

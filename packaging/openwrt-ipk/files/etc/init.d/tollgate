@@ -10,7 +10,6 @@ STOP=10
 
 PROG=/usr/bin/tollgated
 CONFIG=/etc/tollgate/tollgate.yaml
-SOCKET=/run/tollgate.sock
 MINT=/usr/bin/mintd
 MINT_CONFIG=/etc/tollgate/mint.yaml
 MINT_SOCKET=/run/mintd.sock
@@ -43,7 +42,9 @@ start_service() {
 	procd_close_instance
 
 	procd_open_instance node
-	procd_set_param command "$PROG" --config "$CONFIG" --control-socket "$SOCKET"
+	procd_set_param command "$PROG" --config "$CONFIG" --instance default
+	# Its control socket is /run/tollgate-default/control.sock, in a runtime
+	# directory tollgated makes for itself; tolltop finds it there.
 	# Respawn: restart after 5 s, give up after 5 consecutive failures within
 	# an hour, then reset the counter and try again. A node that cannot start
 	# is usually a node whose config names an interface that is not there.
