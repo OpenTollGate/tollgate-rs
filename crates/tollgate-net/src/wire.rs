@@ -13,6 +13,7 @@
 //! [`PeerIdentity`].
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -21,6 +22,23 @@ use tokio::sync::mpsc;
 use tollgate_protocol::{FrameReader, MAX_FRAME_LEN, Message, PubKey, encode_frame};
 use tracing::{debug, warn};
 
+/// One connection, out of every one this node has had.
+///
+/// A peer is its key, but the key can be on more than one connection at once:
+/// one that reconnects does so before the node has heard its old connection
+/// end. Every event names the connection it came from, so the old one's end
+/// can be told from the new one's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Connection(u64);
+
+impl Connection {
+    /// A connection no other has been, or will be, in this process.
+    pub fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 /// What the transport tells the node about.
 #[derive(Debug)]
 pub enum Wire {
@@ -28,6 +46,8 @@ pub enum Wire {
     PeerUp {
         /// Who is on the other end.
         peer: PubKey,
+        /// Which connection this is.
+        conn: Connection,
         /// Where they reach us from.
         ///
         /// The session identifies a peer by public key; the kernel identifies
@@ -40,6 +60,8 @@ pub enum Wire {
     Message {
         /// Who sent it.
         peer: PubKey,
+        /// The connection it came in on.
+        conn: Connection,
         /// What they sent.
         msg: Message,
     },
@@ -47,6 +69,8 @@ pub enum Wire {
     PeerDown {
         /// Who was on the other end.
         peer: PubKey,
+        /// The connection that went away.
+        conn: Connection,
     },
 }
 
@@ -221,12 +245,20 @@ async fn run(
     // wait, but bounded: a peer that will not read should not be able to make
     // us buffer without limit.
     let (tx, mut outbox) = mpsc::channel::<Message>(64);
-    node.send(Wire::PeerUp { peer, addr, tx }).await.ok();
+    let conn = Connection::next();
+    node.send(Wire::PeerUp {
+        peer,
+        conn,
+        addr,
+        tx,
+    })
+    .await
+    .ok();
 
     // Anything read before the peer was identified still has to reach core,
     // in the order it arrived.
     for msg in pending {
-        node.send(Wire::Message { peer, msg }).await.ok();
+        node.send(Wire::Message { peer, conn, msg }).await.ok();
     }
 
     let writer = tokio::spawn(async move {
@@ -244,9 +276,9 @@ async fn run(
         let _ = tx_half.shutdown().await;
     });
 
-    let result = read_loop(&mut rx_half, reader, peer, &node).await;
+    let result = read_loop(&mut rx_half, reader, peer, conn, &node).await;
 
-    node.send(Wire::PeerDown { peer }).await.ok();
+    node.send(Wire::PeerDown { peer, conn }).await.ok();
     writer.abort();
     result
 }
@@ -259,6 +291,7 @@ async fn read_loop(
     rx: &mut tokio::net::tcp::OwnedReadHalf,
     mut reader: FrameReader,
     peer: PubKey,
+    conn: Connection,
     node: &mpsc::Sender<Wire>,
 ) -> Result<()> {
     let mut buf = vec![0u8; 8 * 1024];
@@ -275,7 +308,7 @@ async fn read_loop(
         while let Some(msg) = reader.next_message() {
             match msg {
                 Ok(msg) => {
-                    if node.send(Wire::Message { peer, msg }).await.is_err() {
+                    if node.send(Wire::Message { peer, conn, msg }).await.is_err() {
                         return Ok(());
                     }
                 }

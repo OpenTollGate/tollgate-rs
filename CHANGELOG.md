@@ -361,6 +361,23 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 ### Fixed
 
+- A channel funding that fails is reported to core after a wait, one second
+  doubling to 30 s, core's funding timeout, and reset once a funding toward
+  that peer succeeds. Core asks again on the tick after it hears of a failure,
+  and it heard at once, so a payer whose mint was unreachable asked every
+  100 ms and logged "could not fund a channel" as often. The warning now
+  carries the attempt and the wait, and a success after failures is logged at
+  `info`.
+
+- A peer that reconnects before its old connection's end reaches the node
+  keeps the new connection. The end named only the peer, so when it arrived
+  late it dropped the new connection's link, ended its session and removed it
+  from the enforcer, and the peer sat connected with nothing to answer it. Every
+  connection now has an id its events carry: the end of one already replaced,
+  and anything still read from it, is ignored, and a connection that replaces
+  another clears the enforcer's state for the old one and registers afresh, as
+  it would have had the old one ended first.
+
 - A node reaches a mint named by an IPv6 address, `http://[addr]:port`, as
   every mint on a FIPS mesh is. cdk's default HTTP client, bitreq, looked the
   host up with its brackets on and failed, so no channel toward a mesh peer was
