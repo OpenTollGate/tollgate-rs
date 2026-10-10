@@ -560,6 +560,16 @@ fn a_balance_below_our_own_count_never_makes_us_buy() {
 }
 
 #[test]
+fn a_balance_above_our_own_count_is_not_taken_over_it() {
+    // We decide from our own count; a Balance only fills in for none.
+    let mut buyer = opened(CAPACITY);
+    buy(&mut buyer, &policy(), demand(400_000), Millis(0));
+    buyer.note_balance(5_000_000, 30_000, Millis(10));
+    assert_eq!(buyer.remaining_at(Millis(10)), 1_000_000);
+    assert_eq!(buyer.deadline(), Millis(2_000));
+}
+
+#[test]
 fn a_buyer_that_came_back_learns_what_it_left_behind() {
     // Without a count of its own, the Balance at the session start is how it
     // knows; it then buys only what is missing.

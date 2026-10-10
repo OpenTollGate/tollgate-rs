@@ -158,8 +158,18 @@ impl BudgetStore {
             std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
         }
         let tmp = path.with_extension("json.tmp");
-        let bytes = serde_json::to_vec_pretty(&self.records).expect("records serialize");
-        std::fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
+        let bytes = serde_json::to_vec(&self.records).expect("records serialize");
+        {
+            use std::io::Write;
+            let mut file =
+                std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+            file.write_all(&bytes)
+                .with_context(|| format!("write {}", tmp.display()))?;
+            // On the disk before it replaces the old file, or a power cut
+            // could leave the new name pointing at nothing.
+            file.sync_all()
+                .with_context(|| format!("sync {}", tmp.display()))?;
+        }
         std::fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))?;
         Ok(())
     }

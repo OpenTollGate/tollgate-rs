@@ -209,6 +209,27 @@ impl Sessions {
         })
     }
 
+    /// End whatever this node still holds for `peer`, live or held after an
+    /// unclean disconnect: its budget is kept, its incoming channels settled,
+    /// and nothing is left to resume.
+    ///
+    /// For a host that sees a peer come back as a different payer — under
+    /// `enforcer.identity: address`, the same key from another address. The
+    /// budget and channels belong to the address it left from, so the new
+    /// connection must start from nothing rather than resume them.
+    pub fn forget(&mut self, peer: PubKey, now: Millis) -> Vec<Action> {
+        let mut out = Vec::new();
+        if let Some(mut session) = self.peers.remove(&peer) {
+            Self::save_budget(peer, &session, now, &mut out);
+            Self::discard(peer, &mut session, &mut out);
+        }
+        if let Some(mut parked) = self.parked.remove(&peer) {
+            Self::save_budget(peer, &parked.session, now, &mut out);
+            Self::discard(peer, &mut parked.session, &mut out);
+        }
+        out
+    }
+
     /// Feed in something that happened; get back what to do about it.
     pub fn handle(&mut self, event: Event, now: Millis) -> Vec<Action> {
         let mut out = Vec::new();
@@ -531,6 +552,7 @@ impl Sessions {
                 // One that was ending is over; the new connection does not
                 // revive it, but what the peer paid on it is still ours.
                 if let Some(mut session) = closing {
+                    Self::save_budget(peer, &session, now, out);
                     Self::discard(peer, &mut session, out);
                 }
                 self.parked.remove(&peer).and_then(|mut p| {
@@ -1018,13 +1040,16 @@ impl Sessions {
 
         match verdict {
             Verdict::Accept { ratchets, grant } => {
+                // The time since the last reading was carried at the old
+                // reserved rate; draw it before the new one takes over.
+                if let Some(at) = session.drawn_at {
+                    session.grant.draw(0, now.saturating_since(at));
+                }
                 session
                     .grant
                     .apply(&ratchets, grant, m.window_ms, m.reserved_rate, now);
                 // A reservation is drawn from the moment it is bought.
-                if session.drawn_at.is_none() {
-                    session.drawn_at = Some(now);
-                }
+                session.drawn_at = Some(now);
 
                 // Only now does the backend keep them: before this, the
                 // purchase could still have been refused, and a backend that
@@ -1196,7 +1221,9 @@ impl Sessions {
     fn reserved_elsewhere(&self, payer: &PubKey) -> u64 {
         self.peers
             .iter()
-            .filter(|(p, _)| *p != payer)
+            // A session that is ending sets nothing aside: its peer said
+            // Disconnect, and its link is on its way down.
+            .filter(|(p, s)| *p != payer && s.phase != Phase::Closing)
             .map(|(_, s)| s.grant.reserved_rate())
             .fold(0u64, u64::saturating_add)
     }

@@ -484,17 +484,16 @@ impl Buyer {
     /// Take in a Balance the provider sent: what it says is left, and for how
     /// long.
     ///
-    /// Information, not an instruction. It never makes us buy more: a Balance
-    /// below our own count is a gap between what we bought and what we got,
-    /// not a reason to top up. It can make us buy less, when it says more is
-    /// left than we knew of — which is what a buyer that came back without
-    /// its own count learns from it, the budget it left behind.
+    /// Information, not an instruction: we decide from our own count. The one
+    /// case it fills in is a buyer that has no count at all — it came back
+    /// without one, and holds nothing by its own reckoning — which learns from
+    /// it the budget it left behind, as a payer that reconnects has to. Even
+    /// then it can only make us buy less, never more.
     pub fn note_balance(&mut self, remaining: u64, expires_in_ms: u64, now: Millis) {
-        if remaining == 0 || expires_in_ms == 0 {
+        if remaining == 0 || expires_in_ms == 0 || self.started {
             return;
         }
-        let ours = self.remaining_at(now);
-        if remaining > ours {
+        if self.remaining_at(now) == 0 {
             self.remaining = remaining;
             self.deadline = self.deadline.max(now + expires_in_ms);
         }

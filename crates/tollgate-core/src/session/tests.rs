@@ -2329,6 +2329,36 @@ fn a_peer_can_be_let_burst_above_what_it_reserved() {
 }
 
 #[test]
+fn a_payer_forgotten_by_the_host_keeps_its_budget_and_resumes_nothing() {
+    // Under address identity the host forgets a payer that comes back from
+    // another address: what it held belongs to the old one.
+    let mut link = Link::with_grace(60_000);
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    let (a_pays_on, _) = channels_in_use(&link);
+    link.blip();
+
+    let actions = link.b.sessions.forget(a, link.now);
+    assert!(actions.iter().any(|x| matches!(
+        x,
+        Action::SaveBudget { peer, budget } if *peer == a && budget.remaining == 2_500_000
+    )));
+    assert!(actions.iter().any(|x| matches!(
+        x,
+        Action::SettleChannel { channel_id, .. } if *channel_id == a_pays_on
+    )));
+    assert!(link.b.sessions.parked(&a).is_none());
+    assert!(link.b.sessions.peer(&a).is_none());
+}
+
+#[test]
 fn shutting_down_keeps_every_payers_budget() {
     let mut link = Link::with_grace(60_000);
     link.connect();

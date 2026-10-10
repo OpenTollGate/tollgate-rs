@@ -370,6 +370,17 @@ impl Node {
                 // The budget it left behind, if it is the same payer: the
                 // same key, and under address identity the same address.
                 let key = budgets::key(peer, addr.ip(), self.peer_identity);
+                // The same key from another address is another payer under
+                // address identity: what this node holds for the key belongs
+                // to the address it left from, so it is kept there and nothing
+                // is resumed.
+                if self.budget_keys.get(&peer).is_some_and(|old| *old != key) {
+                    debug!(%peer, "a payer's key came back from another address");
+                    let now = self.now();
+                    for action in self.sessions.forget(peer, now) {
+                        self.execute(action, done).await;
+                    }
+                }
                 let budget = self.budgets.get(&key, self.now());
                 if let Some(b) = budget {
                     info!(%peer, remaining = b.remaining, "a payer came back to its budget");
@@ -496,6 +507,11 @@ impl Node {
     /// Sample the meters and tick core.
     async fn on_tick(&mut self, done: &mpsc::Sender<Event>) {
         self.release_deferred(done).await;
+        // A key is needed only while core still holds the peer, live or held
+        // for a return, and so may still ask for its budget to be kept.
+        let sessions = &self.sessions;
+        self.budget_keys
+            .retain(|peer, _| sessions.peer(peer).is_some() || sessions.parked(peer).is_some());
         for peer in self.enforcer.peers() {
             let counters = self.enforcer.counters(peer);
             // A payer is drawn only while the enforcer is applying its rate.
