@@ -84,7 +84,7 @@ Trading one issuer's vouchers for another's, which is what a market needs.
 | NUT-11/NUT-14 hash-locked swap | Several round trips, both mints online, a counterparty required |
 | Trusted exchange | Reintroduces a central party, defeating the point |
 
-None survives running once per grant, so market purchases have
+None survives running once per TopUp, so market purchases have
 to be made in bulk and drawn down slowly. That concentrates issuer risk in
 whatever is being held — see [issuer-risk.md](issuer-risk.md).
 
@@ -101,5 +101,5 @@ between them, and a relay can spend what it receives straight upstream.
 |---|---|
 | Cross-mint atomic swap | No working Cashu implementation. Blocks the price signal, not operation. |
 | First connection with no connectivity | A peer holding only sats and having no other link depends on some node choosing to offer a local swap. Nothing guarantees one will. |
-| Bulk holding | Amortizing expensive swaps means holding a large position in one issuer's vouchers, which is exactly the exposure the design otherwise tries to keep to one grant. |
+| Bulk holding | Amortizing expensive swaps means holding a large position in one issuer's vouchers, which is exactly the exposure the design otherwise leaves to the payer to keep small: its budget with one provider. |
 | Choosing an accepted set | A node has to decide which mints to take at all — accept or refuse, with no haircut to soften the choice, and for each one accepted whether its proceeds are kept or burned ([tollgate-daemons.md](../core/tollgate-daemons.md#other-mints-keep-or-burn)). The set is the operator's explicit list — any mint, not only neighbors'. Each costs reachability; a kept one also costs credit. |

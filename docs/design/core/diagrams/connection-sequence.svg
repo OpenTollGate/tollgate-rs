@@ -83,7 +83,7 @@
 
   <!-- A → B Offer -->
   <line x1="170" y1="215" x2="548" y2="215" stroke="#5080c0" stroke-width="1.5" marker-end="url(#aR)"/>
-  <text x="360" y="208" text-anchor="middle" class="alabel" fill="#5080c0">Offer (mints, unit, window range, multiplier)</text>
+  <text x="360" y="208" text-anchor="middle" class="alabel" fill="#5080c0">Offer (mints, unit, purchase terms, multiplier)</text>
 
   <!-- B → A Offer -->
   <line x1="550" y1="240" x2="172" y2="240" stroke="#d0a040" stroke-width="1.5" marker-end="url(#aL)"/>
@@ -126,15 +126,15 @@
 
   <!-- A → B TopUp: A buys a rate from B -->
   <line x1="170" y1="440" x2="548" y2="440" stroke="#5080c0" stroke-width="2" marker-end="url(#aR)"/>
-  <text x="360" y="433" text-anchor="middle" class="alabel" fill="#5080c0">TopUp (cumulative, window)</text>
+  <text x="360" y="433" text-anchor="middle" class="alabel" fill="#5080c0">TopUp (cumulative, window, reserved rate)</text>
 
   <!-- B → A TopUp: B buys a rate from A -->
   <line x1="550" y1="480" x2="172" y2="480" stroke="#d0a040" stroke-width="2" marker-end="url(#aL)"/>
-  <text x="360" y="473" text-anchor="middle" class="alabel" fill="#d0a040">TopUp (cumulative, window)</text>
+  <text x="360" y="473" text-anchor="middle" class="alabel" fill="#d0a040">TopUp (cumulative, window, reserved rate)</text>
 
   <!-- notes -->
   <text x="360" y="510" text-anchor="middle" class="annot">no acknowledgment &#8212; cumulative state is self-correcting</text>
-  <text x="360" y="530" text-anchor="middle" class="annot">each side repeats before its own deadline; the two never synchronize</text>
+  <text x="360" y="530" text-anchor="middle" class="annot">each side tops up before its budget or deadline runs out; the two never synchronize</text>
 
   <!-- Caption -->
   <text x="360" y="585" text-anchor="middle" class="caption">Both sides send Offer and Accept — each delivers independently</text>

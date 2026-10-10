@@ -98,7 +98,7 @@ party holds at once.**
 
 | Holder | Typical exposure | Notes |
 |---|---|---|
-| A peer buying service | One grant's worth | The payer chooses the window, so it chooses this bound directly |
+| A peer buying service | Its unspent budget with that provider | The payer chooses how much to hold ahead, so it chooses this bound directly |
 | A peer that bought in bulk | The whole bag | Forced by expensive cross-mint swaps — see [voucher-acquisition.md](voucher-acquisition.md) |
 | A market maker | Inventory across many issuers | The business that makes the price signal possible is also the one carrying this risk |
 | A node accepting foreign mints | However much of that issuer's paper its `merchantd` holds | Directly controlled by which mints it accepts at all — in `tollgated` as payment, where `burn` holds nothing, and in `merchantd`'s `accepts` list |

@@ -72,7 +72,7 @@
   <line x1="270" y1="225" x2="340" y2="133" stroke="#c05050" stroke-width="1.5" marker-end="url(#ared)"/>
   <text x="318" y="196" text-anchor="start" class="elabel">payment lapsed</text>
   <text x="318" y="208" text-anchor="start" class="elabel">(last channel full,</text>
-  <text x="318" y="220" text-anchor="start" class="elabel">its grant run out)</text>
+  <text x="318" y="220" text-anchor="start" class="elabel">its budget run out)</text>
 
   <!-- ═══ Legend ═══ -->
   <line x1="180" y1="320" x2="210" y2="320" stroke="#c05050" stroke-width="2"/>

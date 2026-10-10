@@ -13,7 +13,7 @@ FIPS provides everything TollGate needs from a network layer:
 
 `tollgated` (built on `tollgate-net`) and the FIPS daemon are independent binaries communicating over FIPS's control socket. FIPS exposes generic per-peer capabilities (forwarding policy, lifecycle events, livestreamed rx/tx counters, MMP metrics); `tollgate-net` consumes them.
 
-Per-peer counters are pushed as a livestream subscription, so `tollgate-net` always has a fresh value to draw each peer's grant down against. Socket overhead is negligible.
+Per-peer counters are pushed as a livestream subscription, so `tollgate-net` always has a fresh value to draw each peer's budget down against. Socket overhead is negligible.
 
 ---
 
@@ -74,7 +74,7 @@ When a peer's access level changes:
 - A blocked peer (`None` with a zero allowance) -> `Active`/`Free`: Add to bloom filters immediately, trigger FilterAnnounce
 - `Active` -> `None` (payment lapsed): with a non-zero allowance the peer is still carried, so it stays visible. With a zero allowance it is blocked and removed from bloom filters.
 
-A grant expiring between purchases does not change the level — the peer stays `Active` while its channel is funded — but it does change the rate, to the allowance. With a non-zero allowance that changes nothing here: the peer is still carried and stays in the bloom filters. **With a zero allowance an `Active` peer between grants is shaped to zero, so it is not carried, not admitted, and not advertised** until its next grant arrives. A buyer renewing in short windows on such a node therefore leaves and rejoins the bloom filters at every gap it lets open; a node that wants stable reachability for its paying peers should keep a non-zero allowance.
+A budget running out between purchases does not change the level — the peer stays `Active` while its channel is funded — but it does change the rate, to the allowance. With a non-zero allowance that changes nothing here: the peer is still carried and stays in the bloom filters. **With a zero allowance an `Active` peer with an empty budget is shaped to zero, so it is not carried, not admitted, and not advertised** until its next purchase arrives. A buyer that lets its budget run out before topping up on such a node therefore leaves and rejoins the bloom filters at every gap it lets open; a node that wants stable reachability for its paying peers should keep a non-zero allowance.
 
 Removal is immediate. `tollgate-net` applies no delay or hysteresis before hiding a peer; any damping of bloom-filter churn would have to come from FIPS itself, as the 30-second removal delay asked for in [FIPS_FEATURE_REQUESTS.md](../FIPS_FEATURE_REQUESTS.md) (feature 3) would.
 
@@ -151,7 +151,7 @@ fn subscribe_meter(&self, peer: &Pubkey) -> Result<MeterStream, EnforcerError> {
     let node_addr = NodeAddr::from_pubkey(peer);
 
     // Subscribe to FIPS's per-peer counter livestream over the control socket.
-    // Each push updates the watch channel; tollgate-core draws the peer's grant down against it.
+    // Each push updates the watch channel; tollgate-core draws the peer's budget down against it.
     let (delivered_tx, delivered) = watch::channel(0);
     let (received_tx, received) = watch::channel(0);
     self.subscribe_peer_counters(node_addr, delivered_tx, received_tx);
@@ -196,7 +196,7 @@ The enforcer maps between them as needed. TollGate protocol uses pubkey; FIPS fo
 
 ### Verifying the peer
 
-An `Announce` is unauthenticated — it is the first thing a stranger says. On plain IP there is nothing to check it against, and an enforcer that binds pubkey to address does so on the peer's own say-so: claim a paying peer's key and your address rides their grant.
+An `Announce` is unauthenticated — it is the first thing a stranger says. On plain IP there is nothing to check it against, and an enforcer that binds pubkey to address does so on the peer's own say-so: claim a paying peer's key and your address rides their budget — all of it, including what they left behind in an earlier session.
 
 A FIPS address is a commitment to a key. The mesh routes to it only for the node that completed the Noise IK handshake for that key, so an impostor cannot receive at the address it would have to claim. `enforcer.identity: pubkey`, the default under `enforcer.kind: fips`, therefore turns on the check: every control connection, accepted or dialled, must come from the FIPS address of the key it announces, or it is dropped before a session exists.
 
@@ -219,7 +219,7 @@ What the metrics remain good for:
 
 - **Operator visibility.** Which links are healthy, which are degrading.
 - **Capacity decisions.** How much to issue vouchers against, and how fast
-  to let a peer draw them against a grant
+  to let a peer draw them against its budget
   ([tollgate-vouchers.md](../core/tollgate-vouchers.md)).
 - **Deciding what to sell vouchers for.** An operator watching its own links
   degrade may choose to issue less or price higher on the market. That is
@@ -273,11 +273,11 @@ The following FIPS modifications are required for TollGate integration. Full det
 | Decision | Resolution | Rationale |
 |----------|-----------|-----------|
 | Integration model | Separate binaries; `tollgated` talks to FIPS over the control socket | FIPS exposes generic capabilities; independent release cycles |
-| Counter delivery | FIPS livestreams per-peer rx/tx over the control socket | `tollgate-net` always has a fresh value to draw each grant down against, without polling |
+| Counter delivery | FIPS livestreams per-peer rx/tx over the control socket | `tollgate-net` always has a fresh value to draw each budget down against, without polling |
 | Forwarding policy | Per-peer `local_only` or `full`, enforced by FIPS | Simple data-plane policy, not a control-plane hook |
 | Default new-peer policy | `local_only` | Closes race window between FIPS auth and TollGate detection |
 | Bloom filter control | Inferred from forwarding policy, exactly when the peer is carried; no removal delay | Never advertise a peer the gate drops, nor hide one it carries |
-| Metering counters | Per-peer watch channels from FIPS | Continuous push, drawn against the peer's grant |
+| Metering counters | Per-peer watch channels from FIPS | Continuous push, drawn against the peer's budget |
 | Metrics | Streaming subscription on the control socket | Operator tools read cached values; no per-call IPC |
 | Message transport (initial) | Raw TCP over the FIPS IPv6 adapter | Works today with no FIPS session-layer changes, and needs no TLS — Noise IK already encrypts the link |
 | Message transport (future) | Native FSP port | Optimization; removes the TCP handshake per session |
@@ -288,7 +288,7 @@ The following FIPS modifications are required for TollGate integration. Full det
 
 ## Per-Peer Rate
 
-A grant buys a rate, so the node has to deliver an arbitrary bytes-per-second
+A payer buys a speed, so the node has to deliver an arbitrary bytes-per-second
 figure, not an on/off decision. Over FIPS that is FIPS's job: shaping outside
 FIPS only reaches part of the traffic — `tc` on the TUN interface can shape
 what terminates at or originates from this node, but **transit never traverses
@@ -337,7 +337,7 @@ Encapsulation):
 | Phase | Goal | Payments |
 |-------|------|----------|
 | 1 | Binary allow/deny on GRE tunnel | None — connectivity only |
-| 2 | TollGate grants on the tunnel interface | Cashu grants via nft/tc/BPF |
+| 2 | TollGate budgets on the tunnel interface | Shaping and counting via nft/tc/BPF |
 | 3 | Full FIPS-only network (no IP internally) | Market for exit access |
 
 ### Proof of Concept

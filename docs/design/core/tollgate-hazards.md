@@ -21,9 +21,9 @@ property.
 What remains is the base rule itself. Each side pays for what it receives, so
 with the default multiplier of `0` a node pays a peer 1× for the traffic that
 peer uploads to it. A peer can therefore push traffic nobody asked for and have
-it drawn against a grant the receiver bought. That exposure is bounded by the
-receiver alone: it is never more than the grant the receiver chose to buy from
-that peer, and a node that does not want to pay for a peer's uploads sets the
+it drawn against a budget the receiver bought. That exposure is bounded by the
+receiver alone: it is never more than the budget the receiver chose to hold
+with that peer, and a node that does not want to pay for a peer's uploads sets the
 multiplier to `1` (free) or higher (charged).
 Accepting traffic can be faked — the peer takes it, bills for it, and discards
 it, having done no work. Under such a price, discarding becomes the most
@@ -73,7 +73,7 @@ that is self-limiting — the customer leaves. With a negative one it pays the
 peer more for being worse, and the incentive runs the wrong way with no bound.
 
 There is no formula to attack today, because delivery has no price. Prepaid
-grants harden this further: counters are local, never exchanged, and decide no
+budgets harden this further: counters are local, never exchanged, and decide no
 payment at all ([tollgate-metering.md](tollgate-metering.md)). A peer cannot
 move money by reporting anything, because it reports nothing.
 
@@ -85,63 +85,58 @@ power to move a payment.
 
 ## Unspent Capacity Must Expire
 
-A grant is a quantity paired with a window, and what is not drawn by the
-window's deadline is forfeit. In superseding mode, the default, it is also
-forfeit when a new grant replaces it
-([tollgate-vouchers.md](tollgate-vouchers.md)). That looks harsh, and the
-temptation is to soften it: credit the remainder into the next grant, let a
-small allowance accumulate, extend the deadline instead of replacing it.
+A payer's budget has a deadline, and what is left of it at the deadline
+expires ([tollgate-vouchers.md](tollgate-vouchers.md#the-one-rule)). Without a
+deadline a provider would owe service forever for units sold once, and would
+have to keep every payer's record forever to honor it.
 
-Each of those turns a rate back into a stored quantity. Capacity is
-perishable — an unsold second is gone whether or not anyone paid for it — so a
-claim that never expires lets a buyer accumulate cheaply off-peak and present
-the whole position at peak, which is when the capacity is scarce. The seller
-sold bandwidth and delivered volume.
+The deadline is all that expires. A new purchase adds to what is left and
+forfeits nothing, and it moves the deadline to the later of the old one and
+now plus its window. So **a payer can keep a budget alive by buying again
+before each deadline**, however little it buys. That is accepted. It is safe
+because of what the budget does and does not entitle the payer to, not
+because the budget is kept small:
 
-Two bounds hold it, and both are needed:
+- **A reserved rate drains idle time.** While a payer reserves a rate, every
+  second it is carried costs it at least that rate, used or not. Holding a
+  reservation through a quiet hour costs a quiet hour at that rate, so a
+  reserved payer cannot buy capacity cheaply off-peak and save it for the busy
+  hour: what it saves, it pays for second by second.
+- **A payer that reserves nothing is owed no speed.** Its budget is drawn only
+  by what it moves, so it may keep units for a month. But the provider
+  promised it nothing: the speed it is carried at is spare capacity, which the
+  provider may give or withhold at any moment
+  ([Speed Above the Reserved Rate](tollgate-vouchers.md#speed-above-the-reserved-rate)).
+  A large budget is a claim on units, not on the busiest hour.
+- **Admission control counts only reservations.** Every reserved rate the
+  provider accepts fits under its capacity at once
+  ([tollgate-protocol.md](tollgate-protocol.md#0x05-topupreject)). Nothing a
+  payer holds in its budget can push that sum past capacity.
 
-- **Forfeiture** at the deadline, so a claim cannot outlive its window.
-- **`max_window_ms`**, so a window cannot be made long enough to span from
-  off-peak to peak. Without it a payer defeats forfeiture by never letting a
-  window end.
+What a provider must therefore never do is promise speed it did not admit:
+carry unreserved payers or bursts at a fixed speed, and then sell
+reservations up to the full link as well. The operator leaves room for what it
+gives above reservations, or gives it only when there is spare capacity
+([tollgate-configuration.md](tollgate-configuration.md#burst)).
 
-This holds in both accounting modes. The same reasoning is why the minimum
-flow allowance is a rate rather than a per-interval quantity. A quantity
-accumulates; a rate cannot.
+What remains, which the rule limits but does not remove:
 
-### When the Window Can Be Long
+- **The payer carries the risk of what it holds.** A payer has paid as far
+  ahead as it chose to. If the provider defaults, disappears or loses its disk,
+  the payer loses its whole budget. A deadline that passes while the provider
+  is down takes the budget too, though nothing is drawn while the payer is not
+  carried.
+- **A carried budget goes to whoever holds the identity.** Under
+  `enforcer.identity: address` a key is not proven, so whoever comes back with
+  a departed payer's key from its address can draw its whole budget — not
+  only the seconds of one purchase. Under `pubkey` the network proves the key
+  and this does not arise.
+- **A carried budget is drawn at the session's multiplier.** A provider that
+  raises its received multiplier between sessions reprices units already sold,
+  from the payer's next session on.
 
-Accumulative mode ([tollgate-vouchers.md](tollgate-vouchers.md#accumulative-a-running-budget))
-softens the rule on purpose, in the ways listed above: a new grant adds to
-what is left, and the operator sets `max_window_ms` to a month or a year.
-Capacity still expires, at the deadline. The window can be that long only
-because the speed comes from a cap rather than from `grant / window`:
-**`accounting.rate_cap`**, so a budget is spent no faster than the cap, however
-large it is.
-
-What remains, which that bound limits but does not remove:
-
-- **The buyer carries the risk of what it prepays.** A superseding payer has
-  paid at most one short window ahead. An accumulative payer has paid as far
-  ahead as it chose to. Units it has not used by the deadline expire, and if
-  the provider defaults, disappears or loses its disk, the payer loses all of
-  them. The provider, for its part, owes service it has already been paid for,
-  which it has to keep on disk and honor.
-- **Stockpiling for the busiest hour.** A buyer can buy whenever vouchers are
-  cheap or the link is quiet and spend at the busiest hour, and keep a budget
-  alive by buying again before its deadline. Every buyer can do the same at
-  the same hour. The provider cannot refuse it then: the budget is already
-  sold, and accumulative mode has no committed rate for admission control to
-  check. At peak, N accumulative peers can each draw up to their rate cap, and
-  if N caps exceed the link, every peer on it — superseding ones included —
-  gets less than it paid for. `rate_cap` bounds it, not the size of any
-  budget; an operator selling in this mode sizes the caps against the link, or
-  accepts that the link is shared at peak.
-- **A carried budget is drawn at the session's multiplier.** A budget carried
-  into a new session is drawn at that session's received multiplier, so
-  raising the multiplier between sessions reprices units already sold.
-
-Superseding mode stays the default because it needs none of this weighed.
+The same reasoning is why the minimum flow allowance is a rate rather than a
+per-interval quantity. A quantity accumulates; a rate cannot.
 
 ---
 
@@ -187,7 +182,7 @@ deposit, or an operator allowlist. None is specified.
 | Never pay a peer a bonus to send or accept traffic | Peers profiting from traffic nobody wants |
 | No price-aware routing | Cheapest route being a blackhole |
 | Metrics never price inputs | A peer degrading its link to move its own price |
-| Unspent capacity expires, and windows are capped — in accumulative mode, where windows are long by the operator's choice, each peer's speed is capped as well | Buying capacity off-peak to present at peak |
+| Unspent capacity expires at a deadline; reserved rates drain idle time; only reservations are admitted against capacity | Providers owing service forever, and capacity bought off-peak being presented at peak |
 | Free peering not transitive | Laundered free transit |
 | Locks survive every swap | Locks removed by swapping through change |
 | Aggregate caps on anything granted per peer | Free identities multiplying anything given away |

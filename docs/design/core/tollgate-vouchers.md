@@ -81,58 +81,21 @@ split and combine like any other token.
 Other resources use their own quantity unit: watt-hours for electricity, mL
 for water. The existing keyset machinery covers all of them unchanged.
 
-### Two Accounting Modes
+### A Budget and a Deadline
 
-A proof holds a quantity and nothing else. To turn it into service, the payer
-pays in **grants**: a number of units, paired with a **window** the payer
-names. The window sets the grant's **deadline**, and whatever is left of it at
-the deadline is forfeit. That is the same for every provider.
+A proof holds a quantity and nothing else. To turn quantities into service,
+the provider keeps one account for each peer that pays it:
 
-What differs is how the provider keeps its accounts with the payer, and a
-provider does it in one of two ways. That choice is its **accounting mode**,
-and it changes two things only:
+- a **budget**: the units the payer has paid for and not yet used
+- a **deadline**: when whatever is left of the budget expires
+- a **reserved rate**: the speed the payer has booked, in units per second
 
-| | **Superseding** (the default) | **Accumulative** |
-|---|---|---|
-| A new grant | Replaces the one in force. What was left of it is forfeit | Adds to what is left, and moves the deadline to now plus the new window |
-| The speed | `grant / window`, bought by the payer | A cap the provider sets per peer |
-
-Why two: some buyers want speed and some want volume. A router reselling its
-uplink is selling speed. Capacity it does not sell this second is gone, so it
-wants buyers to pay for the second, not for a stock of bytes to use later.
-That is superseding, with windows of seconds, and it is the default because it
-is the safe one
-([tollgate-hazards.md](tollgate-hazards.md#unspent-capacity-must-expire)). A
-phone on a data pack wants the opposite: pay for 1 GB, use it over the month,
-and lose nothing by being idle for an hour. That is accumulative, with windows
-of weeks.
-
-The provider picks the mode, per node and if it likes per peer, and says which
-in its Offer ([tollgate-protocol.md](tollgate-protocol.md#0x01-offer)). The
-payer does not choose. It buys in the mode it is offered, or it does not buy.
-The mode is fixed for the session.
-
-Everything else is the same in both modes: one voucher per unit, the same
-channels, the same TopUp message with the same window, the same deadline, the
-same metering, and the same enforcers.
-
-Selling **time** — an hour at a fixed speed — is not a third mode. It is
-superseding with the buyer holding one rate. See
-[Selling Time](#selling-time).
-
-### Buying a Rate
-
-In superseding mode the buyer wants a rate, so the rate is expressed by pairing
-a quantity with a **window** — a span of time the buyer names, inside which
-that quantity may be drawn:
-
-```
-rate = grant / window
-
-  5,120 bytes over 5 s      1 KiB/s      (2 proofs)
-512,000 bytes over 5 s    100 KiB/s      (6 proofs)
-512,000 bytes over 1 s    500 KiB/s      (same 6 proofs, shorter window)
-```
+A payment is a **grant**: a number of units, sent with a **window** and a
+reserved rate, both chosen by the payer. The grant is **added** to the
+budget. Nothing already in the budget is lost when a new grant arrives. The
+window moves the deadline: it becomes the later of the old deadline and now
+plus the window, so a grant never brings a deadline closer. The reserved rate
+replaces the one before it.
 
 The window lives in the signed channel state, not in the money. That matters:
 a proof denominated in bytes-per-second would only be meaningful against some
@@ -144,202 +107,175 @@ lets vouchers trade at a single price on a market.
 Amounts are ordinary Cashu amounts needing no special handling:
 `5,120 = 4096 + 1024`, and `512,000 = 125 × 4096` where 125 has six bits set.
 
-### Grants Replace Each Other
+### The One Rule
 
-In superseding mode a grant is this many units, spendable within this
-window, starting when the provider receives it. Buying again **replaces** the
-grant in force. Whatever was left of the old one is forfeit at that moment, and
-the provider keeps the payment.
+Every second, the provider takes units out of the budget:
 
 ```
-t=0   buy 6.25 M units, window 5 s      1.25 M/s, expires t=5
-t=3   buy   100 M units, window 5 s     20 M/s,   expires t=8
-      the 2.5 M left from the first grant burn at t=3
+drawn each second = max(units moved, reserved rate × 1 s)
 ```
 
-This is what makes the product bandwidth rather than a stored quantity of
-bytes. Capacity is perishable — a second of it that goes unsold is gone whether
-or not anyone paid, and the buyer carries that risk on the seconds it bought.
-Without forfeiture, a buyer could accumulate claims off-peak and present them
-all at peak, which is selling volume, not bandwidth.
+`units moved` is the peer's traffic in that second, its uploads weighted by
+the received multiplier ([below](#the-received-multiplier)). Whatever is left
+when the deadline comes expires, and the provider keeps the payment.
 
-**Raising the rate costs the remainder**, so the exchange rate between
-responsiveness and waste is set by window length:
+That one rule sells two things, and the only difference between them is the
+reserved rate the payer picks:
 
-| Situation | Forfeit | As a share of the new grant |
-|---|---|---|
-| 1.25 M/s, 2 s left, jump to 20 M/s | 2.5 M | 2.5% |
-| 20 M/s, 4 s left, jump to 24 M/s | 80 M | 67% |
+- **Time at a speed.** The payer reserves a rate. Each second costs at least
+  that rate, whether the payer uses it or not, because the provider has set
+  that capacity aside for it. A second it moves more costs what it moved.
+- **Pay for what you use.** The payer reserves nothing. An idle second costs
+  nothing, and a busy one costs what it moved. The budget lasts until it is
+  used up or the deadline comes.
 
-Large jumps are cheap and small adjustments are punitive, which discourages
-fiddling and holds down the provider's verification load. A buyer that wants
-fine control uses short windows, where the forfeit can never exceed one
-window's worth. That costs more messages, and `min_window_ms` is where the
-provider says how many it will take.
+Nothing is negotiated. A provider says what it will
+accept in its Offer — the windows, the smallest reserved rate, and how often a
+peer may buy ([tollgate-protocol.md](tollgate-protocol.md#0x01-offer)) — and
+each payer picks inside that. A provider that sets a smallest reserved rate
+above zero sells only time at a speed.
 
-**The rate is fixed for the life of the grant** at `grant / window`. Capacity
-left unused early is not banked for later — otherwise a buyer that waited would
-be entitled to an unbounded burst just before the deadline.
+A budget smaller than its reserved rate times its window runs out before the
+deadline. The payer then falls to the minimum flow allowance until it buys
+again. That is the payer's own sizing, not something the provider checks.
 
-### Accumulative: A Running Budget
+### Time at a Speed
 
-In accumulative mode a new grant does not replace what was left of the last
-one. It adds to it. The sum is the payer's **budget**: the units it has paid
-for and not yet used. Traffic takes units out of it, weighted exactly as in
-superseding mode ([The Received Multiplier](#the-received-multiplier)).
-Nothing else does, until the deadline.
-
-Each grant moves the deadline to now plus its own window, for the whole
-budget. A payer that keeps buying keeps its budget; one that stops loses
-what is left at the deadline of its last grant, exactly as a superseding grant
-expires.
-
-Take a phone that buys 1 GB from a hotspot that sells in accumulative mode,
-capped at 10 MB/s per peer, with a 30-day window:
+A buyer wants 5 Mbit/s, which is 625,000 bytes a second. It asks for 10 s
+windows and buys again 2 s before its budget would run out:
 
 ```
-day 0, t=0       buy 1,000 MB, window 30 days    budget 1,000 MB   deadline day 30
-t=0 – 30 s       downloads 300 MB at 10 MB/s     budget   700 MB
-t=30 s – 1 h     idle                            budget   700 MB   nothing drains
-t=1 h            downloads 250 MB                budget   450 MB
-day 3            buys 500 MB, window 30 days     budget   950 MB   deadline day 33
-day 33           nothing bought since            what is left expires
+t=0    TopUp: grant 6,250,000, window 10 s, reserved 625,000/s
+                                    budget 6,250,000   deadline t=10
+t=0–8  draws 625,000 a second, used or not
+       (t=3–5 idle: still 625,000 a second)
+t=8                                 budget 1,250,000   left over, kept
+t=8    TopUp: grant 5,000,000, window 10 s, reserved 625,000/s
+                                    budget 6,250,000   deadline t=18
+t=16   TopUp: grant 5,000,000, ...  budget 6,250,000   deadline t=26
+...    every 8 s, 5,000,000: exactly 625,000 a second
 ```
 
-The same purchase in superseding mode, with the 30 s longest window a provider
-accepts by default:
+The buyer adds back only what was drawn since its last purchase, so its
+budget stays the same size from one purchase to the next. The 1.25 M left at
+each purchase is not paid for twice: it stays in the budget and is drawn in
+the next seconds like any other unit. Renewing early costs nothing, so the
+buyer can renew as early as it likes to be safe from a late message.
+
+When the buyer stops, the budget drains at the reserved rate and reaches zero
+at the deadline, because it was sized at the reserved rate times the window.
+Nothing is left over to expire.
+
+### Pay for What You Use
+
+A phone buys 1 GB from a hotspot that accepts windows up to 30 days and lets
+payers reserve nothing:
 
 ```
-t=0          buy 1,000 MB over 30 s          33 MB/s until t=30 s
-t=0 – 9 s    downloads 300 MB
-t=9 – 30 s   idle
-t=30 s       the 700 MB left expire          nothing left
+day 0      TopUp: grant 1,000 MB, window 30 days, reserved 0
+                                    budget 1,000 MB    deadline day 30
+day 0      downloads 300 MB         budget   700 MB
+           idle for an hour         budget   700 MB    nothing drawn
+           downloads 250 MB         budget   450 MB
+day 3      TopUp: grant 550 MB, window 30 days, reserved 0
+                                    budget 1,000 MB    deadline day 33
+day 33     nothing bought since     what is left expires
 ```
 
-**The window can be long because the speed is not in it.** In superseding
-mode the window divides the grant into a rate, so a 30-day window would buy a
-trickle. In accumulative mode the provider shapes each peer to a speed it
-configures for that peer, its **rate cap** (`accounting.rate_cap`), or not at
-all if it sets none. The window only says how long the budget lasts. As the
-budget nears zero the provider also slows the peer so that the budget cannot
-be overrun before the next time it reads its counters — see
-[Grant State](tollgate-protocol.md#grant-state). At zero the peer falls to the
-minimum flow allowance, exactly as when a superseding grant expires.
+The phone too adds back only what it used. How fast it is carried is the
+hotspot's choice, from what its reserved payers leave
+([Speed Above the Reserved Rate](#speed-above-the-reserved-rate)).
 
-So an accumulative provider simply accepts much longer windows: its
-`max_window_ms` is a month, or a year, where a superseding provider's is
-seconds. The bound means the same in both modes — the longest window this
-node accepts.
+### Speed Above the Reserved Rate
 
-**The budget belongs to the payer, not to the session or to a channel.** The
-provider keeps it in its own state and writes it to disk beside its channel
-backups, so it survives a reconnect, a channel rollover, a channel settlement
-and a restart of the provider, until its deadline. A phone that walks out of
-range and comes back still has its 700 MB. The money for it is already in the
+The reserved rate is what the provider has promised. The provider counts
+every payer's reserved rate against what it can carry
+([tollgate-protocol.md](tollgate-protocol.md#0x05-topupreject)), so all of
+them can be served at once. Anything above that is **spare capacity**, and
+the provider may give it or keep it. How fast it carries each payer is its
+own policy, set in its configuration rather than in the protocol
+([tollgate-configuration.md](tollgate-configuration.md#burst)):
+
+- a payer that reserved a rate is carried at least at that rate. With no
+  burst set, which is the default, it is carried at exactly that rate
+- a payer that reserved nothing is carried at whatever speed the provider
+  chooses for it
+
+Either way the enforcer is handed one number per payer, the speed it is
+shaped to, and draws are still `max(units moved, reserved rate × 1 s)`. A
+payer that bursts above its reserved rate pays for what it moved, and its
+budget runs down faster.
+
+Near the end of a budget the provider slows the payer, so it cannot move more
+in one tick than is left. At zero it falls to the minimum flow allowance.
+
+### A Budget Belongs to the Payer
+
+A budget is the payer's, not a channel's and not a session's. The provider
+keeps it in its own state and writes it to disk beside its channel backups,
+so it survives a reconnect, a channel rollover, a channel settlement and a
+restart of the provider, until its deadline. A phone that walks out of range
+and comes back still has its 700 MB. The money for it is already in the
 provider's hands: the channel updates that bought it are what the provider
-settles. So settling a channel changes nothing about the budget, and the
-budget does not tie a channel to its window — see
-[Safety Margin](tollgate-payment-channels.md#safety-margin).
+settles, so settling a channel does not touch the budget.
 
-Besides at its deadline, a budget is also lost when:
+The reservation is different: it lasts for the session. When a session ends,
+the provider stops setting capacity aside for the payer and stops drawing for
+it. A payer that comes back gets its budget and deadline, reserves again with
+its next purchase, and until then is carried as a payer that reserved
+nothing.
 
-- the provider loses the disk it was written to
-- the payer comes back under a different identity — a new key, or under
-  `enforcer.identity: address` a different address
+**The provider draws only while it is carrying the payer.** A second in which
+the session is down, the provider is restarting, or its enforcer is not
+connected costs the payer nothing, reserved rate or not. The deadline does not
+stop, though: a budget whose deadline passes during an outage is lost.
 
-None of these refunds anything. The units were paid for when they were
-bought, and the protocol has no message that hands vouchers back.
-
-**The payer chooses how much to prepay.** There is no limit on how much one
-peer may hold unspent. The payer carries the risk of what it prepays: units it
-has not used by the deadline expire, and a provider that fails or disappears
-takes the rest with it. A payer may top up in small steps to limit its own
-exposure. How much a peer can draw at the provider's busiest hour is bounded by
-its rate cap, not by the size of its budget.
-
-**What it costs the provider.** It takes on a liability: units it has been
-paid for and not yet delivered, possibly for weeks, and possibly wanted all at
-once by every peer at its busiest hour. That is why accumulative mode is a
-choice and never the default
-([tollgate-hazards.md](tollgate-hazards.md#when-the-window-can-be-long)). The
-rate cap bounds how fast a large budget can be spent.
-
-### Selling Time
-
-An operator who wants to sell **an hour at 1 MB/s** needs no third mode. A
-fixed speed for a fixed time is superseding mode with a buyer that always
-buys the same rate and keeps renewing it. The hour is how many vouchers the
-buyer holds, not anything the protocol knows about.
-
-```
-rate pinned:      1,000,000 bytes/s      (buying.min_rate = buying.max_rate)
-window:           30 s                   (the provider's longest)
-each grant:       30,000,000 bytes
-renewed:          1.2 s before each deadline, so every 28.8 s
-forfeit per grant: 1.2 MB, 4%
-an hour:          3,600 / 28.8 = 125 grants = 3,750 MB of vouchers
-```
-
-The 30 s window does not get in the way. A buyer renews inside it for as long
-as it holds vouchers, and the hour is simply 125 renewals. The price of that
-is the forfeit on each renewal, 4% here, which the seller can build into what
-it charges for "an hour". It drains whether the buyer uses it or not, which is
-what selling time means.
-
-In superseding mode, raising `max_window_ms` to the whole hour is not the
-answer:
-
-- **The channel would have to outlive it.** The safety margin before a
-  channel's expiry is twice the longest window
-  ([Safety Margin](tollgate-payment-channels.md#safety-margin)), and a
-  channel must live at least twice its margin. A one-hour window means
-  channels of at least four hours, and money locked up for that long.
-- **The buyer would risk the whole hour.** A grant is forfeit if the link
-  drops or the buyer wants to change speed. With 30 s windows the most it
-  loses is 30 s; with an hour it loses whatever is left of the hour.
-- **The anti-hoarding bound would go.** `max_window_ms` is what stops a buyer
-  buying capacity off-peak to spend at peak. An hour-long window spans both.
-
-An operator who still wants longer superseding windows may raise
-`max_window_ms`; nothing forbids it. The channel TTL then has to grow with it,
-which `tollgated` enforces at startup.
+A budget is also lost when the payer comes back under a different identity —
+a new key, or under `enforcer.identity: address` a different address — and
+when the provider loses the disk it was written to. Nothing is refunded. The
+units were paid for when they were bought, and the protocol has no message
+that hands vouchers back.
 
 ### How a Buyer Buys
 
-A node buys in one mode only: its own `accounting.mode`. It buys from the
-providers whose Offer is in that mode, and skips the others, with a line in
-its log. The buyer's job is different in each mode, because what it can lose
-is different.
+A buyer chooses three things for each provider: a reserved rate, a window,
+and how large a budget to hold.
 
-**Superseding.** The buyer buys a rate and has to renew it before its deadline,
-or the peer falls to the minimum flow allowance. It renews a little before the
-deadline (`buying.renew_lead_ms`). Between renewals it only buys again when
-demand has risen a lot (`buying.raise_threshold_pct`), because buying early
-forfeits what is left. That threshold is hysteresis: it stops the buyer
-throwing away a little of every grant to follow every small change in demand.
+- **Reserved rate.** To buy time at a speed, the buyer reserves a share of the
+  demand it sees, within its own bounds and never below the provider's
+  smallest. To pay for what it uses, it reserves nothing, where the provider
+  allows that.
+- **Window.** Any window in the provider's range. A long one costs nothing in
+  itself: a reserved budget drains at its rate whatever the window, and an
+  unreserved one is only drawn by traffic.
+- **Budget.** For time at a speed, the reserved rate times the window. For pay
+  per use, an amount the buyer is willing to hold with this provider.
 
-**Accumulative.** Buying early forfeits nothing, so there is nothing to time.
-The buyer watches its remaining budget instead, and tops up when it falls
-below a **low-water mark** (`buying.low_water`), by a fixed amount
-(`buying.top_up`), with a window it chooses (`buying.budget_window_ms`, no
-longer than the provider's `max_window_ms`). It needs no hysteresis: a top-up
-wastes nothing, so buying a little early costs only the money held a little
-longer. A budget that reaches its deadline is gone, so the buyer also tops up
-`buying.renew_lead_ms` before the deadline if something still wants the link.
-There is no minimum grant: a buyer whose top-up runs out before it can buy
-again falls to the minimum flow allowance, and sizing its top-ups is its own
-accounting.
+It then **adds back what has drained**. Each purchase brings the budget back
+up to the size it wants, never further, so the budget does not grow from one
+purchase to the next. It buys again a little before its budget or its
+deadline would run out, whichever comes first, and only while something wants
+the link: observed demand, or a standing demand its operator set. It changes
+its reserved rate with the same purchase, raising it at once when demand
+outgrows it. There is nothing to forfeit, so there is no reason to hold back
+a purchase.
 
-In both modes it buys only while something wants the link: observed demand,
-or the standing `buying.demand`. An idle accumulative buyer above its
-low-water mark buys nothing, and loses nothing for it until the deadline.
+It handles a refusal by its reason
+([tollgate-protocol.md](tollgate-protocol.md#0x05-topupreject)):
 
-The accumulative buyer keeps its own count of the budget between purchases,
-from what it signed and what it measured crossing the link. The provider
-corrects that count with a **Balance** message on every connection and after
-each TopUp it accepts
-([tollgate-protocol.md](tollgate-protocol.md#0x0c-balance)), so a buyer that
-reconnects learns the budget it left behind and when it expires.
+- **Too soon**: it waits out the provider's shortest gap between purchases,
+  and sends the purchase again.
+- **Capacity**: it lowers its reserved rate to what the provider says is
+  free, and holds there for a while before trying higher.
+- **Out of range**: it fixes its window or reserved rate to the Offer.
+
+The buyer keeps its own count of the budget, from what it signed and what it
+measured crossing the link. The provider also reports the budget in a
+**Balance** message ([tollgate-protocol.md](tollgate-protocol.md#0x0c-balance)).
+The buyer treats that as information, not as an instruction: it never buys
+more because a Balance says less is left than its own count does. A Balance
+below its own count is a gap between bought and delivered, and goes into the
+same score as any other ([tollgate-metering.md](tollgate-metering.md)).
 
 ### One Unit Per Resource, Many Issuers
 
@@ -375,7 +311,7 @@ below has to absorb.
 
 The base rule is unchanged and symmetric: **a node pays for what it received
 from a peer**, which is what that peer delivered. Both sides owe each other,
-both fund a channel, and each buys its own grants on its own schedule.
+both fund a channel, and each buys from the other on its own schedule.
 
 ```
 A buys from B      the right to receive        (A's download)
@@ -384,7 +320,7 @@ B buys from A      the right to receive        (A's upload)
 
 For an ordinary peering that is the whole story, and it is why **two channels
 is the default**, not an exception. The two streams are independent: different
-mints, different windows, bought at different moments.
+mints, different budgets, bought at different moments.
 
 ### The Received Multiplier
 
@@ -393,22 +329,22 @@ the base rule the relay pays the leaf for it — which is backwards when the
 relay would rather not carry it at all.
 
 A node closes the gap by adding a **surcharge on what it receives** from a
-given peer. It is applied as a weight on how fast that peer's grant is drawn
+given peer. It is applied as a weight on how fast that peer's budget is drawn
 down:
 
 ```
-B draws down A's grant as:   delivered + received × m_B
-A draws down B's grant as:   delivered + received × m_A
+B draws down A's budget as:   delivered + received × m_B
+A draws down B's budget as:   delivered + received × m_A
 ```
 
 > **`received_multiplier`** — a surcharge on units I receive from you.
 > Default `0`: no surcharge, the base rule stands.
 
-A unit A downloads draws one unit from A's grant. A unit A uploads draws `m_B`.
-So a peer that wants to push a lot has to buy a bigger grant, and the shaper
+A unit A downloads draws one unit from A's budget. A unit A uploads draws `m_B`.
+So a peer that wants to push a lot has to buy more, and the shaper
 enforces it as the traffic happens rather than a bill arriving afterward.
 
-Netted out on the leg where A uploads `X` to B, the two grants partly cancel —
+Netted out on the leg where A uploads `X` to B, the two payments partly cancel —
 B is still buying that upload from A at one unit each:
 
 | `m_B` | B pays A | A pays B | **Net per unit A uploads** |
@@ -437,12 +373,12 @@ and `0` is simply the base rule with no surcharge at all.
 
 ```
 Ordinary peering, both multipliers 0:
-  A's grant drains on A's downloads      both buy, two channels
-  B's grant drains on B's downloads
+  A's budget drains on A's downloads      both buy, two channels
+  B's budget drains on B's downloads
 
 Relay charging upload at the same rate as download, m_B = 2:
-  A's grant drains on A's downloads + 2 × A's uploads
-  B's grant drains on A's uploads
+  A's budget drains on A's downloads + 2 × A's uploads
+  B's budget drains on A's uploads
   net: A pays 1× for each, in both directions
 
 Relay on a 10:1 backhaul, m_B = 11:
@@ -451,11 +387,10 @@ Relay on a 10:1 backhaul, m_B = 11:
 </details>
 
 It is **per peer**, so a node can welcome one peer's traffic and discourage
-another's. A grant already bought keeps the multiplier it was bought under; a
-revised Offer takes effect on the next one. In accumulative mode every grant
-adds to one budget, so there the multiplier is fixed for the session, and a
-change takes effect at the payer's next session — including on a budget
-carried into it.
+another's. It is **fixed for a session**: the multiplier in the Offer that
+opened the session is the one the budget is drawn at until the session ends. A
+changed multiplier applies from the peer's next session, and a budget carried
+into that session is drawn at the new one.
 
 **The field is unsigned, and that is load-bearing.** A negative surcharge would
 mean paying a peer *on top of* already paying for its delivery — compounding
@@ -611,10 +546,8 @@ can be served, you can pay.
 
 **A fixed amount for the consumer.** A voucher's claim is a quantity, fixed
 when it is acquired. No exposure to the sat price mid-session and no price
-sheet changing underneath. What is *not* fixed, in superseding mode, is when it
-must be used: a grant carries a deadline, and capacity left unspent behind it
-is gone. In accumulative mode the deadline is weeks away rather than
-seconds, and moves with every purchase.
+sheet changing underneath. What is *not* fixed is when it must be used: a
+budget carries a deadline, and capacity left unspent behind it is gone.
 
 **Selling capacity ahead of time.** Issuing vouchers is selling capacity
 before delivering it, which is a way to raise funds. A rooftop antenna can
@@ -641,9 +574,9 @@ refuse.
 No cryptography fixes this. Two things limit it instead:
 
 - **Policy** — the loss is however many vouchers are held or committed at
-  once. Hold one grant's worth, risk one grant's worth, and the window is
-  the payer's own choice. In accumulative mode the payer risks its whole
-  unspent budget, whose size it chooses.
+  once. A payer risks its unspent budget with a provider, and how large that
+  is, is the payer's own choice: it can hold a few seconds' worth and top up
+  often, or a month's.
 - **Reputation** — an issuer that stops redeeming sees its vouchers sell for
   less, which makes everything it issues later worth less too.
 
@@ -773,7 +706,7 @@ party. Billing afterward would instead have the provider extend credit *on top*
 of the payer already holding its paper: two exposures where one will do.
 
 **Non-payment enforces itself.** A peer that stops buying simply runs out of
-grant and drops to the minimum flow allowance. Nothing has to detect it, no
+budget and drops to the minimum flow allowance. Nothing has to detect it, no
 message announces it, and there is no delivered-but-unpaid balance to chase.
 The provider's exposure is not one interval of traffic — it is nothing.
 
@@ -781,15 +714,15 @@ The provider's exposure is not one interval of traffic — it is nothing.
 rate could only change at a settlement boundary, so a traffic spike waited out
 the remainder of the interval. A grant takes effect when it arrives. Because
 the signed state is cumulative, a TopUp needs no acknowledgment, so a payer can
-send one and immediately start using the rate it just bought; the worst case is
+send one and immediately start using what it just bought; the worst case is
 a single round trip of shaping at the old rate. On an adjacent link that is
 sub-millisecond.
 
 What the payer gives up is the ability to pay only for what actually arrived.
-A grant is consumed whether or not packets land, so transit loss is the buyer's
+A budget is drawn whether or not packets land, so transit loss is the buyer's
 cost. It remains **measurable one-sided** — the payer knows what it bought and
 what arrived, both locally — so the correction needs no protocol and no
-cooperation: buy a smaller grant, or buy somewhere else. Delivered against
+cooperation: buy less, or buy somewhere else. Delivered against
 purchased is a per-provider score that informs which peerings are worth keeping
 ([tollgate-metering.md](tollgate-metering.md)).
 
@@ -805,8 +738,8 @@ purposes:
   circle.
 - **Basic access.** An operator may want any peer to be able to do the small
   things — resolve a name, fetch a message — whether or not it is paying.
-- **Keeping a link alive between grants.** A grant expires and the next one
-  has not arrived yet. Without an allowance the link would go silent, and the
+- **Keeping a link alive between purchases.** A budget runs out or expires
+  and the next purchase has not arrived yet. Without an allowance the link would go silent, and the
   peer would have no way to send the TopUp that revives it.
 
 ```yaml
@@ -817,12 +750,12 @@ access:
 ```
 
 It is a rate, not a stored quantity, and it is what a peer falls back to
-whenever its grant is exhausted or expired. That makes it the floor of the
+whenever its budget is used up or expired. That makes it the floor of the
 shaper rather than a separate mechanism.
 
 **No vouchers are issued for it.** The allowance is delivery the node gives
 away, not a payment it makes: nothing is minted, nothing changes hands, and
-nothing is drawn from a grant. Handing out free vouchers is a way of selling
+nothing is drawn from a budget. Handing out free vouchers is a way of selling
 them, and so belongs to `merchantd` and the market
 ([../market/README.md](../market/README.md)), or to `mintd`'s auto-accept
 ([tollgate-daemons.md](tollgate-daemons.md#auto-accept)) — not to the protocol.
@@ -860,12 +793,13 @@ here is protocol-side.
 | Choosing a received multiplier | Every node has to decide, per peer, how much to surcharge what that peer pushes at it. New operator work with no obvious default beyond `0`. |
 | Relays holding two kinds of vouchers | A relay that does not accept its upstream's mint burns what it is paid and has `merchantd` buy the upstream's paper with its sales revenue, continuously. Accepting the upstream's mint with `keep` removes the problem; not every relay can. |
 | Minimum-flow abuse | N free identities draw N allowances of real bandwidth, and one machine can run all N over the same link. Needs an aggregate cap across unpaid peers plus a cost to holding an identity. |
-| Choosing a window | The payer trades responsiveness against forfeiture and message count, with no obvious default. A provider's `[min_window_ms, max_window_ms]` bounds it but does not choose it. |
-| Multiplier on a carried budget | In accumulative mode the received multiplier is fixed for the session, but a budget carried into a later session is drawn down at that session's multiplier. A provider that raises it between sessions reprices units it has already sold. |
-| Claiming someone else's budget | Under `enforcer.identity: address` a key is not proven, so a carried budget is restored only to the same key from the same address. A device that takes over a departed payer's address and announces its key still gets its budget. Under `pubkey` the network proves the key and this does not arise. |
-| Spending ceiling in accumulative mode | `buying.max_rate` caps what a superseding buyer spends per second. An accumulative buyer tops up by `buying.top_up` whenever it falls below its low-water mark, and nothing caps what that adds up to over a day except the wallet behind it. |
+| Choosing a budget | The payer trades message count against how much it holds with one provider. A provider's window range bounds the window but does not choose the size. |
+| Deadlines kept alive by tiny purchases | A payer can keep a budget from expiring forever by buying one unit before each deadline. Accepted: a reserved budget drains anyway, and an unreserved one is never owed speed, so a long-lived budget is no claim on the busiest hour — see [Design Decisions](#design-decisions). |
+| Claiming someone else's budget | Under `enforcer.identity: address` the network does not prove a key, so a carried budget is restored to whoever comes back with the payer's key from the payer's address. A device that takes over a departed payer's address and announces its key can draw the whole budget. Under `pubkey` the network proves the key and this does not arise. |
+| Deadline during an outage | The provider draws nothing while it is not carrying a payer, but the deadline keeps running. A budget whose deadline passes while the provider or its enforcer is down is lost. |
 | Under-delivery has no public evidence | A payer measures delivered against purchased from its own counters and can act on it, but cannot show it to anyone else. A provider skimming a few percent from every peer stays invisible outside those peerings. Revisitable as a reporting path if it proves common. |
-| Admission control policy | A provider can refuse a grant that would oversubscribe, but nothing says how it should divide capacity between peers that all want more, or whether an existing grant may be honored at a reduced rate rather than run to its deadline. |
+| Admission control policy | A provider can refuse a reserved rate that would oversubscribe, but nothing says how it should divide capacity between peers that all want more, or whether a reservation may be honored at a reduced rate. |
+| Sharing spare capacity | Speed above the reserved rate is the provider's to give. Today that is a fixed setting per node or per peer; nothing shares it out by load. |
 | Atomic spent-proof check | The spent-proof set lives in `mintd` alone, so check-and-set is one process's transaction. Straightforward, but unspecified. |
 
 ---
@@ -880,32 +814,28 @@ here is protocol-side.
 | Token vs proof | One token buys one grant; the proofs inside it are the power-of-two pieces its amount decomposes into | Only the proof count changes with amount, and the spent-proof set records proofs — which is what makes channels necessary |
 | Unit | Fixed by the resource, one per resource, and always a quantity — watt-hours, not watts | Every node selling the same resource denominates the same way, which is what makes one issuer's vouchers comparable to another's |
 | Network unit | The byte | Metering is exact and no payment rounds. The cost is proof count: a 23-bit grant amount takes ~11–12 proofs, which the spent-proof set has to absorb |
-| Buying a rate | A grant: a quantity paired with a window the payer names. `rate = grant / window` | A proof holds a quantity and nothing else, so time belongs in the signed state. A bytes-per-second keyset would make proofs from different windows non-interchangeable and break the accepted-mint set |
-| Payment timing | Prepaid — the grant is bought before the traffic it covers | Holding a voucher is already a claim on the issuer, so prepaying adds no new exposure. Postpaying would add provider credit risk on top of it. Non-payment then enforces itself: the grant runs out |
-| Accounting modes | Two, set by the provider per node and per peer, and carried in the Offer: superseding and accumulative | Some buyers want speed and some want volume, and neither model sells the other well. One protocol with a mode keeps the channels, the TopUp, metering and enforcers the same for both |
-| One window model | Every grant has a window and a deadline in both modes. The mode decides only what a new grant does to the old one (replace and forfeit, or add and move the deadline) and where the speed comes from (`grant / window`, or a per-peer cap) | One grant shape and one message shape, so the mode is two switches rather than two protocols. The rule that unspent capacity expires holds in both |
-| Default mode | Superseding | It is the mode that keeps capacity perishable on a scale of seconds, so it is safe to leave on without thinking. Accumulative trades that away for convenience, which an operator should do on purpose |
-| Grant semantics (superseding) | A new grant replaces the one in force; the remainder is forfeit | This is what makes the product bandwidth rather than stored volume. Without forfeiture a buyer accumulates claims off-peak and presents them at peak |
-| Grant semantics (accumulative) | A new grant adds to what is left and moves the deadline to now plus its window | Pay for what you use. The hoarding it allows is bounded by a per-peer rate cap, and still by the deadline |
-| Long accumulative windows | Not a separate setting: an accumulative node sets `max_window_ms` much larger, a month or a year | The bound means one thing in both modes, the longest window accepted. In accumulative mode the window no longer sets the speed, so a long one is safe |
-| Budget lifetime | Kept per payer in the provider's state across reconnects, rollovers, settlements and restarts, written to disk, until its deadline | The budget is already paid for, so losing it at a reconnect would take a phone's money for walking out of range. The deadline keeps the provider from owing service indefinitely |
-| Budget size | No limit; the payer chooses how much to prepay | The payer carries the risk of what it prepays: unspent units expire at the deadline, and a provider that fails loses what it holds. How much a peer can draw at the busiest hour is bounded by `rate_cap`, its speed, not by the size of its budget. And the provider already holds the money |
-| Speed in accumulative mode | A per-peer rate cap set by the provider, or none; slowed near zero so the budget is not overrun | The window no longer divides out a rate. A cap keeps a large budget from being spent any faster than a small one |
-| Selling time | Superseding with a pinned rate, renewed inside the usual windows; not a third mode | A fixed speed for a fixed time is exactly a rate renewed. Raising `max_window_ms` to the interval would force long-lived channels, put the whole interval at risk on a dropped link, and undo the anti-hoarding bound |
-| Buying across modes | A node buys only from providers whose Offer is in its own `accounting.mode`, and skips the others | A relay cannot hedge buying in one mode and selling in the other: what it owes and what it holds would expire on different terms. One buyer algorithm per node. A bridge between the modes is possible with two nodes and a balancer between them, or a custom implementation |
-| Accumulative buyer | Tops up by a fixed amount below a low-water mark, with a long window of its own choosing; no hysteresis | Buying early forfeits nothing, so there is nothing to time |
-| Minimum grant | None | A buyer that tops up too little and cannot buy again in time falls to the minimum flow allowance. That is the buyer's own accounting, and the provider loses nothing by it: `min_topup_gap_ms` already bounds how often it is asked to verify a TopUp |
-| Rate within a grant | Fixed at `grant / window`, not banked (superseding) | Otherwise a buyer that waited would be owed an unbounded burst just before the deadline |
-| Reaction latency | One message, no acknowledgment | Cumulative signed state makes TopUp idempotent, so fire-and-forget is safe and a payer can use a rate the moment it buys it |
-| Who pays | Each side pays for what it received, in the vouchers of whoever delivered it | Symmetric and unchanged. Both owe by default, so both fund a channel and buy their own grants |
+| Accounting | One budget, one deadline and one reserved rate per payer. A grant adds to the budget; the deadline becomes the later of the old one and now plus the window | A proof holds a quantity and nothing else, so time belongs in the signed state. A bytes-per-second keyset would make proofs from different windows non-interchangeable and break the accepted-mint set |
+| The one rule | Every second the provider draws `max(units moved, reserved rate × 1 s)`; what is left expires at the deadline | One formula sells both products. A reserved rate makes it time at a speed, because idle seconds drain; no reservation makes it pay for what you use. The payer picks, inside what the provider allows |
+| Nothing forfeit at a purchase | A grant adds; the leftover stays in the budget | A buyer renewing early pays for each second once. Replacing the leftover would charge it twice for whatever it renewed ahead of time |
+| Deadline | The later of the old deadline and now plus the window, so a purchase never brings it closer | The payer chose a window for the units it already holds. A shorter window on a later purchase should not take them away |
+| Long-lived budgets | A payer may keep a budget alive indefinitely by buying before each deadline, even a single unit. Accepted | It cannot be used to hoard peak capacity: while a payer reserves a rate, idle seconds drain the budget at that rate, so holding a reservation costs what it promises; and a payer that reserves nothing is owed no speed at all, only what the provider chooses to spare |
+| Speed above the reserved rate | Provider policy, not protocol; the enforcer still receives one rate | The provider promises the reserved rate and admits reservations against its capacity. What it gives beyond that is spare capacity, which it may give or withhold |
+| Budget lifetime | The payer's, kept across reconnects, rollovers, settlements and restarts, until its deadline. The reservation lasts only for the session | The budget is already paid for. A reservation sets capacity aside, which a payer that is not connected has no use for |
+| Outages | Nothing is drawn while the provider is not carrying the payer; the deadline still runs | The payer should not pay for seconds it could not be served. The deadline is kept so that a budget always ends |
+| Multiplier | Fixed for a session; a change applies from the next | Every grant adds to one budget, so a multiplier that changed mid-session would reprice units already bought |
+| Payment timing | Prepaid — the budget is bought before the traffic it covers | Holding a voucher is already a claim on the issuer, so prepaying adds no new exposure. Postpaying would add provider credit risk on top of it. Non-payment then enforces itself: the budget runs out |
+| Reaction latency | One message, no acknowledgment | Cumulative signed state makes TopUp idempotent, so fire-and-forget is safe and a payer can use what it bought the moment it buys it |
+| Buyer | Adds back what has drained, renews before its budget or deadline runs out, and acts on a refusal by its reason | Nothing is forfeit, so there is nothing to time and no reason to hold a purchase back. Topping up only what drained keeps a budget the same size from one purchase to the next |
+| Balance | Reported by the provider, kept by the payer as information only | A payer that reconnects cannot otherwise know what it left behind. Treating the number as an instruction would let a provider that understates it make the payer buy more |
+| Who pays | Each side pays for what it received, in the vouchers of whoever delivered it | Symmetric and unchanged. Both owe by default, so both fund a channel and each keeps a budget with the other |
 | Acquiring vouchers | Not a protocol concern — see the market documents. Inside a node, `merchantd` acquires; `tollgated` asks it per funding | The direct route from the issuer is enough to operate, and checking a voucher takes one hop. The protocol daemon holds nothing of value |
-| Received multiplier | An unsigned surcharge per peer on what that peer pushes at us, applied as a consumption weight on its grant, default `0` | Net rate is `m − 1`, so `1` makes a peer's upload free, `2` charges it like a download, `k + 1` charges it `k` times. Unsigned, so a node can never pay a bonus on top of what it already owes for delivery |
+| Received multiplier | An unsigned surcharge per peer on what that peer pushes at us, applied as a consumption weight on its budget, default `0` | Net rate is `m − 1`, so `1` makes a peer's upload free, `2` charges it like a download, `k + 1` charges it `k` times. Unsigned, so a node can never pay a bonus on top of what it already owes for delivery |
 | Accepted mints | One ordered list, at least one entry, no prices | One unit of account network-wide makes any mint's vouchers usable. A relay accepting its upstream's mint can spend what it receives without converting |
 | Accepted-mint haircuts | None — accept or refuse | What an issuer's paper is worth belongs on the market, not in a settlement discount |
 | After settlement | Own vouchers burned at `mintd`; another mint's kept (deposited with `merchantd`) or burned, set per mint | The claim on this node has been honored. Whether another issuer's paper is worth anything depends on the relationship — see [tollgate-daemons.md](tollgate-daemons.md) |
 | Foreign voucher cost | Gives up free settlement, local double-spend checks, and payment-liveness-equals-service-liveness | Those three properties hold only for own vouchers. The accepted set is the operator's explicit list, any mint; each costs reachability, and credit only if kept |
 | Market operations | Separate endpoints and protocol; never TollGate messages | Buying and swapping is not paying for delivery. A node offering neither is fully functional — see [market-protocol.md](../market/market-protocol.md) |
-| Minimum flow allowance | A floor on the shaping rate, not a stored quantity | It is what a peer falls back to when its grant expires, which is what keeps a link alive long enough to send the next TopUp. Being a rate, it cannot be accumulated |
+| Minimum flow allowance | A floor on the shaping rate, not a stored quantity | It is what a peer falls back to when its budget runs out or expires, which is what keeps a link alive long enough to send the next TopUp. Being a rate, it cannot be accumulated |
 | Allowance vouchers | None — the allowance is delivery, not payment | Free vouchers are `merchantd`'s or `mintd` auto-accept's matter. As a rate it cannot be resold or accumulated, so there is nothing to lock |
 | Spilman channels | Kept, to bound the issuer's database rather than to prevent theft | The spent-proof set is ~700× larger without channels |
 | Cryptographic effort | Concentrate on the exchange step | The only step with a real adversary once the issuer redeems its own vouchers |
