@@ -416,7 +416,7 @@ moves, so a buyer that finds it above its own limit
 ([tollgate-configuration.md](tollgate-configuration.md#buying)) buys nothing
 from that provider and pays nothing.
 
-**The weight is unsigned, and that is load-bearing.** It cannot go below `0`,
+**The weight is unsigned, on purpose.** It cannot go below `0`,
 so a provider can make what the payer sends free but can never pay a customer
 a bonus for sending. A negative weight would let a customer earn back its
 budget by generating traffic nobody wants — the sink hazard
