@@ -14,9 +14,10 @@
 //!   the window, or the fixed budget of a pay-per-use buyer — and never
 //!   further.
 //! - **When.** Before the budget, at the rate it is drawn, or the deadline
-//!   runs out; at once when demand outgrows the rate reserved; and never
-//!   sooner after the last purchase than the provider's gap. Only while
-//!   something wants the link.
+//!   runs out; at once when demand outgrows the rate reserved, or when a
+//!   session resumed with a budget has to reserve again; and never sooner
+//!   after the last purchase than the provider's gap. Only while something
+//!   wants the link, or a reservation is being made again.
 
 use crate::buyer::state::{Buyer, BuyerPolicy, Leg, Purchase, Terms, Trigger};
 use crate::grant::{budget_for, units_in};
@@ -46,9 +47,17 @@ pub fn poll(buyer: &Buyer, policy: &BuyerPolicy, demand: Demand, now: Millis) ->
     let terms = demand.terms;
 
     // Only while something wants the link: observed demand, or the standing
-    // demand the operator set.
+    // demand the operator set — or a reservation the last session held, which
+    // a session resumed with a budget makes again at once. Until it does, the
+    // provider carries it as a payer that reserved nothing, and demand on the
+    // new link may not have been observed yet.
     let wanted_rate = demand.observed_rate.max(policy.demand);
-    if wanted_rate == 0 {
+    let resume = if policy.reserve {
+        buyer.resume_rate(now)
+    } else {
+        0
+    };
+    if wanted_rate == 0 && resume == 0 {
         return None;
     }
 
@@ -60,7 +69,11 @@ pub fn poll(buyer: &Buyer, policy: &BuyerPolicy, demand: Demand, now: Millis) ->
         return None;
     }
 
-    let reserve = reserved_rate(buyer, policy, terms, wanted_rate, now)?;
+    let reserve = if wanted_rate > 0 {
+        reserved_rate(buyer, policy, terms, wanted_rate, now)?
+    } else {
+        fit_rate(buyer, policy, terms, resume, now)?
+    };
     let window_ms = terms.clamp_window(policy.window_ms);
     let size = if policy.reserve {
         budget_for(reserve, window_ms)
@@ -76,7 +89,7 @@ pub fn poll(buyer: &Buyer, policy: &BuyerPolicy, demand: Demand, now: Millis) ->
     let draining = buyer.reserved().max(demand.observed_rate);
     let running_out = remaining <= units_in(draining, lead) || now + lead >= buyer.deadline();
 
-    let trigger = if reserve > buyer.reserved() && wanted_rate > buyer.reserved() {
+    let trigger = if reserve > buyer.reserved() && wanted_rate.max(resume) > buyer.reserved() {
         if !buyer.started {
             Trigger::First
         } else if buyer.cap(now).is_some() {
@@ -168,7 +181,26 @@ fn reserved_rate(
 ) -> Option<u64> {
     let rate = if policy.reserve {
         let with_headroom = (wanted as u128) * (policy.headroom_pct as u128) / 100;
-        (with_headroom.min(u64::MAX as u128) as u64).max(policy.min_rate)
+        with_headroom.min(u64::MAX as u128) as u64
+    } else {
+        0
+    };
+    fit_rate(buyer, policy, terms, rate, now)
+}
+
+/// Fit a reserved rate to the operator's bounds, the provider's smallest, and
+/// any ceiling the provider has told us about.
+///
+/// `None` when nothing fits.
+fn fit_rate(
+    buyer: &Buyer,
+    policy: &BuyerPolicy,
+    terms: Terms,
+    rate: u64,
+    now: Millis,
+) -> Option<u64> {
+    let rate = if policy.reserve {
+        rate.max(policy.min_rate)
     } else {
         0
     };

@@ -332,6 +332,10 @@ Nothing has been released yet. Everything below is on `master` and will ship as
   (false pays per use and holds `budget` units), `budget`,
   `max_from_payer_weight` and an optional `max_rate`; `window_ms` defaults to
   10 s. `raise_threshold_pct` is gone, with the forfeit it guarded against.
+  A buyer of time at a speed that comes back to a budget reserves again at
+  once, at the rate it held, with the one-unit purchase a TopUp needs if its
+  budget is full: the provider carries it as a payer that reserved nothing
+  until it does, and demand on the new link may not have been seen yet.
 
 - `grants` defaults to windows of 1 s to 30 days, `min_reserved_rate: 0` and
   `min_topup_gap_ms: 1000`; `tollgated` refuses to start with a shortest window

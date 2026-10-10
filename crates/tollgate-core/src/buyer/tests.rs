@@ -610,6 +610,62 @@ fn a_new_session_keeps_our_count_and_reserves_again() {
 }
 
 #[test]
+fn a_resumed_buyer_reserves_again_at_once_with_nothing_observed() {
+    // The provider carries a payer that came back as one that reserved
+    // nothing until its next TopUp. Demand is a reading of the old link, so
+    // none may be observed yet on the new one; the rate held before stands.
+    let mut buyer = opened(CAPACITY);
+    buy(&mut buyer, &policy(), demand(400_000), Millis(0));
+    buyer.restart();
+    assert_eq!(buyer.resume_rate(Millis(100)), 500_000);
+
+    let p = poll(&buyer, &policy(), demand(0), Millis(100)).expect("should buy");
+    assert_eq!(p.trigger, Trigger::First);
+    assert_eq!(p.reserved_rate, 500_000);
+    assert_eq!(p.grant, 1, "the budget is as big as wanted: one unit");
+    buyer.record(p, Millis(100));
+    assert_eq!(buyer.resume_rate(Millis(100)), 0, "once is enough");
+    assert!(poll(&buyer, &policy(), demand(0), Millis(400)).is_none());
+
+    // A pay-per-use buyer has nothing to reserve again.
+    let (ppu, d) = pay_per_use();
+    let mut buyer = opened(CAPACITY);
+    buy(&mut buyer, &ppu, d, Millis(0));
+    buyer.restart();
+    assert!(poll(&buyer, &ppu, demand(0), Millis(100)).is_none());
+}
+
+#[test]
+fn a_resumed_buyer_with_no_budget_left_waits_for_demand() {
+    let mut buyer = opened(CAPACITY);
+    buy(&mut buyer, &policy(), demand(400_000), Millis(0));
+    buyer.restart();
+    assert_eq!(buyer.resume_rate(Millis(2_000)), 0, "past the deadline");
+    assert!(poll(&buyer, &policy(), demand(0), Millis(2_000)).is_none());
+}
+
+#[test]
+fn a_resumed_buyer_refused_as_too_soon_tries_again_after_the_gap() {
+    let mut buyer = opened(CAPACITY);
+    buy(&mut buyer, &policy(), demand(400_000), Millis(0));
+    buyer.restart();
+    let p = buy(&mut buyer, &policy(), demand(0), Millis(100));
+    buyer.record_reject(
+        &refused(&p),
+        ReasonCode::TooSoon,
+        u64::MAX,
+        Millis(110),
+        10_000,
+    );
+    assert!(
+        poll(&buyer, &policy(), demand(0), Millis(250)).is_none(),
+        "not inside the provider's gap"
+    );
+    let p = poll(&buyer, &policy(), demand(0), Millis(300)).expect("after it");
+    assert_eq!(p.reserved_rate, 500_000);
+}
+
+#[test]
 fn our_count_ends_the_reservation_at_zero_and_at_the_deadline() {
     let mut buyer = opened(CAPACITY);
     buy(&mut buyer, &policy(), demand(400_000), Millis(0));

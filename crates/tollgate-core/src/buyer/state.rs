@@ -308,6 +308,7 @@ pub struct Prior {
     pub(super) deadline: Millis,
     pub(super) reserved: u64,
     pub(super) started: bool,
+    pub(super) resumed: u64,
     pub(super) grant: u64,
 }
 
@@ -341,6 +342,15 @@ pub struct Buyer {
     pub(super) last_topup: Option<Millis>,
     /// Whether anything has been bought in this session.
     pub(super) started: bool,
+    /// The rate we had reserved when the last session ended, until we buy in
+    /// this one.
+    ///
+    /// The provider ends a reservation with the session and carries a payer
+    /// that comes back with a budget as one that reserved nothing, until its
+    /// next TopUp. Our count may say that budget lasts a while yet, so a
+    /// buyer of time at a speed buys at once to reserve again, rather than
+    /// when the budget runs low.
+    pub(super) resumed: u64,
     /// The reserved rate the provider last told us it would accept, from a
     /// TopUpReject, and until when we keep to it.
     ///
@@ -375,6 +385,7 @@ impl Buyer {
             second: None,
             last_topup: None,
             started: false,
+            resumed: 0,
             capped_at: None,
             last_grant: 0,
             prior: None,
@@ -427,6 +438,27 @@ impl Buyer {
         self.last_topup
     }
 
+    /// The rate to reserve again at once, at `now`: the one reserved when the
+    /// last session ended, while nothing has been bought in this one and we
+    /// carry a budget into it. `0` otherwise.
+    pub fn resume_rate(&self, now: Millis) -> u64 {
+        if self.started || self.remaining_at(now) == 0 {
+            0
+        } else {
+            self.resumed
+        }
+    }
+
+    /// Start over with no channel, as a peer that lost the ones we paid it on
+    /// makes us, keeping only the rate we would reserve again with the budget
+    /// it may still hold for us.
+    pub fn start_over(&mut self) {
+        *self = Self {
+            resumed: self.resumed,
+            ..Self::new()
+        };
+    }
+
     /// The reserved-rate ceiling in force, if a provider named one recently
     /// enough.
     pub(super) fn cap(&self, now: Millis) -> Option<u64> {
@@ -445,8 +477,10 @@ impl Buyer {
     ///
     /// The budget is ours, and the provider keeps it across sessions, so our
     /// count of it stays too. The reservation does not: it ends with the
-    /// session at the provider, so the next purchase reserves again, and it
-    /// may come at once since the provider starts the gap over as well.
+    /// session at the provider, so the next purchase reserves again. It is
+    /// made at once, at the rate reserved before if nothing is observed yet
+    /// (see [`Self::resume_rate`]), since the provider starts the gap over as
+    /// well.
     pub fn restart(&mut self) {
         // The part second since the last whole one, up to the last reading,
         // as the provider draws it when the session ends.
@@ -454,7 +488,13 @@ impl Buyer {
             let owed = second.close(second.last_read(), self.reserved);
             self.take(owed);
         }
+        let resumed = if self.started {
+            self.reserved
+        } else {
+            self.resumed
+        };
         *self = Self {
+            resumed,
             active: self.active,
             next: self.next,
             pending: self.pending,
@@ -728,6 +768,7 @@ impl Buyer {
             deadline: self.deadline,
             reserved: self.reserved,
             started: self.started,
+            resumed: self.resumed,
             grant: purchase.grant,
         });
 
@@ -754,6 +795,7 @@ impl Buyer {
         self.deadline = self.deadline.max(now + purchase.window_ms);
         self.reserved = purchase.reserved_rate;
         self.started = true;
+        self.resumed = 0;
         self.last_topup = Some(now);
         self.last_grant = purchase.grant;
         self.second.get_or_insert(Second::starting(now));
@@ -824,6 +866,7 @@ impl Buyer {
             self.deadline = prior.deadline;
             self.reserved = prior.reserved;
             self.started = prior.started;
+            self.resumed = prior.resumed;
         }
     }
 }

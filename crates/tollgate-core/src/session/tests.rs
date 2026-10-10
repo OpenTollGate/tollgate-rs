@@ -3232,37 +3232,42 @@ fn a_budget_outlives_the_session_but_the_reservation_does_not() {
         "nothing set aside while away"
     );
 
-    // Demand is a reading of the old link, so the new one starts without it
-    // and nothing is bought until the host reports some.
+    // The budget comes back and the reservation does not: A is told so.
     link.now = link.now + 500;
     link.connect();
-
-    let b_to_a = link.b.sessions.peer(&a).expect("session");
-    assert_eq!(
-        b_to_a.grant.budget(link.now),
-        before,
-        "the budget came back"
-    );
-    assert_eq!(b_to_a.grant.reserved_rate(), 0, "the reservation did not");
-    assert_eq!(
-        link.b_shapes_a(),
-        2_097_152,
-        "carried as a payer that reserved nothing, clipped to what is left"
-    );
-    assert_eq!(
-        link.a.balances.last(),
-        Some(&(
+    assert!(
+        link.a.balances.contains(&(
             b,
             Balance {
-                remaining: 2_500_000,
+                remaining: before.remaining,
                 expires_in_ms: 1_500,
                 reserved_rate: 0,
             }
         )),
-        "and A is told what it left behind"
+        "A is told what it left behind, and that nothing is reserved"
     );
 
-    // A reserves again with its next purchase.
+    // So A reserves again at once, at the rate it had, though demand is a
+    // reading of the old link and none has been seen on the new one yet. Its
+    // budget is as big as it wants, so it buys the one unit a TopUp must.
+    let b_to_a = link.b.sessions.peer(&a).expect("session");
+    assert_eq!(b_to_a.grant.reserved_rate(), 1_250_000);
+    assert_eq!(b_to_a.grant.remaining(), before.remaining + 1);
+    assert_eq!(link.b_shapes_a(), 1_250_000);
+    assert_eq!(
+        link.a.balances.last().map(|(_, b)| b.reserved_rate),
+        Some(1_250_000)
+    );
+}
+
+#[test]
+fn a_payer_that_comes_back_without_its_channel_reserves_again_once_it_has_one() {
+    // B restarted and kept only A's budget, on disk: A's channel is gone, so
+    // A funds another, and reserves again on it at once, before the budget it
+    // still holds runs low.
+    let mut link = Link::with_grace(60_000);
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
     link.deliver(
         true,
         Event::DemandObserved {
@@ -3270,7 +3275,18 @@ fn a_budget_outlives_the_session_but_the_reservation_does_not() {
             rate: 1_000_000,
         },
     );
-    assert_eq!(link.b_shapes_a(), 1_250_000);
+    link.blip();
+    let saved = link.b.saved.clone();
+    link.b = Node::new(b, grace_policy("https://b.example/mint", 60_000));
+    link.b.saved = saved;
+    link.b.next_channel = 0x70;
+    link.now = link.now + 500;
+    link.connect();
+
+    let b_to_a = link.b.sessions.peer(&a).expect("session");
+    assert_eq!(b_to_a.grant.channels().len(), 1, "a new channel");
+    assert_eq!(b_to_a.grant.reserved_rate(), 1_250_000, "reserved again");
+    assert_eq!(b_to_a.grant.remaining(), 2_500_001);
 }
 
 #[test]

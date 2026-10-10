@@ -26,7 +26,7 @@ use tollgate_protocol::{
 
 use crate::access::AccessLevel;
 use crate::action::Action;
-use crate::buyer::{self, Buyer, BuyerPolicy, Demand, RolloverReason, Terms};
+use crate::buyer::{self, BuyerPolicy, Demand, RolloverReason, Terms};
 use crate::config::{NodePolicy, PeerPolicy};
 use crate::event::Event;
 use crate::grant::{self, Admission, Budget, Verdict};
@@ -878,8 +878,10 @@ impl Sessions {
         }
         // From nothing, then. That includes whatever the last session had
         // asked the host for and not had back: the channel funded below
-        // replaces it, so a late answer to one of those is superseded.
-        session.buyer = Buyer::new();
+        // replaces it, so a late answer to one of those is superseded. The
+        // rate we reserved before is kept, to reserve again once the channel
+        // is up if the peer still holds a budget for us.
+        session.buyer.start_over();
 
         // Fund the channel we will pay them on, against the earliest mint in
         // their list we can use. Their own mint need not be in it: a
