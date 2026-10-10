@@ -438,6 +438,11 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 ### Fixed
 
+- `tollgated --report` no longer logs a rate near 2^64 in its `link` line
+  after a peer reconnects. The line subtracted the last reading of a counter
+  that had started again from zero; a counter below its last reading now
+  counts from zero.
+
 - A channel funding that fails is reported to core after a wait, one second
   doubling to 30 s, core's funding timeout, and reset once a funding toward
   that peer succeeds. Core asks again on the tick after it hears of a failure,

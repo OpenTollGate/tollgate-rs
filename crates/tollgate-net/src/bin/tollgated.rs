@@ -358,8 +358,8 @@ async fn main() -> Result<()> {
                         peer = %peer,
                         shaped = enforcer.shaping_rate(peer),
                         demand = enforcer.demand(peer),
-                        down = (now.from_payer - was_received) / secs,
-                        up = (now.to_payer - was_delivered) / secs,
+                        down = per_second(now.from_payer, was_received, secs),
+                        up = per_second(now.to_payer, was_delivered, secs),
                         "link"
                     );
                 }
@@ -368,6 +368,15 @@ async fn main() -> Result<()> {
     }
 
     node.run(config, interrupted()).await
+}
+
+/// Units a second between two readings of a cumulative counter, `secs` apart.
+///
+/// A counter counts from zero again when the peer reconnects, so one lower
+/// than the last reading counted all of `now` since then.
+fn per_second(now: u64, was: u64, secs: u64) -> u64 {
+    let moved = if now >= was { now - was } else { now };
+    moved / secs.max(1)
 }
 
 /// Resolves on the first interrupt or termination signal.
@@ -394,5 +403,22 @@ async fn interrupted() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::per_second;
+
+    #[test]
+    fn a_rate_between_two_readings() {
+        assert_eq!(per_second(15_000, 5_000, 2), 5_000);
+        assert_eq!(per_second(5_000, 5_000, 2), 0);
+    }
+
+    #[test]
+    fn a_counter_that_started_again_is_not_read_as_a_huge_rate() {
+        // A reconnect: the counter is back near zero, below the last reading.
+        assert_eq!(per_second(3_000, 9_000_000, 1), 3_000);
     }
 }
