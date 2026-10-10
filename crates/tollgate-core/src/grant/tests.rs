@@ -74,12 +74,22 @@ fn buy(
     }
 }
 
-/// Draw a second at a time from `from` to `to`, moving `moved` each second, as
-/// a provider carrying the payer all that time would.
+/// Read the meter once a second from second `from` to second `to`, moving
+/// `moved` each second, as a provider carrying the payer all that time would.
 fn carry(state: &mut GrantState, from: u64, to: u64, moved: u64) {
-    for _ in from..to {
-        state.draw(moved, SECOND);
+    for t in from..to {
+        state.draw(moved, Millis((t + 1) * SECOND));
     }
+}
+
+/// Read the meter every 100 ms through one second starting at `from_ms`,
+/// moving `moved[i]` in the i-th tenth. Returns what was drawn.
+fn tenths(state: &mut GrantState, from_ms: u64, moved: [u64; 10]) -> u64 {
+    let mut drawn = 0;
+    for (i, m) in moved.into_iter().enumerate() {
+        drawn += state.draw(m, Millis(from_ms + (i as u64 + 1) * 100));
+    }
+    drawn
 }
 
 // ---------------------------------------------------------------------------
@@ -166,25 +176,126 @@ fn a_busy_second_costs_what_it_moved() {
         Millis(0),
     );
 
-    assert_eq!(state.draw(2_000_000, SECOND), 2_000_000);
+    assert_eq!(state.draw(2_000_000, Millis(SECOND)), 2_000_000);
     assert_eq!(state.remaining(), 4_250_000);
 }
 
 #[test]
-fn the_reserved_floor_is_drawn_for_the_time_carried() {
-    // Ticks need not be a second: a tenth of a second at 625,000 a second is
-    // 62,500, and no time at all draws only what moved.
+fn a_burst_inside_a_second_at_or_under_the_reserved_rate_costs_the_reserved_rate() {
+    // The rule is per second, not per meter reading. Read ten times a second,
+    // a second whose traffic all came in one tenth is drawn the reserved
+    // rate, not the reserved rate for nine idle tenths plus the burst.
+    const RATE: u64 = 625_000;
+    let mut state = opened(ROOMY);
+    buy(&mut state, &[update(1, 6_250_000)], 10_000, RATE, Millis(0));
+
+    let mut burst = [0; 10];
+    burst[4] = 400_000;
+    assert_eq!(tenths(&mut state, 0, burst), RATE, "under the rate");
+
+    burst[4] = RATE;
+    assert_eq!(tenths(&mut state, 1_000, burst), RATE, "at the rate");
+
+    // What moved is drawn as it is read, so the budget the shaper sees near
+    // zero is current; only the floor waits for the second to end.
+    let before = state.remaining();
+    for t in [100, 200, 300, 400] {
+        state.draw(0, Millis(2_000 + t));
+    }
+    state.draw(400_000, Millis(2_500));
+    assert_eq!(before - state.remaining(), 400_000, "drawn when it moved");
+    for t in [600, 700, 800, 900, 1_000] {
+        state.draw(0, Millis(2_000 + t));
+    }
+    assert_eq!(before - state.remaining(), RATE, "topped up to the floor");
+}
+
+#[test]
+fn a_burst_above_the_reserved_rate_costs_what_it_moved() {
+    const RATE: u64 = 625_000;
+    let mut state = opened(ROOMY);
+    buy(&mut state, &[update(1, 6_250_000)], 10_000, RATE, Millis(0));
+
+    let mut burst = [0; 10];
+    burst[2] = 500_000;
+    burst[7] = 400_000;
+    assert_eq!(tenths(&mut state, 0, burst), 900_000);
+    assert_eq!(state.remaining(), 6_250_000 - 900_000);
+}
+
+#[test]
+fn a_reserved_rate_changed_mid_second_splits_it() {
+    // Half a second at 625,000 a second, then a purchase that doubles it: the
+    // first half is drawn at the old rate, and a new second starts at the new
+    // one.
     let mut state = opened(ROOMY);
     buy(
         &mut state,
-        &[update(1, 6_250_000)],
+        &[update(1, 10_000_000)],
         10_000,
         625_000,
         Millis(0),
     );
+    for t in [100, 200, 300, 400, 500] {
+        state.draw(0, Millis(t));
+    }
+    buy(
+        &mut state,
+        &[update(1, 10_000_001)],
+        10_000,
+        1_250_000,
+        Millis(500),
+    );
+    assert_eq!(state.remaining(), 10_000_001 - 312_500, "half at the old");
 
-    assert_eq!(state.draw(0, 100), 62_500);
-    assert_eq!(state.draw(10, 0), 10);
+    let drawn = tenths(&mut state, 500, [0; 10]);
+    assert_eq!(drawn, 1_250_000, "a whole second at the new");
+}
+
+#[test]
+fn a_purchase_at_the_same_rate_does_not_split_the_second() {
+    // Renewing mid-second changes nothing about the second being drawn: a
+    // burst on either side of the purchase still counts against one floor.
+    const RATE: u64 = 625_000;
+    let mut state = opened(ROOMY);
+    buy(&mut state, &[update(1, 6_250_000)], 10_000, RATE, Millis(0));
+    state.draw(300_000, Millis(400));
+    buy(
+        &mut state,
+        &[update(1, 6_550_000)],
+        10_000,
+        RATE,
+        Millis(500),
+    );
+    state.draw(300_000, Millis(900));
+    state.draw(0, Millis(1_000));
+    assert_eq!(state.remaining(), 6_550_000 - RATE);
+}
+
+#[test]
+fn a_session_ending_mid_second_draws_that_part_of_it() {
+    // Carried for 400 ms of a second, then not: 4/10 of the floor, or what
+    // moved in that time if more.
+    const RATE: u64 = 625_000;
+    let mut state = opened(ROOMY);
+    buy(&mut state, &[update(1, 6_250_000)], 10_000, RATE, Millis(0));
+    for t in [100, 200, 300, 400] {
+        state.draw(0, Millis(t));
+    }
+    assert_eq!(state.pause(), 250_000);
+    assert_eq!(state.remaining(), 6_250_000 - 250_000);
+
+    // Not carried: nothing is drawn, whatever the time.
+    assert_eq!(state.pause(), 0);
+
+    // Carried again from a reading that starts a second, which draws only
+    // what it moved; then 400 ms more moving 300,000, and the session ends.
+    let before = state.remaining();
+    state.draw(0, Millis(5_000));
+    state.draw(300_000, Millis(5_400));
+    state.end_reservation();
+    assert_eq!(before - state.remaining(), 300_000, "more than 4/10 of it");
+    assert_eq!(state.reserved_rate(), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -200,14 +311,14 @@ fn pay_per_use_draws_only_what_moved_and_expires_at_the_deadline() {
     buy(&mut state, &[update(1, 1_000 * MB)], 30 * DAY, 0, Millis(0));
     assert_eq!(state.deadline(), Millis(30 * DAY));
 
-    state.draw(300 * MB, SECOND);
+    state.draw(300 * MB, Millis(SECOND));
     assert_eq!(state.remaining(), 700 * MB);
 
     // An idle hour draws nothing.
     carry(&mut state, 0, 3_600, 0);
     assert_eq!(state.remaining(), 700 * MB);
 
-    state.draw(250 * MB, SECOND);
+    state.draw(250 * MB, Millis(SECOND));
     assert_eq!(state.remaining(), 450 * MB);
 
     // The phone adds back what it used.
@@ -239,7 +350,7 @@ fn renewing_early_keeps_what_was_left() {
     // once.
     let mut state = opened(ROOMY);
     buy(&mut state, &[update(1, 1_000_000)], 10_000, 0, Millis(0));
-    state.draw(100_000, SECOND);
+    state.draw(100_000, Millis(SECOND));
 
     buy(
         &mut state,
@@ -294,7 +405,11 @@ fn an_overrun_is_held_at_zero_and_not_carried_as_debt() {
     let mut state = opened(ROOMY);
     buy(&mut state, &[update(1, 1_000)], 10_000, 0, Millis(0));
 
-    assert_eq!(state.draw(5_000, SECOND), 1_000, "only what was there");
+    assert_eq!(
+        state.draw(5_000, Millis(SECOND)),
+        1_000,
+        "only what was there"
+    );
     assert_eq!(state.consumed(), state.authorized());
 
     // The next purchase is all there, not eaten by the overrun.
@@ -414,7 +529,7 @@ fn near_the_end_a_payer_cannot_move_more_in_a_tick_than_is_left() {
     );
     // Rounded down to a power of two, so it changes only as the budget
     // halves, and never above what is left.
-    state.draw(1 << 20, SECOND);
+    state.draw(1 << 20, Millis(SECOND));
     assert_eq!(
         state.shaping_rate(Millis(1), NO_BURST, 0, SECOND),
         2 << 20,
@@ -767,7 +882,7 @@ fn a_new_session_keeps_the_budget_and_drops_the_reservation() {
         125_000,
         Millis(0),
     );
-    state.draw(300 * MB, SECOND);
+    state.draw(300 * MB, Millis(SECOND));
     state.topup_checked(Millis(0));
 
     state.restart(Millis(HOUR));

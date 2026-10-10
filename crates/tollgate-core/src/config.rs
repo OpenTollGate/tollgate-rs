@@ -14,8 +14,8 @@ use alloc::vec::Vec;
 /// this node will promise across all its payers.
 ///
 /// Each payer has one budget, one deadline and one reserved rate. A purchase
-/// adds to the budget, and every tick the node draws
-/// `max(units moved, reserved rate × tick)` from it.
+/// adds to the budget, and every second the node draws
+/// `max(units moved, reserved rate × 1 s)` from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantPolicy {
     /// Shortest window a TopUp may carry, in milliseconds. Never below

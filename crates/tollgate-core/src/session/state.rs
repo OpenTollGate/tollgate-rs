@@ -81,10 +81,6 @@ pub struct PeerSession {
     pub weight: u16,
     /// Cumulative counters, raw. The weight is applied when drawing down.
     pub meter: Meter,
-    /// When their budget was last drawn while we carried them, so a reserved
-    /// rate is drawn for the time between. `None` while we are not carrying
-    /// them.
-    pub drawn_at: Option<Millis>,
     /// Whether their budget had something left at the last check, so the
     /// moment it runs out or expires is noticed once: they are told with a
     /// Balance, and the host lets the record go.
@@ -150,7 +146,6 @@ impl PeerSession {
             grant: GrantState::new(),
             weight: policy.from_payer_weight.unwrap_or(1),
             meter: Meter::new(),
-            drawn_at: None,
             budget_live: false,
             balance: None,
             refused_terms: false,

@@ -7,7 +7,7 @@
 //! and now plus the window, so a grant never brings it closer. The reserved
 //! rate replaces the one before it.
 //!
-//! Every tick the provider draws `max(units moved, reserved rate × tick)` from
+//! Every second the provider draws `max(units moved, reserved rate × 1 s)` from
 //! the budget — the one rule. A reserved rate sells time at a speed, since
 //! idle seconds drain too; no reservation sells pay per use. Whatever is left
 //! at the deadline expires, and the provider keeps the payment.
@@ -25,5 +25,5 @@ mod state;
 mod tests;
 
 pub use core::{Admission, Verdict, evaluate_topup};
-pub use limits::{budget_for, per_tick_ceiling, rate_from, units_in};
+pub use limits::{SECOND_MS, Second, budget_for, per_tick_ceiling, rate_from, units_in};
 pub use state::{Budget, GrantState, IncomingChannel, MAX_VERIFICATION_FAILURES};

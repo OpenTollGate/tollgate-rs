@@ -808,11 +808,11 @@ fn a_purchase_that_overflows_is_signed_across_both_channels() {
     buyer.funded(channel(2), 1_000_000, None);
     buyer.confirmed(channel(2));
 
-    // 1.6 s at 400 k/s drew 640 k, which is more than the 200 k the channel
-    // in use can carry.
-    idle_until(&mut buyer, Millis(1_600));
+    // A second at 400 k/s drew 400 k, which is more than the 200 k the
+    // channel in use can carry. Bought inside the lead before the deadline.
+    idle_until(&mut buyer, Millis(1_000));
     let p = poll(&buyer, &policy(), demand(320_000), Millis(1_600)).expect("should buy");
-    assert_eq!(p.grant, 640_000);
+    assert_eq!(p.grant, 400_000);
 
     let first = p.first;
     let second = p.second.expect("the overflow needs its own channel");
@@ -823,7 +823,7 @@ fn a_purchase_that_overflows_is_signed_across_both_channels() {
     );
     assert_eq!(second.channel_id, channel(2));
     assert_eq!(
-        second.cumulative, 440_000,
+        second.cumulative, 200_000,
         "the remainder starts the new one"
     );
 }
@@ -837,7 +837,7 @@ fn an_exhausted_channel_is_retired_and_offered_for_settlement() {
     buyer.funded(channel(2), 1_000_000, None);
     buyer.confirmed(channel(2));
 
-    idle_until(&mut buyer, Millis(1_600));
+    idle_until(&mut buyer, Millis(1_000));
     let p = poll(&buyer, &policy(), demand(320_000), Millis(1_600)).expect("should buy");
     let retired = buyer.record(p, Millis(1_600));
 
@@ -850,7 +850,7 @@ fn an_exhausted_channel_is_retired_and_offered_for_settlement() {
     assert_eq!(buyer.next_channel(), None);
     assert_eq!(
         buyer.cumulative(),
-        440_000,
+        200_000,
         "the overflow carried onto the new channel"
     );
 }

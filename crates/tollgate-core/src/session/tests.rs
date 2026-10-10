@@ -1900,7 +1900,7 @@ fn a_buyer_refuses_a_weight_above_its_limit_and_pays_nothing() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_reserved_rate_is_drawn_every_tick_used_or_not_and_both_sides_agree() {
+fn a_reserved_rate_is_drawn_every_second_used_or_not_and_both_sides_agree() {
     // Time at a speed: B draws A's reservation while it carries A, whether A
     // moves anything or not, and A's own count of its budget follows.
     let mut link = Link::new();
@@ -1915,7 +1915,7 @@ fn a_reserved_rate_is_drawn_every_tick_used_or_not_and_both_sides_agree() {
     );
     link.deliver(true, Event::DemandObserved { peer: b, rate: 0 });
 
-    link.advance(500);
+    link.advance(1_000);
     let provider = link.b.sessions.peer(&a).expect("session").grant.remaining();
     let payer = link
         .a
@@ -1924,8 +1924,46 @@ fn a_reserved_rate_is_drawn_every_tick_used_or_not_and_both_sides_agree() {
         .expect("session")
         .buyer
         .remaining_at(link.now);
-    assert_eq!(provider, 2_500_000 - 625_000, "half a second at 1.25 M/s");
+    assert_eq!(provider, 2_500_000 - 1_250_000, "a second at 1.25 M/s");
     assert_eq!(payer, provider);
+}
+
+#[test]
+fn a_burst_read_every_100_ms_is_drawn_once_a_second_on_both_sides() {
+    // The meter is read ten times a second. A second whose traffic all came
+    // in one reading, under the reserved rate, costs the reserved rate, and
+    // the payer's own count agrees.
+    let mut link = Link::new();
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    link.deliver(true, Event::DemandObserved { peer: b, rate: 0 });
+    let provider = |link: &Link| link.b.sessions.peer(&a).expect("session").grant.remaining();
+    let payer = |link: &Link| {
+        link.a
+            .sessions
+            .peer(&b)
+            .expect("session")
+            .buyer
+            .remaining_at(link.now)
+    };
+    assert_eq!(provider(&link), 2_500_000);
+
+    for tenth in 1..=10 {
+        if tenth == 5 {
+            link.b.counted.entry(a).or_default().to_payer += 1_000_000;
+            link.a.counted.entry(b).or_default().from_payer += 1_000_000;
+        }
+        link.advance(100);
+    }
+    assert_eq!(provider(&link), 2_500_000 - 1_250_000, "one second's floor");
+    assert_eq!(payer(&link), provider(&link));
 }
 
 #[test]
@@ -1966,11 +2004,11 @@ fn nothing_is_drawn_while_the_payer_is_not_carried() {
 
     // Carried again: drawn from then on, not for the time it was not.
     carried(&mut link, true);
-    link.now = link.now + 100;
+    link.now = link.now + 1_000;
     carried(&mut link, true);
     assert_eq!(
         link.b.sessions.peer(&a).expect("session").grant.consumed(),
-        125_000
+        1_250_000
     );
 }
 

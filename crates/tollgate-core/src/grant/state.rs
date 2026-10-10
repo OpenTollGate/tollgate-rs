@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 use tollgate_protocol::ChannelId;
 
 use crate::config::BurstPolicy;
-use crate::grant::limits;
+use crate::grant::limits::{self, Second};
 use crate::time::Millis;
 
 /// Consecutive purchases on one channel that may fail verification before we
@@ -138,6 +138,9 @@ pub struct GrantState {
     /// When the payer's last TopUp had its signatures checked, whatever came
     /// of it. A TopUp refused as too soon does not move it.
     last_topup: Option<Millis>,
+    /// The second being drawn, while the payer is carried. `None` while it is
+    /// not.
+    second: Option<Second>,
 }
 
 impl GrantState {
@@ -150,6 +153,7 @@ impl GrantState {
             deadline: Millis::ZERO,
             reserved_rate: 0,
             last_topup: None,
+            second: None,
         }
     }
 
@@ -167,6 +171,7 @@ impl GrantState {
     /// row on one connection, and a payer that lost track of its total is
     /// exactly the one that reconnects and starts clean.
     pub fn restart(&mut self, now: Millis) {
+        self.pause();
         let mut channels = core::mem::take(&mut self.channels);
         for channel in &mut channels {
             channel.failures = 0;
@@ -187,6 +192,7 @@ impl GrantState {
         self.consumed = 0;
         self.deadline = budget.deadline;
         self.reserved_rate = 0;
+        self.second = None;
     }
 
     /// The budget as it stands at `now`, as the host keeps it between
@@ -199,8 +205,10 @@ impl GrantState {
         .at(now)
     }
 
-    /// End the reservation, as the session ending does. The budget stays.
+    /// End the reservation, as the session ending does. The budget stays,
+    /// less the part second carried since the last whole one.
     pub fn end_reservation(&mut self) {
+        self.pause();
         self.reserved_rate = 0;
     }
 
@@ -325,6 +333,10 @@ impl GrantState {
     /// early pays for each second once. The deadline becomes the later of the
     /// old one and now plus the window, so a purchase never brings it closer,
     /// and the reserved rate replaces the one before it, up or down.
+    ///
+    /// A reserved rate that changes splits the second being drawn: the part
+    /// before now is drawn at the old rate, and a new second starts at the
+    /// new one. A reservation is drawn from the moment it is bought.
     pub fn apply(
         &mut self,
         ratchets: &[(ChannelId, u64)],
@@ -344,27 +356,67 @@ impl GrantState {
         // A budget whose deadline has passed is gone, even if the tick that
         // would have expired it has not come round yet.
         self.expire_if_due(now);
+        if reserved_rate != self.reserved_rate
+            && let Some(second) = self.second.take()
+        {
+            let owed = second.close(now, self.reserved_rate);
+            self.take(owed);
+        }
         self.authorized = self.authorized.saturating_add(grant);
         self.deadline = self.deadline.max(now + window_ms);
         self.reserved_rate = reserved_rate;
+        self.second.get_or_insert(Second::starting(now));
     }
 
-    /// Draw one tick's worth from the budget, by the one rule:
+    /// Draw a meter reading at `now` from the budget, by the one rule:
     ///
     /// ```text
-    /// drawn = max(moved, reserved_rate × tick)
+    /// drawn each second = max(moved, reserved_rate × 1 s)
     /// ```
     ///
-    /// `moved` is already weighted by the from-payer weight, and `tick_ms` is
-    /// how long the payer was carried since the last draw. A payer that
-    /// overran its budget between two readings has `consumed` held at
-    /// `authorized`: the overrun is not carried as a debt. When the budget
-    /// reaches zero the reservation ends with it.
+    /// `moved` is what moved since the last reading, already weighted by the
+    /// from-payer weight. It is drawn at once, so the budget the shaper reads
+    /// near zero is current; the floor is drawn as each second completes, for
+    /// what the reserved rate came to beyond what moved in it (see
+    /// [`Second`]). The first reading after the payer was not carried starts
+    /// a second, and draws only what it moved.
+    ///
+    /// A payer that overran its budget between two readings has `consumed`
+    /// held at `authorized`: the overrun is not carried as a debt. When the
+    /// budget reaches zero the reservation ends with it.
     ///
     /// Returns the units drawn.
-    pub fn draw(&mut self, moved: u64, tick_ms: u64) -> u64 {
-        let reserved = limits::units_in(self.reserved_rate, tick_ms);
-        let drawn = moved.max(reserved).min(self.remaining());
+    pub fn draw(&mut self, moved: u64, now: Millis) -> u64 {
+        let rate = self.reserved_rate;
+        let owed = match self.second.as_mut() {
+            Some(second) => second.read(moved, now, rate),
+            None => {
+                let mut second = Second::starting(now);
+                second.read(moved, now, rate);
+                self.second = Some(second);
+                moved
+            }
+        };
+        self.take(owed)
+    }
+
+    /// Stop drawing: the payer is not being carried. The part second since
+    /// the last whole one is drawn by the one rule, up to the last reading,
+    /// which is as far as the payer is known to have been carried.
+    ///
+    /// Returns the units drawn.
+    pub fn pause(&mut self) -> u64 {
+        let Some(second) = self.second.take() else {
+            return 0;
+        };
+        let owed = second.close(second.last_read(), self.reserved_rate);
+        self.take(owed)
+    }
+
+    /// Take `owed` from the budget, never past zero, and end the reservation
+    /// if that empties it.
+    fn take(&mut self, owed: u64) -> u64 {
+        let drawn = owed.min(self.remaining());
         self.consumed = self.consumed.saturating_add(drawn);
         if self.remaining() == 0 {
             self.reserved_rate = 0;

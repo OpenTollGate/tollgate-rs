@@ -306,10 +306,15 @@ Nothing has been released yet. Everything below is on `master` and will ship as
   (`docs/design/core/tollgate-vouchers.md`, "The One Rule"). Each payer has a
   budget, a deadline and a reserved rate. A TopUp adds its grant to the budget
   — nothing is forfeit — moves the deadline to the later of the old one and now
-  plus its window, and replaces the reserved rate (TopUp field 3). Every tick
-  the provider draws `max(moved, reserved rate × tick)` while it carries the
+  plus its window, and replaces the reserved rate (TopUp field 3). Every second
+  the provider draws `max(moved, reserved rate × 1 s)` while it carries the
   payer, and nothing while its session is down or its enforcer is not
-  connected. A reserved rate sells time at a speed; none sells pay per use.
+  connected. What moved is drawn at each meter reading, and the floor when the
+  second is over, so traffic that comes in bursts within a second is not
+  charged the reserved rate for its quiet readings as well; a second is split
+  where a purchase changes the reserved rate, and one cut short by the session
+  ending is drawn for the part carried. The payer's own count follows the same
+  rule. A reserved rate sells time at a speed; none sells pay per use.
   Admission control sums connected payers' reserved rates against
   `grants.max_rate`, and lowering one is always accepted. Near the end of a
   budget the payer is slowed so it cannot move more in a tick than is left.

@@ -34,6 +34,7 @@
 
 use tollgate_protocol::{ChannelId, ReasonCode};
 
+use crate::grant::Second;
 use crate::time::Millis;
 
 /// How this node buys. One workable policy rather than the policy: the design
@@ -334,9 +335,8 @@ pub struct Buyer {
     /// at the deadline, and when the budget runs out, as it does at the
     /// provider.
     pub(super) reserved: u64,
-    /// When we last drew our own count down, so a reserved rate can be drawn
-    /// for the time between.
-    pub(super) drawn_at: Option<Millis>,
+    /// The second our own count is being drawn over, by the provider's rule.
+    pub(super) second: Option<Second>,
     /// When we last sent a TopUp, so the next waits out the provider's gap.
     pub(super) last_topup: Option<Millis>,
     /// Whether anything has been bought in this session.
@@ -372,7 +372,7 @@ impl Buyer {
             remaining: 0,
             deadline: Millis::ZERO,
             reserved: 0,
-            drawn_at: None,
+            second: None,
             last_topup: None,
             started: false,
             capped_at: None,
@@ -448,6 +448,12 @@ impl Buyer {
     /// session at the provider, so the next purchase reserves again, and it
     /// may come at once since the provider starts the gap over as well.
     pub fn restart(&mut self) {
+        // The part second since the last whole one, up to the last reading,
+        // as the provider draws it when the session ends.
+        if let Some(second) = self.second.take() {
+            let owed = second.close(second.last_read(), self.reserved);
+            self.take(owed);
+        }
         *self = Self {
             active: self.active,
             next: self.next,
@@ -460,21 +466,28 @@ impl Buyer {
         };
     }
 
-    /// Draw our own count down for what crossed the link, by the provider's
-    /// rule: `max(moved, reserved × time)`. `moved` is already weighted by the
-    /// provider's from-payer weight.
+    /// Draw our own count down for what crossed the link by `now`, by the
+    /// provider's rule: `max(moved, reserved × 1 s)` for each second. `moved`
+    /// is already weighted by the provider's from-payer weight.
     ///
     /// When it reaches zero the reservation ends with it, as it does at the
     /// provider.
     pub fn draw(&mut self, moved: u64, now: Millis) {
-        let elapsed = self.drawn_at.map_or(0, |at| now.saturating_since(at));
-        self.drawn_at = Some(now);
         if now >= self.deadline {
             self.remaining = 0;
             self.reserved = 0;
+            self.second = None;
             return;
         }
-        let drawn = moved.max(crate::grant::units_in(self.reserved, elapsed));
+        let rate = self.reserved;
+        let second = self.second.get_or_insert(Second::starting(now));
+        let drawn = second.read(moved, now, rate);
+        self.take(drawn);
+    }
+
+    /// Take `drawn` off our count, and end the reservation if that empties
+    /// it.
+    fn take(&mut self, drawn: u64) {
         self.remaining = self.remaining.saturating_sub(drawn);
         if self.remaining == 0 {
             self.reserved = 0;
@@ -729,15 +742,21 @@ impl Buyer {
             next.cumulative = leg.cumulative;
         }
 
+        // A changed reserved rate splits the second being drawn, as it does at
+        // the provider.
+        if purchase.reserved_rate != self.reserved
+            && let Some(second) = self.second.take()
+        {
+            let owed = second.close(now, self.reserved);
+            self.take(owed);
+        }
         self.remaining = self.remaining_at(now).saturating_add(purchase.grant);
         self.deadline = self.deadline.max(now + purchase.window_ms);
         self.reserved = purchase.reserved_rate;
         self.started = true;
         self.last_topup = Some(now);
         self.last_grant = purchase.grant;
-        if self.drawn_at.is_none() {
-            self.drawn_at = Some(now);
-        }
+        self.second.get_or_insert(Second::starting(now));
 
         // A purchase at or under the cap does not disprove it, so the cap
         // stands until it expires on its own.

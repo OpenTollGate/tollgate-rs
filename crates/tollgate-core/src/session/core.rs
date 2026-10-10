@@ -443,7 +443,6 @@ impl Sessions {
         // it is down, no capacity is set aside for it, and its budget is kept
         // on disk in case it is this node that goes next.
         session.grant.end_reservation();
-        session.drawn_at = None;
         Self::save_budget(peer, &session, now, out);
         if self.resume_grace_ms() == 0 {
             Self::discard(peer, &mut session, out);
@@ -1040,16 +1039,11 @@ impl Sessions {
 
         match verdict {
             Verdict::Accept { ratchets, grant } => {
-                // The time since the last reading was carried at the old
-                // reserved rate; draw it before the new one takes over.
-                if let Some(at) = session.drawn_at {
-                    session.grant.draw(0, now.saturating_since(at));
-                }
+                // A changed reserved rate splits the second being drawn, and
+                // a reservation is drawn from the moment it is bought.
                 session
                     .grant
                     .apply(&ratchets, grant, m.window_ms, m.reserved_rate, now);
-                // A reservation is drawn from the moment it is bought.
-                session.drawn_at = Some(now);
 
                 // Only now does the backend keep them: before this, the
                 // purchase could still have been refused, and a backend that
@@ -1119,10 +1113,10 @@ impl Sessions {
     /// A meter reading for a peer: draw its budget with us, and our own count
     /// of our budget with it.
     ///
-    /// Its budget is drawn by the one rule, `max(moved, reserved × time)`, for
-    /// the time since the last reading — but only if we were carrying it all
-    /// that time. Ours is drawn the same way, from the same counts read the
-    /// other way round and weighted by its from-payer weight.
+    /// Its budget is drawn by the one rule, `max(moved, reserved × 1 s)` for
+    /// each second — but only while we are carrying it. Ours is drawn the same
+    /// way, from the same counts read the other way round and weighted by its
+    /// from-payer weight.
     fn on_metered(
         &mut self,
         peer: PubKey,
@@ -1144,11 +1138,9 @@ impl Sessions {
         }
 
         if carried && session.access.metered() {
-            let tick_ms = session.drawn_at.map_or(0, |at| now.saturating_since(at));
-            session.grant.draw(grew.weighted(session.weight), tick_ms);
-            session.drawn_at = Some(now);
+            session.grant.draw(grew.weighted(session.weight), now);
         } else {
-            session.drawn_at = None;
+            session.grant.pause();
         }
 
         if let Some(offer) = session.offer.as_ref()
