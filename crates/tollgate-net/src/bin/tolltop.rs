@@ -10,9 +10,14 @@
 //! columns rather than one netted number, because netting them would invent a
 //! relationship the protocol does not have. A row is a summary; Enter opens
 //! everything the node knows about that peering.
+//!
+//! One machine may run several instances of `tollgated`. Without `--socket`,
+//! every running one is found and looked for again every few seconds, so ones
+//! that start or stop come and go on their own. Tab moves to the next. The
+//! frame always says which instance is on screen and how many there are.
 
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Parser;
@@ -23,16 +28,18 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
 use tollgate_net::control::{self, PeerSnapshot, Snapshot};
+use tollgate_net::instance;
 
 #[derive(Parser, Debug)]
 #[command(name = "tolltop", about = "Watch a TollGate node")]
 struct Args {
-    /// The node's control socket. Found automatically if not given.
+    /// Watch this control socket and nothing else. Without it, every running
+    /// instance is found and Tab moves between them.
     #[arg(short, long)]
     socket: Option<PathBuf>,
 
-    /// Which instance to watch, by name: its socket is
-    /// `/run/tollgate-<instance>/control.sock`. Needed only when several run.
+    /// Which instance to start on, by name: its socket is
+    /// `/run/tollgate-<instance>/control.sock`. Tab still moves to the others.
     #[arg(short, long, conflicts_with = "socket")]
     instance: Option<String>,
 
@@ -41,9 +48,129 @@ struct Args {
     interval: u64,
 }
 
+/// How often to look again for instances that started or stopped.
+const DISCOVER_EVERY: Duration = Duration::from_secs(2);
+
+/// Which node the display is on, out of the ones it can see.
+#[derive(Debug)]
+struct Instances {
+    /// Every instance found, as `(name, control socket)`, in the order
+    /// discovery gives them.
+    found: Vec<(String, PathBuf)>,
+    /// The one on screen, by name.
+    ///
+    /// Kept by name so that others starting or stopping do not move the
+    /// display. Kept even when that one stops, so a node that restarts comes
+    /// back on screen instead of the view jumping to another node.
+    current: Option<String>,
+    /// Set by `--socket`: one socket, never looked for again, no cycling.
+    pinned: bool,
+}
+
+impl Instances {
+    /// One socket the caller named.
+    fn pinned(path: PathBuf) -> Self {
+        let name = instance_name(&path).unwrap_or_else(|| path.display().to_string());
+        Self {
+            found: vec![(name.clone(), path)],
+            current: Some(name),
+            pinned: true,
+        }
+    }
+
+    /// Whatever is running, starting on `start` if it is named.
+    fn discovered(start: Option<String>) -> Self {
+        Self {
+            found: Vec::new(),
+            current: start,
+            pinned: false,
+        }
+    }
+
+    /// Take a fresh list of running instances. Returns whether the one on
+    /// screen changed.
+    fn update(&mut self, found: Vec<(String, PathBuf)>) -> bool {
+        if self.pinned {
+            return false;
+        }
+        self.found = found;
+        if self.current.is_none()
+            && let Some((name, _)) = self.found.first()
+        {
+            self.current = Some(name.clone());
+            return true;
+        }
+        false
+    }
+
+    /// Where the one on screen is in the list, if it is running.
+    fn position(&self) -> Option<usize> {
+        let current = self.current.as_deref()?;
+        self.found.iter().position(|(name, _)| name == current)
+    }
+
+    /// The control socket of the one on screen, if it is running.
+    fn socket(&self) -> Option<&Path> {
+        self.position().map(|i| self.found[i].1.as_path())
+    }
+
+    /// Move to the next running instance, wrapping at the end. Returns
+    /// whether the one on screen changed.
+    fn next(&mut self) -> bool {
+        if self.pinned || self.found.is_empty() {
+            return false;
+        }
+        let next = match self.position() {
+            Some(i) => (i + 1) % self.found.len(),
+            None => 0,
+        };
+        let name = &self.found[next].0;
+        if self.current.as_deref() == Some(name.as_str()) {
+            return false;
+        }
+        self.current = Some(name.clone());
+        true
+    }
+
+    /// Whether there is anything to cycle to.
+    fn can_cycle(&self) -> bool {
+        !self.pinned
+    }
+
+    /// Which instance is on screen, and how many there are.
+    fn title(&self) -> String {
+        if self.pinned {
+            let (name, path) = &self.found[0];
+            return match instance_name(path) {
+                Some(_) => format!("instance {name}"),
+                None => format!("socket {name}"),
+            };
+        }
+        match (&self.current, self.position()) {
+            (None, _) => "no instance running".into(),
+            (Some(name), Some(i)) => {
+                format!("instance {name} ({}/{})", i + 1, self.found.len())
+            }
+            (Some(name), None) => format!(
+                "instance {name}, not running ({} other(s) running)",
+                self.found.len()
+            ),
+        }
+    }
+}
+
+/// The instance a control socket belongs to, from its runtime directory's
+/// name: `…/tollgate-ip/control.sock` is instance `ip`.
+fn instance_name(socket: &Path) -> Option<String> {
+    let dir = socket.parent()?.file_name()?.to_str()?;
+    let name = dir.strip_prefix("tollgate-")?;
+    instance::validate(name).ok()?;
+    Some(name.to_owned())
+}
+
 /// Everything the display is currently doing, as opposed to what the node is.
 struct App {
-    socket: PathBuf,
+    instances: Instances,
     snapshot: Snapshot,
     /// Why the last refresh failed, if it did. The previous snapshot stays on
     /// screen: a node that is restarting should not erase what it was doing.
@@ -54,6 +181,25 @@ struct App {
 }
 
 impl App {
+    fn new(instances: Instances) -> Self {
+        Self {
+            instances,
+            snapshot: Snapshot::default(),
+            error: None,
+            peers: TableState::default(),
+            detail: false,
+        }
+    }
+
+    /// Forget what the last node showed, after moving to another one. Its
+    /// peers are not this one's.
+    fn reset_view(&mut self) {
+        self.snapshot = Snapshot::default();
+        self.error = None;
+        self.peers = TableState::default();
+        self.detail = false;
+    }
+
     fn selected(&self) -> Option<&PeerSnapshot> {
         self.peers
             .selected()
@@ -95,13 +241,16 @@ impl App {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(name) = &args.instance {
+        instance::validate(name)?;
+    }
     // Looked for rather than assumed: a node run by a service manager puts its
     // runtime directory in /run, one run by a person under XDG_RUNTIME_DIR,
     // and a tool that only knew one of them would report "no such file" about
     // a node that is running perfectly well.
-    let socket = match args.socket {
-        Some(path) => path,
-        None => control::find_socket(args.instance.as_deref())?,
+    let instances = match args.socket {
+        Some(path) => Instances::pinned(path),
+        None => Instances::discovered(args.instance),
     };
     let interval = Duration::from_millis(args.interval.max(50));
 
@@ -117,21 +266,32 @@ fn main() -> Result<()> {
     // most things over ssh) the old contents show through the gaps.
     let _ = terminal.clear();
 
-    let mut app = App {
-        socket,
-        snapshot: Snapshot::default(),
-        error: None,
-        peers: TableState::default(),
-        detail: false,
-    };
+    let mut app = App::new(instances);
+    let mut last_look: Option<Instant> = None;
 
     loop {
-        match runtime.block_on(control::fetch(&app.socket)) {
-            Ok(fresh) => {
-                app.snapshot = fresh;
+        // Look again now and then, so an instance that starts or stops shows
+        // up or goes away without restarting the display.
+        if last_look.is_none_or(|at| at.elapsed() >= DISCOVER_EVERY) {
+            if app.instances.update(instance::control_sockets()) {
+                app.reset_view();
+            }
+            last_look = Some(Instant::now());
+        }
+
+        match app.instances.socket() {
+            Some(socket) => match runtime.block_on(control::fetch(socket)) {
+                Ok(fresh) => {
+                    app.snapshot = fresh;
+                    app.error = None;
+                }
+                Err(e) => app.error = Some(format!("{}: {e:#}", socket.display())),
+            },
+            // Nothing to ask. The body says so, and the next look may find it.
+            None => {
+                app.snapshot = Snapshot::default();
                 app.error = None;
             }
-            Err(e) => app.error = Some(format!("{e:#}")),
         }
         app.clamp_selection();
 
@@ -152,6 +312,11 @@ fn main() -> Result<()> {
                 KeyCode::Enter => {
                     app.detail = !app.detail && app.selected().is_some();
                 }
+                KeyCode::Tab | KeyCode::Char('i') => {
+                    if app.instances.next() {
+                        app.reset_view();
+                    }
+                }
                 _ => {}
             }
         }
@@ -165,8 +330,64 @@ fn draw(frame: &mut Frame, app: &mut App) {
     let [body, footer] =
         Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).areas(frame.area());
 
-    peers_view(frame, app, body);
+    if app.instances.socket().is_some() {
+        peers_view(frame, app, body);
+    } else {
+        frame.render_widget(waiting(app), body);
+    }
     frame.render_widget(status(app), footer);
+}
+
+/// What the body says when there is no node to ask: none is running, or the
+/// one on screen has stopped.
+fn waiting(app: &App) -> Paragraph<'static> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let others: Vec<&str> = app
+        .instances
+        .found
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let mut lines = vec![match &app.instances.current {
+        Some(name) => Line::from(Span::styled(
+            format!("Instance {name} is not running."),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        None => Line::from(Span::styled(
+            "No tollgated is running.",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+    }];
+    lines.push(Line::from(""));
+    if !others.is_empty() {
+        lines.push(Line::from(format!(
+            "Running: {}. Tab moves to the next one.",
+            others.join(", ")
+        )));
+    }
+    let looked: Vec<String> = instance::bases()
+        .iter()
+        .map(|b| {
+            b.join("tollgate-*")
+                .join(instance::CONTROL_SOCKET)
+                .display()
+                .to_string()
+        })
+        .collect();
+    lines.push(Line::from(Span::styled(
+        format!("Looked for {}.", looked.join(", ")),
+        dim,
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "Looking again every {}s. q quits.",
+            DISCOVER_EVERY.as_secs()
+        ),
+        dim,
+    )));
+    Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title(" waiting "))
 }
 
 /// The peers table, with the detail beside it rather than instead of it.
@@ -179,9 +400,9 @@ fn peers_view(frame: &mut Frame, app: &mut App, area: Rect) {
         let [left, right] =
             Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
                 .areas(area);
-        // Half the width cannot hold eleven columns, so the table drops to
-        // the five that say whether this peering is working. The rest of them
-        // are in the panel beside it anyway.
+        // Half the width cannot hold every column, so the table drops to the
+        // few that say whether this peering is working. The rest of them are
+        // in the panel beside it anyway.
         peer_table(frame, app, left, true);
         frame.render_widget(peer_detail(app), right);
     } else {
@@ -191,36 +412,50 @@ fn peers_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn peer_table(frame: &mut Frame, app: &mut App, area: Rect, compact: bool) {
     let titles: &[&str] = if compact {
-        &["peer", "access", "sold", "left", "bought"]
+        &["peer", "access", "budget", "ends", "reserved", "bought"]
     } else {
         &[
-            "peer", "access", // what they bought from us
-            "sold", "left", "in", "up", // what we bought from them
-            "bought", "want", "m", "out", // and what has actually moved
-            "taken",
+            "peer",
+            "access", // what they bought from us
+            "speed",
+            "budget",
+            "ends",
+            "reserved",
+            "in", // what we bought from them
+            "bought",
+            "ends",
+            "reserved",
+            "want",
+            "w",
+            "out", // and what moved
+            "from payer",
         ]
     };
     let widths: &[Constraint] = if compact {
         &[
-            Constraint::Length(10), // peer
-            Constraint::Length(11), // access
-            Constraint::Length(12), // sold
-            Constraint::Length(7),  // left
-            Constraint::Length(12), // bought
+            Constraint::Length(8),  // peer
+            Constraint::Length(7),  // access
+            Constraint::Length(10), // budget
+            Constraint::Length(7),  // ends
+            Constraint::Length(12), // reserved
+            Constraint::Length(10), // bought
         ]
     } else {
         &[
-            Constraint::Length(10), // peer
-            Constraint::Length(11), // access
-            Constraint::Length(12), // sold
-            Constraint::Length(7),  // left
-            Constraint::Length(14), // in (channel)
-            Constraint::Length(12), // up
-            Constraint::Length(12), // bought
+            Constraint::Length(8),  // peer
+            Constraint::Length(7),  // access
+            Constraint::Length(12), // speed
+            Constraint::Length(10), // budget
+            Constraint::Length(7),  // ends
+            Constraint::Length(12), // reserved
+            Constraint::Length(13), // in (channel)
+            Constraint::Length(10), // bought
+            Constraint::Length(7),  // ends
+            Constraint::Length(12), // reserved
             Constraint::Length(12), // want
-            Constraint::Length(3),  // m
-            Constraint::Length(14), // out (channel)
-            Constraint::Length(12), // taken (a total)
+            Constraint::Length(2),  // w
+            Constraint::Length(13), // out (channel)
+            Constraint::Length(10), // from payer (a total)
         ]
     };
 
@@ -267,7 +502,7 @@ fn header_row<'a>(titles: &'a [&'a str]) -> Row<'a> {
     )
 }
 
-/// The five columns that say whether a peering is working, for when the detail
+/// The columns that say whether a peering is working, for when the detail
 /// panel has taken the rest of the width.
 fn compact_peer_row(peer: &PeerSnapshot) -> Row<'_> {
     Row::new(vec![
@@ -276,21 +511,32 @@ fn compact_peer_row(peer: &PeerSnapshot) -> Row<'_> {
             peer.access.clone(),
             access_style(&peer.access),
         )),
-        Cell::from(rate(peer.shaped_rate)),
-        Cell::from(grant_left(peer)),
-        Cell::from(rate(peer.bought_reserved_rate)),
+        Cell::from(budget(peer.budget)),
+        Cell::from(deadline(peer.budget_expires_in_ms)),
+        Cell::from(rate(peer.reserved_rate)),
+        Cell::from(budget(peer.bought_budget)),
     ])
 }
 
-/// How long the grant in force has left.
+/// What is left of a budget.
 ///
-/// A grant that has lapsed leaves the peer on the allowance, which is a normal
-/// resting state rather than a fault — so it is dimmed, not red.
-fn grant_left(peer: &PeerSnapshot) -> Span<'static> {
-    if peer.budget_expires_in_ms == 0 {
-        Span::styled("lapsed", Style::default().fg(Color::DarkGray))
+/// A budget with nothing left leaves the peer on the minimum flow allowance,
+/// which is a normal resting state rather than a fault — so it is dimmed, not
+/// red.
+fn budget(units_left: u64) -> Span<'static> {
+    if units_left == 0 {
+        Span::styled("empty", Style::default().fg(Color::DarkGray))
     } else {
-        Span::raw(format!("{:.1}s", peer.budget_expires_in_ms as f64 / 1000.0))
+        Span::raw(units(units_left))
+    }
+}
+
+/// How long until a deadline, or a dimmed dash when there is none.
+fn deadline(expires_in_ms: u64) -> Span<'static> {
+    if expires_in_ms == 0 {
+        Span::styled("—", Style::default().fg(Color::DarkGray))
+    } else {
+        Span::raw(duration(expires_in_ms))
     }
 }
 
@@ -304,9 +550,17 @@ fn peer_row(peer: &PeerSnapshot) -> Row<'_> {
             access_style(&peer.access),
         )),
         Cell::from(rate(peer.shaped_rate)),
-        Cell::from(grant_left(peer)),
+        Cell::from(budget(peer.budget)),
+        Cell::from(deadline(peer.budget_expires_in_ms)),
+        Cell::from(rate(peer.reserved_rate)),
         Cell::from(channels(&peer.incoming_channels)),
-        Cell::from(rate(peer.upload_rate)),
+        if peer.refused_terms {
+            // Their terms were refused, so there is nothing bought to show.
+            Cell::from(Span::styled("refused", Style::default().fg(Color::Yellow)))
+        } else {
+            Cell::from(budget(peer.bought_budget))
+        },
+        Cell::from(deadline(peer.bought_expires_in_ms)),
         Cell::from(rate(peer.bought_reserved_rate)),
         Cell::from(rate(peer.demand)),
         Cell::from(peer.their_from_payer_weight.to_string()),
@@ -335,9 +589,10 @@ fn peer_row(peer: &PeerSnapshot) -> Row<'_> {
 
 /// One peering, in full.
 ///
-/// The table has to fit eleven columns across a terminal, so it shows rates and
-/// elides the rest. This is where the rest goes: the whole key, the phase, the
-/// cumulative totals, and every channel rather than the first one.
+/// The table has to fit many columns across a terminal, so it shows the short
+/// form and leaves the rest out. This is where the rest goes: the whole key,
+/// the phase, both directions in full, the counters, and every channel rather
+/// than the first one.
 fn peer_detail(app: &App) -> Paragraph<'_> {
     let Some(peer) = app.selected() else {
         return Paragraph::new("no peer selected")
@@ -345,12 +600,11 @@ fn peer_detail(app: &App) -> Paragraph<'_> {
     };
 
     let dim = Style::default().fg(Color::DarkGray);
-    let field = |name: &'static str, value: String| {
-        Line::from(vec![
-            Span::styled(format!("{name:<20}"), dim),
-            Span::raw(value),
-        ])
+    let heading = Style::default().fg(Color::Cyan);
+    let field = |name: &'static str, value: Span<'static>| {
+        Line::from(vec![Span::styled(format!("{name:<20}"), dim), value])
     };
+    let text = |value: String| Span::raw(value);
 
     let mut lines = vec![
         Line::from(vec![
@@ -368,27 +622,21 @@ fn peer_detail(app: &App) -> Paragraph<'_> {
         ]),
         Line::from(""),
         // --- what they bought from us -------------------------------------
-        Line::from(Span::styled(
-            "what this peer bought from us",
-            Style::default().fg(Color::Cyan),
-        )),
-        field("shaped rate", rate(peer.shaped_rate)),
+        Line::from(Span::styled("what this peer bought from us", heading)),
+        field("budget", budget_detail(peer.budget)),
+        field("deadline", deadline_detail(peer.budget_expires_in_ms)),
+        field("reserved rate", reserved_detail(peer.reserved_rate)),
         field(
-            "grant expires in",
-            if peer.budget_expires_in_ms == 0 {
-                "lapsed — on the allowance".into()
-            } else {
-                format!("{:.1}s", peer.budget_expires_in_ms as f64 / 1000.0)
-            },
+            "from-payer weight",
+            text(format!("{}x on what they send us", peer.from_payer_weight)),
         ),
-        field("authorized", units(peer.authorized)),
-        field("consumed", units(peer.consumed)),
-        field("delivered to them", units(peer.to_payer)),
-        field("they are pushing", rate(peer.upload_rate)),
+        field("speed we allow", text(rate(peer.shaped_rate))),
+        field("authorized", text(units(peer.authorized))),
+        field("consumed", text(units(peer.consumed))),
     ];
 
     if peer.incoming_channels.is_empty() {
-        lines.push(field("channels on", "none".into()));
+        lines.push(field("channels on", text("none".into())));
     } else {
         lines.push(Line::from(Span::styled(
             format!("{:<20}", "channels on"),
@@ -403,30 +651,68 @@ fn peer_detail(app: &App) -> Paragraph<'_> {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "what we bought from this peer",
-        Style::default().fg(Color::Cyan),
+        heading,
     )));
-    lines.push(field("bought rate", rate(peer.bought_reserved_rate)));
-    lines.push(field("demand we observe", rate(peer.demand)));
-    lines.push(field("received from them", units(peer.from_payer)));
     lines.push(field(
-        "their surcharge",
-        format!("{}x on what we push", peer.their_from_payer_weight),
+        "terms",
+        if peer.refused_terms {
+            Span::styled(
+                "refused — their from-payer weight is above ours, so we buy nothing",
+                Style::default().fg(Color::Yellow),
+            )
+        } else {
+            text("accepted".into())
+        },
     ));
     lines.push(field(
+        "budget, our count",
+        budget_detail(peer.bought_budget),
+    ));
+    lines.push(field(
+        "deadline",
+        deadline_detail(peer.bought_expires_in_ms),
+    ));
+    lines.push(field(
+        "reserved rate",
+        reserved_detail(peer.bought_reserved_rate),
+    ));
+    lines.push(field(
+        "their weight",
+        text(format!(
+            "{}x on what we send them",
+            peer.their_from_payer_weight
+        )),
+    ));
+    lines.push(field(
+        "their last Balance",
+        match &peer.reported_balance {
+            Some(b) => text(balance(b)),
+            None => Span::styled("none yet", dim),
+        },
+    ));
+    lines.push(field("demand we observe", text(rate(peer.demand))));
+    lines.push(field("we are pushing", text(rate(peer.upload_rate))));
+    lines.push(field(
         "channel we pay on",
-        match &peer.outgoing_channel {
+        text(match &peer.outgoing_channel {
             Some(c) => channel_detail(c),
             None => "none".into(),
-        },
+        }),
     ));
     lines.push(field(
         "replacement funded",
-        if peer.rollover_ready {
+        text(if peer.rollover_ready {
             "yes — waiting for the one in use to fill".into()
         } else {
             "no".into()
-        },
+        }),
     ));
+
+    // --- what moved -------------------------------------------------------
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("what moved", heading)));
+    lines.push(field("to payer", text(units(peer.to_payer))));
+    lines.push(field("from payer", text(units(peer.from_payer))));
 
     Paragraph::new(lines).wrap(Wrap { trim: false }).block(
         Block::default()
@@ -434,22 +720,86 @@ fn peer_detail(app: &App) -> Paragraph<'_> {
             .title(format!(" peer {} ", short(&peer.pubkey))),
     )
 }
+
+fn budget_detail(units_left: u64) -> Span<'static> {
+    if units_left == 0 {
+        Span::styled(
+            "empty — on the minimum flow allowance",
+            Style::default().fg(Color::DarkGray),
+        )
+    } else {
+        Span::raw(units(units_left))
+    }
+}
+
+fn deadline_detail(expires_in_ms: u64) -> Span<'static> {
+    if expires_in_ms == 0 {
+        Span::styled("none", Style::default().fg(Color::DarkGray))
+    } else {
+        Span::raw(format!("in {}", duration(expires_in_ms)))
+    }
+}
+
+/// A reserved rate, or that there is none and each unit is paid as it is used.
+fn reserved_detail(units_per_second: u64) -> Span<'static> {
+    if units_per_second == 0 {
+        Span::styled("none — pay per use", Style::default().fg(Color::DarkGray))
+    } else {
+        Span::raw(rate(units_per_second))
+    }
+}
+
+/// A Balance the peer sent us, and how old it is. It is what they said, not
+/// what is true now, so its age is part of reading it.
+fn balance(b: &control::BalanceSnapshot) -> String {
+    let deadline = if b.expires_in_ms == 0 {
+        "no deadline".to_string()
+    } else {
+        format!("deadline in {}", duration(b.expires_in_ms))
+    };
+    let reserved = if b.reserved_rate == 0 {
+        "no reserved rate".to_string()
+    } else {
+        format!("reserved {}", rate(b.reserved_rate))
+    };
+    format!(
+        "{} left, {deadline}, {reserved} — said {} ago",
+        units(b.remaining),
+        duration(b.age_ms)
+    )
+}
+
 fn status(app: &App) -> Paragraph<'static> {
     let dim = Style::default().fg(Color::DarkGray);
+    // Which instance this is stays in the frame whatever else is on screen.
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" tolltop — {} ", app.instances.title()));
 
     if let Some(message) = &app.error {
         return Paragraph::new(Line::from(Span::styled(
-            format!("{}: {message}", app.socket.display()),
+            message.clone(),
             Style::default().fg(Color::Red),
         )))
-        .block(Block::default().borders(Borders::ALL).title(" tolltop "));
+        .block(block);
     }
 
-    let hints = if app.detail {
-        "esc closes   ↑↓ selects   q quits"
+    let cycle = if app.instances.can_cycle() {
+        "   tab next instance (or i)"
     } else {
-        "↑↓ selects   enter opens   q quits"
+        ""
     };
+    let hints = if app.instances.socket().is_none() {
+        format!("{}   q quits", cycle.trim_start())
+    } else if app.detail {
+        format!("esc closes   ↑↓ selects{cycle}   q quits")
+    } else {
+        format!("↑↓ selects   enter opens{cycle}   q quits")
+    };
+
+    if app.instances.socket().is_none() {
+        return Paragraph::new(Line::from(Span::styled(hints, dim))).block(block);
+    }
 
     // Which node this is stays visible whatever is open: the table above says
     // what is being looked at, not what it is being looked at *on*.
@@ -469,7 +819,7 @@ fn status(app: &App) -> Paragraph<'static> {
         ),
         Span::styled(format!("   {hints}"), dim),
     ]))
-    .block(Block::default().borders(Borders::ALL).title(" tolltop "))
+    .block(block)
 }
 
 fn access_style(access: &str) -> Style {
@@ -535,14 +885,18 @@ fn units(bytes: u64) -> String {
     }
 }
 
+/// A span of time, to the two largest units: deadlines run to thirty days,
+/// and a count in seconds that long is unreadable.
 fn duration(ms: u64) -> String {
     let secs = ms / 1000;
     if secs < 60 {
         format!("{secs}s")
     } else if secs < 3600 {
         format!("{}m{:02}s", secs / 60, secs % 60)
-    } else {
+    } else if secs < 86_400 {
         format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d{:02}h", secs / 86_400, (secs % 86_400) / 3600)
     }
 }
 
@@ -585,20 +939,27 @@ mod render_tests {
     }
 
     fn app_with_two_peers() -> App {
-        let mut app = App {
-            socket: PathBuf::from("/tmp/x.sock"),
-            snapshot: Snapshot {
-                pubkey: "02aa".into(),
-                unit: "byte".into(),
-                peers: vec![peer("02111111aaaa"), peer("02222222bbbb")],
-                ..Snapshot::default()
-            },
-            error: None,
-            peers: TableState::default(),
-            detail: false,
+        let mut app = App::new(Instances::pinned(PathBuf::from("/tmp/x.sock")));
+        app.snapshot = Snapshot {
+            pubkey: "02aa".into(),
+            unit: "byte".into(),
+            peers: vec![peer("02111111aaaa"), peer("02222222bbbb")],
+            ..Snapshot::default()
         };
         app.clamp_selection();
         app
+    }
+
+    fn running(names: &[&str]) -> Vec<(String, PathBuf)> {
+        names
+            .iter()
+            .map(|n| {
+                (
+                    n.to_string(),
+                    PathBuf::from(format!("/run/tollgate-{n}/control.sock")),
+                )
+            })
+            .collect()
     }
 
     fn render(app: &mut App) -> Vec<String> {
@@ -684,5 +1045,147 @@ mod render_tests {
         let screen = render(&mut app).join("\n");
         assert!(screen.contains("02111111aaaa"), "{screen}");
         assert!(screen.contains("what this peer bought from us"), "{screen}");
+    }
+
+    #[test]
+    fn tab_cycles_through_instances_in_order_and_wraps() {
+        let mut instances = Instances::discovered(None);
+        assert!(instances.update(running(&["fips", "ip", "lan"])));
+        assert_eq!(instances.current.as_deref(), Some("fips"));
+
+        assert!(instances.next());
+        assert_eq!(instances.current.as_deref(), Some("ip"));
+        assert!(instances.next());
+        assert_eq!(instances.current.as_deref(), Some("lan"));
+        assert!(instances.next(), "past the last comes the first");
+        assert_eq!(instances.current.as_deref(), Some("fips"));
+    }
+
+    #[test]
+    fn a_named_instance_is_where_the_display_starts() {
+        let mut instances = Instances::discovered(Some("lan".into()));
+        assert!(!instances.update(running(&["fips", "ip", "lan"])));
+        assert_eq!(
+            instances.socket(),
+            Some(Path::new("/run/tollgate-lan/control.sock"))
+        );
+        assert_eq!(instances.title(), "instance lan (3/3)");
+    }
+
+    #[test]
+    fn others_starting_or_stopping_do_not_move_the_display() {
+        let mut instances = Instances::discovered(Some("ip".into()));
+        instances.update(running(&["ip", "lan"]));
+        assert_eq!(instances.title(), "instance ip (1/2)");
+
+        instances.update(running(&["fips", "ip", "lan"]));
+        assert_eq!(instances.title(), "instance ip (2/3)");
+
+        // The one on screen stopping keeps it on screen, so a restart comes
+        // back to it; Tab moves on.
+        instances.update(running(&["fips", "lan"]));
+        assert_eq!(instances.socket(), None);
+        assert!(instances.title().contains("ip, not running"));
+        assert!(instances.next());
+        assert_eq!(instances.current.as_deref(), Some("fips"));
+    }
+
+    #[test]
+    fn a_pinned_socket_does_not_cycle() {
+        let mut instances = Instances::pinned(PathBuf::from("/run/tollgate-ip/control.sock"));
+        assert!(!instances.update(running(&["fips", "ip", "lan"])));
+        assert!(!instances.next());
+        assert_eq!(instances.title(), "instance ip");
+
+        let other = Instances::pinned(PathBuf::from("/tmp/x.sock"));
+        assert_eq!(other.title(), "socket /tmp/x.sock");
+    }
+
+    #[test]
+    fn the_frame_names_the_instance_on_screen() {
+        let mut instances = Instances::discovered(None);
+        instances.update(running(&["fips", "ip", "lan"]));
+        instances.next();
+        let mut app = App::new(instances);
+        app.snapshot.peers = vec![peer("02111111aaaa")];
+        app.clamp_selection();
+        let screen = render(&mut app).join("\n");
+        assert!(screen.contains("instance ip (2/3)"), "{screen}");
+        assert!(screen.contains("tab next instance"), "{screen}");
+    }
+
+    #[test]
+    fn with_nothing_running_the_display_says_so_and_waits() {
+        let mut app = App::new(Instances::discovered(None));
+        let screen = render(&mut app).join("\n");
+        assert!(screen.contains("No tollgated is running."), "{screen}");
+        assert!(screen.contains("no instance running"), "{screen}");
+    }
+
+    #[test]
+    fn long_deadlines_read_in_days() {
+        assert_eq!(duration(0), "0s");
+        assert_eq!(duration(59_999), "59s");
+        assert_eq!(duration(61_000), "1m01s");
+        assert_eq!(duration(3_600_000), "1h00m");
+        assert_eq!(duration(86_399_000), "23h59m");
+        assert_eq!(duration(86_400_000), "1d00h");
+        assert_eq!(duration(30 * 86_400_000), "30d00h");
+        assert_eq!(duration(30 * 86_400_000 - 1_000), "29d23h");
+    }
+
+    #[test]
+    fn a_row_shows_budget_deadline_and_reserved_rate() {
+        let mut app = app_with_two_peers();
+        app.snapshot.peers[0].budget_expires_in_ms = 30 * 86_400_000;
+        app.snapshot.peers[1].budget = 0;
+        app.snapshot.peers[1].reserved_rate = 0;
+        let screen = render(&mut app);
+        let first = screen.iter().find(|l| l.contains("02111111")).unwrap();
+        assert!(first.contains("512.0 KiB"), "{first}");
+        assert!(first.contains("30d00h"), "{first}");
+        assert!(first.contains("122.1 KiB/s"), "{first}");
+        let second = screen.iter().find(|l| l.contains("02222222")).unwrap();
+        assert!(
+            second.contains("empty"),
+            "an empty budget says so: {second}"
+        );
+    }
+
+    #[test]
+    fn the_detail_shows_both_directions_and_the_counters() {
+        let mut app = app_with_two_peers();
+        app.snapshot.peers[0].reported_balance = Some(control::BalanceSnapshot {
+            remaining: 1 << 20,
+            expires_in_ms: 2 * 86_400_000,
+            reserved_rate: 0,
+            age_ms: 3_000,
+        });
+        app.detail = true;
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).expect("terminal");
+        terminal.draw(|frame| draw(frame, &mut app)).expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let screen: String = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().chars().next().unwrap_or(' '))
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        for wanted in [
+            "what this peer bought from us",
+            "what we bought from this peer",
+            "deadline",
+            "reserved rate",
+            "from-payer weight",
+            "their last Balance",
+            "said 3s ago",
+            "pay per use",
+            "to payer",
+            "from payer",
+        ] {
+            assert!(screen.contains(wanted), "{wanted:?} missing:\n{screen}");
+        }
     }
 }
