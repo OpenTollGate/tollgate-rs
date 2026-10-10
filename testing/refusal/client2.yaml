@@ -12,7 +12,8 @@ access:
     enabled: true
     bytes_per_second: 4096
 buying:
-  # Short windows keep the forfeit small and the test quick.
+  # A one-second budget keeps the test quick: it is bought again every few
+  # hundred milliseconds.
   window_ms: 1000
   renew_lead_ms: 300
 

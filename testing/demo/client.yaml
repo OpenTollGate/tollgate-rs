@@ -18,10 +18,13 @@ access:
     bytes_per_second: 4096
 
 buying:
-  # Small on purpose. At the gateway's price a 1 GB channel is about 56 sat,
-  # and this rate draws one down in roughly ten minutes.
+  # Small on purpose. At the gateway's price a 1 GB channel is about 56 sat.
+  # The client reserves exactly this rate, and the gateway draws it every
+  # second whether it is used or not, so one channel lasts about 17 minutes.
   demand: 1000000
   headroom_pct: 100
+  # Each purchase tops the budget up to the rate times the window. Nothing
+  # left in it is lost when the client buys again.
   window_ms: 4000
   renew_lead_ms: 1200
 

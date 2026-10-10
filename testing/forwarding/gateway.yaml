@@ -8,13 +8,15 @@ vouchers:
   accepted_mints:
     - "http://gateway:3338"
 access:
-  # No allowance: a customer that has not paid, or whose grant has lapsed, is
+  # No allowance: a customer that has not paid, or whose budget has run out, is
   # dropped rather than carried slowly, so the test can see the gate shut.
   # Its control plane and the mint are this node, which is never gated.
   minimum_flow:
     enabled: false
 grants:
   window_range_ms: [200, 30000]
+  # Short windows need purchases closer together than the default second.
+  min_topup_gap_ms: 200
 enforcer:
   # The real thing: the kernel forwards, nftables gates, tc shapes.
   kind: ip

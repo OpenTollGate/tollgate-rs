@@ -21,7 +21,12 @@ access:
     enabled: true
     bytes_per_second: 4096
 grants:
-  window_range_ms: [200, 30000]
+  # What the client sends is free here: only its downloads draw its budget.
+  # 1 would charge an upload the same as a download.
+  from_payer_weight: 0
+  # The client picks any window in this range. The lower end may not be below
+  # min_topup_gap_ms, one second by default.
+  window_range_ms: [1000, 30000]
 
 network:
   listen: "0.0.0.0:4747"

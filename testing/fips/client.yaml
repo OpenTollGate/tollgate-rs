@@ -6,8 +6,8 @@ mint:
   unit: "byte"
 buying:
   # As in the nftables forwarding topology, and for the same reason: this
-  # carries a real TCP flow, and the lead is what a renewal has to spare
-  # before the grant lapses under it.
+  # carries a real TCP flow, and the lead is what a purchase has to spare
+  # before the budget runs out under it.
   window_ms: 4000
   renew_lead_ms: 1200
 enforcer:

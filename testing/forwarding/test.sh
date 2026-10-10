@@ -85,8 +85,8 @@ echo "  http $code, $bytes bytes at $speed B/s"
 [[ "$code" == "200" ]] \
   || tollgate::fail "the download did not succeed (http $code); nothing crossed the gateway"
 # At the rate bought, well over this arrives in the time allowed. A far smaller
-# number means the flow stalled part way — which is what a grant lapsing under
-# a transfer looks like, and is invisible in an average.
+# number means the flow stalled part way — which is what a budget running out
+# under a transfer looks like, and is invisible in an average.
 [[ "${bytes:-0}" -ge $(( DURATION * 1500000 )) ]] \
   || tollgate::fail "only $bytes bytes arrived in ${DURATION}s; the transfer stalled part way"
 
@@ -99,8 +99,8 @@ speed=${speed%%.*}
 [[ "$speed" -gt 1500000 ]] \
   || tollgate::fail "$speed B/s is far below the 2.5 MB/s bought"
 
-# And the gateway counted it in the kernel, which is what draws the grant down.
-delivered="$(client_field delivered)"
+# And the gateway counted it in the kernel, which is what draws the budget down.
+delivered="$(client_field to_payer)"
 [[ "${delivered:-0}" -gt 1000000 ]] \
   || tollgate::fail "the gateway's nftables counters show only $delivered bytes"
 
@@ -110,7 +110,7 @@ echo "  ok: IPv4 forwarding"
 #
 # The phone's session comes from its IPv4 address. The gateway ties its MAC to
 # that, and through the MAC its IPv6 address, and gates, shapes and counts the
-# IPv6 with the same grant. What is asserted is what crosses the gateway, not
+# IPv6 against the same budget. What is asserted is what crosses the gateway, not
 # what the node believes.
 PHONE6="fd00:28::40"
 ORIGIN6="http://[fd00:29::10]:8080/blob"
@@ -173,7 +173,7 @@ mark="$("${gw[@]}" nft list map inet tollgate mark6 | grep -o "$PHONE6 : 0x[0-9a
   || tollgate::fail "no tc ipv6 filter selects the phone's mark $mark"
 in_map down6_tx "$PHONE6" || tollgate::fail "no down6_tx counter element for $PHONE6"
 
-before="$(phone_field delivered)"
+before="$(phone_field to_payer)"
 DURATION6=10
 read -r code bytes speed <<<"$(fetch6 "$DURATION6")"
 echo "  paid: http $code, $bytes bytes at $speed B/s"
@@ -184,15 +184,15 @@ speed=${speed%%.*}
   || tollgate::fail "$speed B/s over IPv6 is far above the 2.5 MB/s bought; nothing is shaping it"
 echo "  ok: the paid phone's IPv6 is forwarded and shaped"
 
-# Counted into the phone's own counters, which is what draws its grant down.
+# Counted into the phone's own counters, which is what draws its budget down.
 tollgate::wait_for "the phone's IPv6 to be counted" 15 \
-  '[[ $(( $(phone_field delivered) - ${before:-0} )) -ge $(( bytes * 9 / 10 )) ]]'
+  '[[ $(( $(phone_field to_payer) - ${before:-0} )) -ge $(( bytes * 9 / 10 )) ]]'
 
-# The grant lapses: its node is frozen, so it renews nothing, but the session
+# The budget runs out: its node is frozen, so it renews nothing, but the session
 # stays up — a stopped node would end it, and a peer the gateway no longer
 # knows is none of its business to gate.
 docker compose -f "$COMPOSE" pause phone-node
-tollgate::wait_for "the phone's grant to lapse" 30 \
+tollgate::wait_for "the phone's budget to run out" 30 \
   '[[ "$(phone_field shaped_rate)" == "0" ]]'
 in_set allowed6 "$PHONE6" && tollgate::fail "the lapsed phone's IPv6 is still allowed"
 read -r code bytes _ <<<"$(fetch6 5)"

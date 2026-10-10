@@ -7,7 +7,7 @@
 # rather than in the local kernel. Two things this topology can assert that the
 # IP one cannot:
 #
-#   - the peer that gets the grant is the peer that holds the key, because the
+#   - the peer that is sold to is the peer that holds the key, because the
 #     control plane checks an announced key against the mesh address it came
 #     from rather than believing it;
 #   - the payment path is not the shaped path as a matter of protocol, not of
@@ -82,8 +82,8 @@ echo "  http $code, $bytes bytes at $speed B/s"
 [[ "$code" == "200" ]] \
   || tollgate::fail "the download did not succeed (http $code); nothing crossed the mesh"
 # At the rate bought, well over this arrives in the time allowed. A far smaller
-# number means the flow stalled part way — which is what a grant lapsing under
-# a transfer looks like, and is invisible in an average.
+# number means the flow stalled part way — which is what a budget running out
+# under a transfer looks like, and is invisible in an average.
 [[ "${bytes:-0}" -ge $(( DURATION * 750000 )) ]] \
   || tollgate::fail "only $bytes bytes arrived in ${DURATION}s; the transfer stalled part way"
 
@@ -96,14 +96,14 @@ speed=${speed%%.*}
 # The floor is well under what a quiet machine delivers (around 2 MB/s of
 # goodput): the mesh encrypts and re-frames every packet, and a host busy with
 # the rest of the suite shows it. What it still rules out is the failure that
-# matters — a flow that stalls when a grant lapses, which lands an order of
+# matters — a flow that stalls when a budget runs out, which lands an order of
 # magnitude below this rather than a little under it.
 [[ "$speed" -gt 750000 ]] \
   || tollgate::fail "$speed B/s is far below the 2.5 MB/s bought"
 
 # And the gateway counted it where the policy is enforced, which is what draws
-# the grant down.
-delivered="$(tollgate::peer_field_of gateway "$CLIENT_PUBKEY" delivered)"
+# the budget down.
+delivered="$(tollgate::peer_field_of gateway "$CLIENT_PUBKEY" to_payer)"
 [[ "${delivered:-0}" -gt 1000000 ]] \
   || tollgate::fail "fipsd's transit counters show only $delivered bytes for the client"
 
@@ -111,6 +111,6 @@ delivered="$(tollgate::peer_field_of gateway "$CLIENT_PUBKEY" delivered)"
 # the traffic it pays for, because messages addressed to the gateway are not
 # transit and are never shaped.
 [[ "$(tollgate::peer_field_of gateway "$CLIENT_PUBKEY" access)" == "active" ]] \
-  || tollgate::fail "the client's grant lapsed under its own download"
+  || tollgate::fail "the client's budget ran out under its own download"
 
 echo "PASS: fips"

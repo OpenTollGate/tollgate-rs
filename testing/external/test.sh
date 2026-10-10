@@ -10,7 +10,7 @@
 #     /run/tollgate-ip/enforcer.sock;
 #   - the enforcer starts closed, is told who the client is before anything is
 #     sold — its address, in 16 bytes — and opens it at the rate it bought;
-#   - the counts it reports are what the gateway draws the grant down by;
+#   - the counts it reports are what the gateway draws the budget down by;
 #   - with the enforcer gone the gateway sells nothing, and keeps the session;
 #   - an enforcer that comes back is told the full state again, and the totals
 #     the gateway counted never go backwards;
@@ -67,18 +67,19 @@ echo "  ok: bound to $subject"
 # --- the enforcer's counts reach the ledger ---------------------------------
 
 tollgate::wait_for "the enforcer's counts to reach the gateway" 30 \
-  '(( $(gateway_count delivered) > 0 && $(gateway_count consumed) > 0 ))'
+  '(( $(gateway_count to_payer) > 0 && $(gateway_count consumed) > 0 ))'
 
 # --- the enforcer goes away -------------------------------------------------
 
 compose stop enforcer >/dev/null
 tollgate::wait_for "the gateway to notice" 30 \
   'tollgate::logs gateway | grep -q "selling nothing until"'
-delivered_down="$(gateway_count delivered)"
+delivered_down="$(gateway_count to_payer)"
 
-# A grant already bought runs out, and nothing replaces it.
-tollgate::wait_for "the client's grant to lapse" 30 \
-  '[[ "$(gateway_field grant_expires_in_ms)" == "0" ]]'
+# A budget already bought runs out at its deadline, and nothing replaces it.
+# Nothing is drawn while the enforcer is down, but the deadline still runs.
+tollgate::wait_for "the client's budget to expire" 30 \
+  '[[ "$(gateway_field budget_expires_in_ms)" == "0" ]]'
 bought="$(gateway_count authorized)"
 sleep 5
 [[ "$(gateway_count authorized)" == "$bought" ]] \
@@ -97,7 +98,7 @@ tollgate::wait_for "the enforcer to be told the client again, and opened" 60 \
 tollgate::wait_for "sales to resume" 60 \
   '(( $(gateway_count authorized) > bought ))'
 tollgate::wait_for "the enforcer's counts to add to the old ones" 30 \
-  '(( $(gateway_count delivered) > delivered_down ))'
+  '(( $(gateway_count to_payer) > delivered_down ))'
 connections="$(enforcer_state | jq -r .connections)"
 [[ "$connections" == "1" ]] \
   || tollgate::fail "the restarted enforcer should have one connection, has $connections"

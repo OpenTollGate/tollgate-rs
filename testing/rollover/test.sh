@@ -22,9 +22,9 @@ tollgate::wait_for "the client to move onto a replacement channel" 90 \
    [[ "$(tollgate::snapshot client | jq -r ".peers[0].outgoing_channel.id")" != "'"$first_channel"'" ]]'
 
 # Still buying, and still shaped to it — the point is that nothing stalled.
-# A wait rather than an instantaneous read: a snapshot taken between a grant
-# lapsing and the next one landing would show the allowance and say nothing
-# about whether the rollover worked.
+# A wait rather than an instantaneous read: a snapshot taken as a budget runs
+# out and before the next purchase lands would show the allowance and say
+# nothing about whether the rollover worked.
 tollgate::wait_for "the rate to still be what was bought, after the rollover" 30 \
   '[[ "$(tollgate::peer_field gateway shaped_rate)" == "2500000" ]]'
 

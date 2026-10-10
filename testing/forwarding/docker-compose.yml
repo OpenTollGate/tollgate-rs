@@ -16,7 +16,7 @@
 # IPv6 address (fd00:28::40): its IPv6 is gated, shaped and counted with the
 # IPv4 its session comes from, tied to it by its MAC. It is a network
 # namespace and nothing else; its node is `phone-node`, which shares that
-# namespace, so the node can be paused — its grant left to lapse while the
+# namespace, so the node can be paused — its budget left to run out while the
 # session stays up — while the phone keeps sending.
 services:
   # The money. A sat-denominated mint standing in for the likes of minibits:

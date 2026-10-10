@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# An oversized purchase is refused, and the payer re-buys at the rate named.
+# An oversized reservation is refused, and the payer buys again at the
+# reserved rate named.
 #
-# The gateway will sell at most 3 MB/s across all its peers together, and the
-# client is at first the only one; the client wants 8. It should end up at
-# exactly the cap rather than at nothing, and within a round trip — declining
-# to ratchet already leaves the payer's money untouched, so the refusal exists
-# to carry a rate back. A second client then shows the cap is shared.
+# The gateway will reserve at most 3 MB/s across all its payers together, and
+# the client is at first the only one; the client wants 8. It should end up at
+# exactly the cap rather than at nothing, one gap later — declining to ratchet
+# already leaves the payer's money untouched, so the refusal exists to carry a
+# rate back. A second client then shows the cap is shared.
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/common.sh"
 tollgate::start
@@ -36,8 +37,8 @@ tollgate::wait_for "the second client to be refused" 90 \
   'tollgate::logs client2 | grep -q "a peer refused our purchase"'
 
 # Each peer is shaped to at least the 4096 B/s allowance, so a buyer refused
-# everything still shows 4096. Sample for several windows, since grants renew
-# every second and the two buyers take turns at what is free.
+# everything still shows 4096. Sample for several seconds, since the first
+# buyer buys again every second and the second tries again after its hold.
 cap=$(( 3000000 + 2 * 4096 ))
 for _ in $(seq 10); do
   total="$(tollgate::snapshot gateway | jq '[.peers[].shaped_rate] | add // 0')"

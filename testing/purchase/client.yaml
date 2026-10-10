@@ -12,8 +12,9 @@ access:
     enabled: true
     bytes_per_second: 4096
 buying:
-  # Short windows keep the forfeit small and the test quick.
-  window_ms: 1000
+  # Thirty seconds of the reserved rate, so the budget is still there after
+  # the client has been away while the gateway restarted.
+  window_ms: 30000
   renew_lead_ms: 300
 
 network:

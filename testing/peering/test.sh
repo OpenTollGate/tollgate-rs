@@ -17,8 +17,8 @@ tollgate::wait_for "the gateway to see the client paying" 90 \
 tollgate::wait_for "the client to see the gateway paying" 90 \
   '[[ "$(tollgate::peer_field client access)" == "active" ]]'
 
-# Two channels is the default, not an exception: each side pays for what it
-# received, so both owe and both fund.
+# Peering is both nodes selling to each other, so both fund a channel: one
+# for each sale.
 [[ "$(tollgate::peer_field gateway incoming_channels | wc -l)" -ge 1 ]] \
   || tollgate::fail "the gateway has no channel the client pays it on"
 [[ -n "$(tollgate::peer_field client outgoing_channel)" ]] \
@@ -36,8 +36,8 @@ echo "  ok: the two sides name the same channel"
 # A payer that does not charge its provider back — what proxyd's per-device
 # sessions are. The gateway funds nothing toward it and buys nothing from it, and TopUps are
 # never answered, so after the opening sequence only the gateway's keepalive
-# says it is still there. Without one the client dropped a healthy session at
-# the stale timeout (60 s) and forfeited the grant it had just paid for.
+# and Balances say it is still there. Without them the client dropped a healthy
+# session at the stale timeout (60 s).
 echo "--- a payer that does not charge back, past the stale timeout"
 tollgate::down
 COMPOSE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/no-charge.yml"
@@ -49,7 +49,7 @@ tollgate::wait_for "the gateway to see the client paying" 90 \
 tollgate::wait_for "the client to see the gateway as free" 30 \
   '[[ "$(tollgate::peer_field client access)" == "free" ]]'
 tollgate::wait_for "the client to be buying" 30 \
-  '[[ "$(tollgate::peer_field client bought_rate)" -gt 0 ]]'
+  '[[ "$(tollgate::peer_field client bought_reserved_rate)" -gt 0 ]]'
 paying_on="$(tollgate::snapshot gateway | jq -r '.peers[0].incoming_channels[0].id')"
 
 # Past one stale timeout with margin, then look at what happened in between.
@@ -66,7 +66,7 @@ fi
   || tollgate::fail "the gateway no longer sees the client paying"
 [[ "$(tollgate::snapshot gateway | jq -r '.peers[0].incoming_channels[0].id')" == "$paying_on" ]] \
   || tollgate::fail "the client is paying on a new channel: the session started over"
-[[ "$(tollgate::peer_field client bought_rate)" -gt 0 ]] \
+[[ "$(tollgate::peer_field client bought_reserved_rate)" -gt 0 ]] \
   || tollgate::fail "the client stopped buying"
 
 echo "  ok: held past the stale timeout on one connection"

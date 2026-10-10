@@ -9,13 +9,17 @@ mint:
 vouchers:
   accepted_mints:
     - "http://gateway:3338"
-  received_multiplier: 0
 access:
   minimum_flow:
     enabled: true
     bytes_per_second: 4096
 grants:
+  # What the payer sends is free here, so the rates asserted are its
+  # downloads alone.
+  from_payer_weight: 0
   window_range_ms: [200, 30000]
+  # Short windows need purchases closer together than the default second.
+  min_topup_gap_ms: 200
 
 network:
   listen: "0.0.0.0:4747"

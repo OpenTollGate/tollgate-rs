@@ -5,7 +5,7 @@ mint:
   # Reached over the mesh, at this node's own fips0 address. The client's
   # payments are addressed to this node rather than through it, so they are
   # never transit and never shaped — which is the property that keeps a peer
-  # that has run out of grant able to buy more.
+  # that has run out of budget able to buy more.
   url: "http://[fde5:b78f:c4ef:a89c:82cd:b05b:8ee7:ed56]:3338"
   unit: "byte"
 vouchers:
@@ -17,6 +17,8 @@ access:
     bytes_per_second: 4096
 grants:
   window_range_ms: [200, 30000]
+  # Short windows need purchases closer together than the default second.
+  min_topup_gap_ms: 200
 enforcer:
   # The real thing on a mesh: fipsd carries the packets and holds the policy.
   # Its identity is pubkey: the control plane checks each peer key, because a mesh
