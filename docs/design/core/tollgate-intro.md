@@ -23,7 +23,7 @@ A constrained-device variant (`tollgate-net-esp32`) lives in a separate project 
 
 **Accountless commerce**: TollGate uses Cashu ecash — bearer tokens that require no identity, no credit check, no account. Payment is atomic: you pay, resources flow. You stop paying, resources stop. No invoices, no billing cycles, no disputes.
 
-**Payment is not zero-trust, and that is deliberate.** Each node is the mint for its own vouchers ([tollgate-vouchers.md](tollgate-vouchers.md)), so the party that could refuse to redeem is also the party that would have to honor a refund. No cryptography fixes that. What bounds it instead is exposure — hold one grant's worth, risk one grant's worth, and the payer picks the window — and reputation, since an issuer that stops redeeming sees its vouchers sell for less. Any claim of a cryptographic guarantee against a defaulting issuer would be false.
+**Payment is not zero-trust, and that is deliberate.** Each node is the mint for its own vouchers ([tollgate-vouchers.md](tollgate-vouchers.md)), so the party that could refuse to redeem is also the party that would have to honor a refund. No cryptography fixes that. What bounds it instead is exposure — a payer risks its unspent budget with a provider, and chooses how large that is — and reputation, since an issuer that stops redeeming sees its vouchers sell for less. Any claim of a cryptographic guarantee against a defaulting issuer would be false.
 
 **Autonomous operation**: Devices negotiate, pay, and settle without human intervention. A TollGate node can operate unattended indefinitely — opening and rolling over payment channels, surviving network partitions and upstream failures. The operator decides what to sell vouchers for; the device executes delivery.
 
@@ -33,55 +33,61 @@ A constrained-device variant (`tollgate-net-esp32`) lives in a separate project 
 
 ## How Payment Works
 
-TollGate operates on a single principle: **each side pays for what it received, in the vouchers of whoever delivered it**. Both peers owe each other by default, so both fund a channel.
+One node sells and the other buys: **the customer pays its provider, in the provider's vouchers**. That is the common case — a phone on a hotspot, a car at a charger — and it takes one channel. The provider never buys anything back, so a customer that only buys needs no mint of its own.
+
+**Peering** is both nodes selling to each other. Each sends its own Offer and each buys from the other, so there are two channels, one for each sale.
 
 ![Payment Direction](diagrams/pricing-direction.svg)
 <details><summary>Text version</summary>
 
 ```
-    B ──────[delivers to A]──────→ A
-    A pays B in B-vouchers for what it received
+  Peering: each node sells to the other
+
+    B ──────[sells to A]──────→ A
+    A pays B in B-vouchers
     Channel A→B: A pays B (A funds)
 
-    A ──────[delivers to B]──────→ B
-    B pays A in A-vouchers for what it received
+    A ──────[sells to B]──────→ B
+    B pays A in A-vouchers
     Channel B→A: B pays A (B funds)
+
+  A customer has only the first half: one channel.
 
     ── resources    ╌╌ payment (Spilman channel)
 ```
 </details>
 
-**Delivery has no price in the protocol.** One voucher is a claim on one unit of capacity, so `n` units received costs `n` vouchers ([tollgate-vouchers.md](tollgate-vouchers.md)). What a unit costs in money is settled where the peer buys those vouchers, which the protocol never sees.
+**Delivery has no price in the protocol.** One voucher is a claim on one unit of capacity, so `n` units moved cost `n` vouchers ([tollgate-vouchers.md](tollgate-vouchers.md)). What a unit costs in money is settled where the peer buys those vouchers, which the protocol never sees.
 
 A well-connected node sells its vouchers dearly because its delivery is valuable. A node that wants to favor a peer sells that peer vouchers cheaply. A pair of peers owned by the same operator skips payment entirely by deciding not to charge each other. Topology, scarcity and relationships all show up in what vouchers fetch, rather than in a price sheet.
 
-One number is quoted peer-to-peer: the **received multiplier**, a surcharge on what a peer pushes at this node, on top of that peer already being paid for delivering it. Default `0`; only above `1` does the peer pay net for both directions. Unsigned, so a node can discourage traffic but never pay a bonus for it. See [tollgate-vouchers.md](tollgate-vouchers.md).
+One number is quoted peer-to-peer: the **from-payer weight**. Every sale has one payer and one provider, and the two directions are named by those roles — **`units_to_payer`** is what the provider sends the payer, **`units_from_payer`** what the payer sends the provider. The payer's budget is drawn by `units_to_payer + units_from_payer × from_payer_weight`. The provider sets the weight in its Offer: `1`, the default, charges both directions the same, `10` makes a unit from the payer ten times dearer, and `0` makes it free, as peering routers usually want. Unsigned, so a provider can never pay a customer a bonus for sending. See [tollgate-vouchers.md](tollgate-vouchers.md#the-from-payer-weight).
 
-Payment flows through **Cashu Spilman channels** — unidirectional payment channels where the sender locks vouchers in a 2-of-2 multisig and signs successively larger balance updates. Two channels per peer pair (one per direction) enable bidirectional payment. Under vouchers their job is to keep the issuer's spent-proof set bounded rather than to prevent theft.
+Payment flows through **Cashu Spilman channels** — unidirectional payment channels where the sender locks vouchers in a 2-of-2 multisig and signs successively larger balance updates. One channel carries one sale; a peering has two. Under vouchers their job is to keep the issuer's spent-proof set bounded rather than to prevent theft.
 
 ### Payment Lifecycle
 
 A peer arrives already holding vouchers for the node it wants service from, or it gets no service. How it acquired them is outside the protocol — see [voucher-acquisition.md](../market/voucher-acquisition.md).
 
-1. **Channel establishment**: The peers open Spilman channels (one per direction). Each peer manages rollover for its own outgoing channel — only the funder needs to initiate, since only the funder puts up new funds. Each channel is funded in one of the mints the counterparty lists — usually its own, which is always reachable over the peering link.
+1. **Channel establishment**: The buyer opens a Spilman channel to the seller — in a peering, each side opens one. Each peer manages rollover for its own outgoing channel — only the funder needs to initiate, since only the funder puts up new funds. Each channel is funded in one of the mints the counterparty lists — usually its own, which is always reachable over the peering link.
 
-2. **Buying capacity**: The payer sends a **TopUp** whenever it wants a rate — a signed channel update carrying a cumulative total and a **window** to spend the new units in. The rate is one divided by the other. A new grant replaces the one in force, so raising the rate mid-window forfeits the remainder; that is what makes the product bandwidth rather than a stored quantity of bytes. Nothing is acknowledged, so a payer can raise its rate and use it in the same breath.
+2. **Buying capacity**: The payer sends a **TopUp** whenever it wants capacity — a signed channel update carrying a cumulative total, a **window**, and a **reserved rate**. The new units are added to the payer's **budget**, and nothing already in it is lost. The window moves the budget's **deadline** to now plus the window, if that is later. Every second, the provider draws the larger of what the payer moved and its reserved rate; what is left at the deadline expires. A payer that reserves a rate is buying time at a speed, since idle seconds cost it that rate; one that reserves nothing pays only for what it uses ([tollgate-vouchers.md](tollgate-vouchers.md#the-one-rule)). Nothing is acknowledged, so a payer can buy and use what it bought in the same breath.
 
-3. **Rollover**: When a channel approaches exhaustion (default: at 80% capacity), a new channel is opened alongside it. The old channel continues to be drained to 100%. Once exhausted, grants continue on the new channel. A purchase that straddles the boundary is signed against **both in one TopUp** — if the old channel has 2 vouchers remaining and the next grant is 5, the same message ratchets the old channel to its capacity and starts the new one at 3. The grant is the combined increase, so the payer never sees a short window at a channel boundary.
+3. **Rollover**: When a channel approaches exhaustion (default: at 80% capacity), a new channel is opened alongside it. The old channel continues to be drained to 100%. Once exhausted, purchases continue on the new channel. A purchase that straddles the boundary is signed against **both in one TopUp** — if the old channel has 2 vouchers remaining and the next grant is 5, the same message ratchets the old channel to its capacity and starts the new one at 3. The grant is the combined increase, so a channel boundary never shortens a purchase.
 
 4. **Settlement**: Either party can settle at any time. The receiver submits the latest signed channel state to the funding mint — usually its own — and the sender reclaims the remaining change. What it settles in its own vouchers it then burns: the units have been delivered, so the claim is cancelled ([tollgate-daemons.md](tollgate-daemons.md)).
 
 ### How Many Channels
 
-**A channel exists in each direction where that side handled traffic for the other, and charges for it.** Two independent questions, so several shapes are normal:
+**A channel exists for each side that sells to the other.** Two independent questions, so several shapes are normal:
 
-| | B charges A | A charges B | Channels |
+| | B sells to A | A sells to B | Channels |
 |---|---|---|---|
-| **Default, any peering** | yes | yes | **two** |
-| One-way free | `no_charge` | yes | one (B→A) |
+| **A customer** | yes | no — A's Offer says it will not charge | **one** (A→B) |
+| Peering | yes | yes | two |
 | Free peering | `no_charge` | `no_charge` | none |
 
-A leaf is not a special case: it delivers its uploads, so the relay owes it for those, and both channels exist. What makes a leaf a net payer is the relay's `received_multiplier`, which surcharges the upload above what it earns.
+A customer's upload is not something it sells. It is part of what it buys, drawn from its budget at its provider's from-payer weight.
 
 A node may also decide not to charge a particular peer at all. That decision is **one-sided**: it controls only whether *it* charges, never whether the peer charges back.
 
@@ -126,7 +132,7 @@ What does *not* survive an outage is acquiring vouchers for a node you have neve
 - **Pricing outside the protocol** — What a unit costs in money is decided where vouchers are sold, so the wire format carries no rates.
 - **Metering that decides nothing** — Payment lands before the traffic it covers, so counters stay local and no shared number decides how much money moves.
 - **Operator control** — The operator decides what its vouchers sell for, which peers' vouchers it will hold and at what price, and which peerings exist. The protocol executes; the operator decides.
-- **Cashu-native** — All payment uses Cashu ecash. No Lightning invoices, no on-chain transactions in the critical path. Spilman channels batch the grants.
+- **Cashu-native** — All payment uses Cashu ecash. No Lightning invoices, no on-chain transactions in the critical path. Spilman channels batch the purchases.
 
 Non-goals:
 
@@ -148,7 +154,7 @@ The three layers introduced in [What's in this repo](#whats-in-this-repo) — `t
 `tollgate-core` contains all payment logic, metering, and access control. It is network-agnostic — it does not know about FIPS, IP, or any specific transport — and **sans-IO**: it never does I/O, never reads the clock, and never verifies a signature. The host turns real events into `Event` values, supplies the time, and carries out the `Action`s core returns. To do that, the host implements two traits of its own:
 
 1. **ChannelBackend** — Spilman channel funding, balance-update signing and verification, settlement. Must support token locking (NUT-11 2-of-2 multisig). See [tollgate-payment-channels.md](tollgate-payment-channels.md).
-2. **Enforcer** (`ResourceAdapter` in the code today) — Peer identification, metering counters (units delivered per peer), access control and shaping enforcement, and optional metrics for operator visibility. See [tollgate-access-control.md](tollgate-access-control.md) and [tollgate-metering.md](tollgate-metering.md).
+2. **Enforcer** (`ResourceAdapter` in the code today) — Peer identification, metering counters (units to and from the payer, per peer), access control and shaping enforcement, and optional metrics for operator visibility. See [tollgate-access-control.md](tollgate-access-control.md) and [tollgate-metering.md](tollgate-metering.md).
 3. **Peer Identifiers** — Peers are always identified by their Nostr public key (npub). The consumer provides npubs for connected peers, similar to how FIPS transports provide identifiers to FMP.
 
 ### Separation Model
@@ -188,8 +194,8 @@ The three daemons normally run on one machine and talk over local sockets; why t
 │  └──────────────┘  └──────────────┘  └───────────────┘    │
 │  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐    │
 │  │   Metering   │  │   Protocol   │  │   Peer State  │    │
-│  │  (per-peer   │  │   Messages   │  │   Machine     │    │
-│  │   outbound)  │  │   & Codec    │  │               │    │
+│  │  (per-peer,  │  │   Messages   │  │   Machine     │    │
+│  │  both ways)  │  │   & Codec    │  │               │    │
 │  └──────────────┘  └──────────────┘  └───────────────┘    │
 │                                                            │
 │  Host traits: ChannelBackend, Enforcer                     │
@@ -205,9 +211,9 @@ The three daemons normally run on one machine and talk over local sockets; why t
 
 - **Access Control**: Gates delivery per peer based on payment status. Unpaid peers can only send data addressed to the local node (for payment negotiation). Free peers bypass payment entirely.
 
-- **Metering**: Tracks units delivered and received per peer, link-local. Draws each peer's grant down as traffic passes and shapes when it is spent.
+- **Metering**: Tracks units to and from each payer, link-local. Draws each peer's budget down as traffic passes, or at its reserved rate if that is more, and shapes when it is spent.
 
-- **Protocol Messages**: Wire format for offers, channel negotiation, and grants. Designed for minimal back-and-forth between peers — a grant needs no reply.
+- **Protocol Messages**: Wire format for offers, channel negotiation, and grants. Designed for minimal back-and-forth between peers — a purchase needs no reply.
 
 - **Peer State Machine**: Tracks each peer's payment lifecycle: `new → channel_opening → active → rolling_over → settling → closed`. Free peers go directly to `active`.
 
@@ -215,7 +221,7 @@ The three daemons normally run on one machine and talk over local sockets; why t
 
 ## What a Node Advertises
 
-A node's offer is short: the mints whose vouchers it will take, most preferred first; the unit it denominates in; the range of grant windows it will accept; and one unsigned multiplier saying how welcome the peer's uploads are.
+A node's offer is short: the mints whose vouchers it will take, most preferred first; the unit it denominates in; the range of windows it will accept; the smallest rate a payer must reserve, `0` if it may pay per use; the shortest gap between two purchases; and one unsigned from-payer weight saying how much a unit from the payer counts against a unit to it.
 
 There are no products, no rate tables, and no price anywhere. Delivery costs one voucher per unit, and the peer already holds the vouchers.
 
@@ -225,7 +231,7 @@ Covered in depth in [tollgate-vouchers.md](tollgate-vouchers.md).
 
 ## Two Independent Payment Streams
 
-Each peer pair maintains two Spilman channels, and each side buys its own grants on its own — different mints, different windows, different moments. A payer tops up when it wants a rate, and the provider shapes to what has been bought.
+Each peer pair maintains two Spilman channels, and each side buys on its own — different mints, different budgets, different moments. A payer tops up before its budget or deadline runs out, and the provider shapes it to at least the rate it reserved.
 
 Details are in [tollgate-payment-channels.md](tollgate-payment-channels.md).
 
@@ -239,11 +245,13 @@ TollGate assumes that peers are authenticated by the underlying network (FIPS No
 
 **Freeloading**: A peer attempts to have resources delivered without paying. Mitigated by access control — unpaid peers cannot have transit resources delivered. Mesh implementations additionally hide unpaid peers from routing advertisements to prevent blackholing.
 
-**Under-delivery**: A provider takes a grant and delivers less than it sold. The payer detects this on its own — it knows what it bought and what arrived, both from local counters — and feeds it into which peers it buys from and how large a grant it risks. What it cannot do is prove it to a third party, so a provider skimming from every peer stays invisible outside those peerings. Bounded by the size of one grant.
+**Under-delivery**: A provider takes payment and delivers less than it sold. The payer detects this on its own — it knows what it bought and what arrived, both from local counters — and feeds it into which peers it buys from and how large a budget it risks. What it cannot do is prove it to a third party, so a provider skimming from every peer stays invisible outside those peerings. The provider's Balance message does not change this: the payer keeps its own count and treats the provider's as information. Bounded by the payer's budget with that provider.
 
-**Rugpull (receiver)**: The receiver takes a grant and provides nothing. Bounded by the window the payer chose — maximum exposure is one grant's worth, and short windows make it small.
+**Rugpull (receiver)**: The receiver takes payment and provides nothing. Bounded by the payer's unspent budget, whose size the payer chooses — a payer that adds back only what has drained holds little ahead.
 
 **Rugpull (sender)**: The sender stops paying and expects continued service. Mitigated by access control — delivery stops when payment stops.
+
+**Budget takeover**: A budget outlives the session, so whoever is recognised as the payer next time can spend it. Where the network proves keys (`enforcer.identity: pubkey`) only the payer can. Where it does not (`address`), a device that takes over a departed payer's address and announces its key can draw its whole remaining budget — service stolen, not funds, since no channel update can be signed without the payer's key. Bounded by the budget the payer left behind.
 
 **Offline exploitation**: A peer exploits a mint outage to receive service without settlement. Mitigated by channel expiry management — the receiver settles before the refund timelock activates, even if the mint was temporarily unavailable.
 
@@ -291,7 +299,7 @@ TollGate uses the [Cashu Spilman channel](https://github.com/SatsAndSports/cashu
 
 | Document | Description |
 | -------- | ----------- |
-| [tollgate-vouchers.md](tollgate-vouchers.md) | What peers pay each other with: denomination, grants and windows, who pays, the received multiplier, channels as state compression |
+| [tollgate-vouchers.md](tollgate-vouchers.md) | What peers pay each other with: denomination, budgets, the one accounting rule, customers and peers, the from-payer weight, channels as state compression |
 | [tollgate-protocol.md](tollgate-protocol.md) | Wire protocol: messages, negotiation, codec |
 | [tollgate-payment-channels.md](tollgate-payment-channels.md) | Spilman channel lifecycle, rollover, offline resilience |
 | [tollgate-access-control.md](tollgate-access-control.md) | Delivery gates, access levels, unpaid peer restrictions |

@@ -26,7 +26,7 @@ can be read independently.
 | Document | Description |
 | -------- | ----------- |
 | [tollgate-intro.md](core/tollgate-intro.md) | Introduction: goals, architecture, payment model, security |
-| [tollgate-vouchers.md](core/tollgate-vouchers.md) | Vouchers: denomination, grants and windows, who pays, channels as state compression |
+| [tollgate-vouchers.md](core/tollgate-vouchers.md) | Vouchers: denomination, budgets and reserved rates, who pays, channels as state compression |
 | [tollgate-protocol.md](core/tollgate-protocol.md) | Wire protocol: CBOR messages, interval flow, offers |
 | [tollgate-payment-channels.md](core/tollgate-payment-channels.md) | Spilman channels: lifecycle, rollover, ChannelBackend trait |
 | [tollgate-access-control.md](core/tollgate-access-control.md) | Access control: delivery gates, access levels, FIPS bloom filter visibility |

@@ -41,7 +41,7 @@
 
   <!-- Title -->
   <text x="350" y="28" text-anchor="middle" class="title">Channel Pair Structure</text>
-  <text x="350" y="46" text-anchor="middle" class="subtitle">Two unidirectional Spilman channels per peer pair</text>
+  <text x="350" y="46" text-anchor="middle" class="subtitle">Peering: one unidirectional Spilman channel per sale</text>
 
   <!-- Peer A -->
   <rect x="60" y="85" width="140" height="130" rx="8" class="node" stroke-width="2"/>
@@ -57,7 +57,7 @@
 
   <!-- Top: A delivers to B (delivery) -->
   <line x1="200" y1="115" x2="493" y2="115" stroke="#5080c0" stroke-width="2" marker-end="url(#cpR)"/>
-  <text x="350" y="108" text-anchor="middle" class="alabel" fill="#5080c0">A delivers to B</text>
+  <text x="350" y="108" text-anchor="middle" class="alabel" fill="#5080c0">A sells to B</text>
 
   <!-- Top: payment goes B→A (below delivery arrow) -->
   <line x1="500" y1="135" x2="207" y2="135" stroke="#d0a040" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#cpL)"/>
@@ -65,7 +65,7 @@
 
   <!-- Bottom: B delivers to A (delivery) -->
   <line x1="500" y1="180" x2="207" y2="180" stroke="#d0a040" stroke-width="2" marker-end="url(#cpL)"/>
-  <text x="350" y="173" text-anchor="middle" class="alabel" fill="#d0a040">B delivers to A</text>
+  <text x="350" y="173" text-anchor="middle" class="alabel" fill="#d0a040">B sells to A</text>
 
   <!-- Bottom: payment goes A→B (below delivery arrow) -->
   <line x1="200" y1="200" x2="493" y2="200" stroke="#5080c0" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#cpR)"/>

@@ -47,7 +47,7 @@ The protocol keeps three ideas apart:
 
 | Term | What it is | Who knows it |
 |---|---|---|
-| **Payer** | The TollGate key that signs payments and owns the grant. `tollgated` keeps its accounts by this key | `tollgated` |
+| **Payer** | The TollGate key that signs payments and owns the budget. `tollgated` keeps its accounts by this key | `tollgated` |
 | **Subject** | The thing the enforcer recognizes in traffic, such as an address or a key, so it can let that traffic through or stop it. On the wire it is plain bytes, and the identity setting fixes their form ([below](#what-a-subject-is)) | The enforcer |
 | **Binding** | The link that says "this subject's traffic is paid for by this payer" | Both: `tollgated` states it, the enforcer applies it |
 
@@ -102,15 +102,17 @@ something is. Two examples, each with its own `tollgated` instance:
 | The subject | The phone's 32-byte key. The instance serves one charge point, so a key bound here is a customer at this charge point | Delegated: the kiosk is a trusted local client, and asks for a binding that names the tap the customer is standing at, say the bytes `tap-3`. The enforcer says `delegated: true` in its `hello`, and acts only on delegated subjects |
 | `set(peer, rate)` | A rate, in Wh per second, switches the outlet on and caps its power: 1 Wh per second is 3.6 kW. `0` switches it off. `null` switches it on with no cap | A rate, in ml per second, opens the valve and limits the flow. `0` closes it. `null` opens it with no limit |
 | `counters` | The energy the meter recorded, in Wh | The volume the flow meter recorded, in ml |
-| The grant runs out | `tollgated` sends `set(peer, 0)`, and the outlet switches off | `tollgated` sends `set(peer, 0)`, and the valve closes |
+| The budget runs out | `tollgated` sends `set(peer, 0)`, and the outlet switches off | `tollgated` sends `set(peer, 0)`, and the valve closes |
 
 The rules already set out apply unchanged. A subject belongs to at most one
 payer, so `tap-3` pours for one customer at a time: a second customer bound to
 it is refused as a [conflict](#conflicts). And if the socket drops, the outlet
 switches off and every valve closes, as any enforcer goes back to closed.
 
-**Only one direction flows here.** Power and beer go to the customer, so what
-the meter records is `delivered`, and `received` stays `0`.
+**Mostly one direction flows here.** Power and beer go to the customer, so
+what the meter records is `units_to_payer`, and `units_from_payer` stays `0`.
+A charge point that can also take energy back from the car reports that as
+`units_from_payer`; a tap never has any.
 
 **Each instance counts in its own unit.** The vouchers an instance sells are
 in its mint's unit, `mint.unit`
@@ -198,7 +200,7 @@ what that file will say.
 | `bind(peer, [subject, delegated])` | tollgated → enforcer | Every subject this payer holds. It replaces any earlier set; an empty list unbinds them all |
 | `set(peer, rate)` | tollgated → enforcer | The payer's state: `0` is closed; a number is open and shaped to that many units per second; `null` is open and unshaped |
 | `remove(peer)` | tollgated → enforcer | Forget the payer. Its subjects go back to closed |
-| `counters(peer, delivered, received)` | enforcer → tollgated | Units carried to and from the payer's subjects, counted from the start of this connection |
+| `counters(peer, units_to_payer, units_from_payer)` | enforcer → tollgated | Units carried to and from the payer's subjects, counted from the start of this connection |
 | `conflict(peer, subject)` | enforcer → tollgated | The enforcer refused to bind `subject` to `peer`. See [Conflicts](#conflicts) |
 
 A **unit** here is always the instance's own unit, the one its vouchers are
@@ -217,9 +219,9 @@ count:
 | `counters()` | Nothing: it returns the last `counters` the enforcer reported |
 | `demand` | Nothing: it belongs to the buyer and never reaches the enforcer |
 
-**One number is a payer's whole state.** Access levels, grants and the minimum
-flow allowance all stay inside `tollgated`. The rate core shapes a payer to
-already includes them:
+**One number is a payer's whole state.** Access levels, budgets, reserved
+rates, any speed given above them, and the minimum flow allowance all stay
+inside `tollgated`. The rate core shapes a payer to already includes them:
 
 - it never falls below the allowance
 - it is `u64::MAX` for a peer this node does not charge
@@ -251,7 +253,7 @@ enforcer                               tollgated
   │◄──────── bind(peer, subjects) ─────────│  a payer connects
   │──────── conflict(peer, subject) ──────►│  only if refused
   │◄──────────── set(peer, rate) ──────────│  core changed its rate
-  │─────── counters(peer, d, r) ──────────►│  every tick
+  │─ counters(peer, to_payer, from_payer) ►│  every tick
   │◄──────────── remove(peer) ─────────────│  payer gone
 
   The socket drops: the enforcer forgets everything and is closed again.
@@ -274,7 +276,9 @@ example.
 **`counters` are sent every tick**, once a second by default, for every payer
 whose counts changed. Each count is a running total: it starts at zero when the
 payer is first bound on this connection, and adds up all the payer's subjects.
-`delivered` is what went to them; `received` is what came from them.
+`units_to_payer` is what went to them; `units_from_payer` is what came from
+them. Both are named by the roles in the sale: the peer is the payer whose
+budget they draw.
 
 Because every connection starts from zero, `tollgated` carries the totals
 across a reconnect. It adds the last counts it had from the previous
@@ -306,7 +310,7 @@ that no payer holds stays closed.
 **Losing the connection closes everything too.** When the socket drops, the
 enforcer forgets every binding and rate it was given, and is back where it
 started. It does not go on carrying peers at their last rate, because the one
-party that knows when their grants run out is gone.
+party that knows when their budgets run out is gone.
 
 **`tollgated` resends the full state on every reconnect.** Every connection
 starts from closed, so the full state sent after `hello` is all the enforcer
@@ -315,7 +319,7 @@ knows. Nothing resumes, and there is nothing to reconcile.
 **While the enforcer is unreachable, `tollgated` sells nothing.** It keeps
 trying to reconnect, about once a second. Meanwhile:
 
-- it answers every TopUp with a TopUpReject, with `max-rate-available` 0 and
+- it answers every TopUp with a TopUpReject, with `max-reserved-rate` 0 and
   reason `rate-exceeds-capacity` — the capacity it can deliver is zero
 - it does not fund or accept new channels
 - it keeps the sessions and channels already running, so peers pick up where
@@ -325,11 +329,13 @@ The same holds before the first connection. A `tollgated` with an external
 enforcer starts selling when it has a `hello` it accepts, one whose identity
 and unit match its own, not when it starts.
 
-What an outage costs a payer is the rest of its current grant: it paid for a
-window the enforcer stopped carrying. That loss is bounded by one grant, and
-the payer sees it in its own counters
-([tollgate-metering.md](tollgate-metering.md)). It is the price of never
-carrying traffic that nobody is metering.
+**An outage draws nothing.** While the enforcer is not connected, nobody is
+carried, so `tollgated` draws nothing from any payer's budget, reserved rate or
+not ([Grant State](tollgate-protocol.md#grant-state)). What an outage costs a
+payer is the time: its budget waits, but its deadline keeps running, and a
+budget whose deadline passes during the outage is lost. The payer sees the
+gap in its own counters ([tollgate-metering.md](tollgate-metering.md)). It is
+the price of never carrying traffic that nobody is metering.
 
 ---
 
@@ -520,7 +526,7 @@ or someone would be charged for traffic that is not theirs. So, for now:
    conflict for the operator.
 
 `tollgated` binds a payer when it connects, before its Offer, so a conflict
-normally arrives long before the payer could buy a grant. Nothing guarantees
+normally arrives long before the payer could buy anything. Nothing guarantees
 that, because a `bind` that succeeds is not acknowledged. A conflict that
 arrives mid-session is handled the same way.
 
@@ -593,8 +599,8 @@ remove = {
 counters = {
   0: 0x24,
   1: payer,
-  2: u64,                         ; delivered: units to the payer's subjects
-  3: u64,                         ; received: units from them
+  2: u64,                         ; units_to_payer: to the payer's subjects
+  3: u64,                         ; units_from_payer: from them
   * uint => any,
 }
 
@@ -672,9 +678,9 @@ enforcer → tollgated   counters(02ab…, 1841203, 90210)
 enforcer → tollgated   counters(02ab…, 5102337, 188400)
 ```
 
-`tollgated` draws the grant down by the difference between reports, as it
-would with a built-in enforcer. When the grant runs out, `set(02ab…, 0)` closes
-all four again.
+`tollgated` draws the budget down by the difference between reports, as it
+would with a built-in enforcer. When the budget runs out, `set(02ab…, 0)`
+closes all four again.
 
 **A conflict.** A second key, `03cd…`, also connects from `192.168.1.23`. It
 is another machine, behind a NAT router plugged into the LAN:
@@ -765,7 +771,7 @@ match                      : iifname "fips0" and source fd10:93b2:…:ccff
 
 For now the proxy refuses connections from that address, so nothing is
 carried. The node can still reach the exit's own address to pay. It funds a
-channel and buys a rate:
+channel and reserves a rate:
 
 ```
 tollgated → enforcer   set(023bf0c63f…aefa459d, 1048576)
@@ -792,8 +798,8 @@ handed bytes that are neither.
 | Problem | Notes |
 |---|---|
 | Binding conflicts | [Conflicts](#conflicts) is a placeholder: refuse the second binding, keep the subject closed, report it |
-| No acknowledgment of a successful bind | A refused `bind` is reported; an accepted one is silent. In practice a conflict arrives before any grant, but nothing guarantees it. To be settled with conflict handling |
-| Outage cost | Closing everything on disconnect makes a paying peer lose the rest of its current grant. A grace period would instead carry peers unmetered for as long as it lasts |
+| No acknowledgment of a successful bind | A refused `bind` is reported; an accepted one is silent. In practice a conflict arrives before any purchase, but nothing guarantees it. To be settled with conflict handling |
+| Outage cost | Closing everything on disconnect draws nothing, but a budget whose deadline passes during the outage is lost. A grace period would instead carry peers unmetered for as long as it lasts |
 | The delegating client's request | Its form on the control socket is left to the control socket |
 | Delegated subject forms | Agreed per deployment between the delegating client and the enforcer; `tollgated` never reads them |
 | Moving built-in enforcers behind the socket | The built-in `ip` enforcer could become an external one. Not planned; nothing requires it |
@@ -821,7 +827,7 @@ handed bytes that are neither.
 | Type numbers | `0x20` upwards, clear of the wire protocol's | A message on the wrong socket fails to decode instead of being misread |
 | `bind` | Replaces the payer's whole set of subjects | Sending it twice does no harm, so resending the full state uses the same messages as normal operation |
 | Startup | The enforcer is closed until told otherwise | Nobody is carried before someone is metering them |
-| Disconnect | The enforcer goes back to closed; `tollgated` resends the full state, and sells nothing in the meantime | Nothing to reconcile, and nothing carried that nobody meters. Costs a paying peer at most its current grant |
+| Disconnect | The enforcer goes back to closed; `tollgated` resends the full state, sells nothing, and draws nothing in the meantime | Nothing to reconcile, and nothing carried that nobody meters. A payer pays nothing for the seconds it was not carried |
 | Counters | Running totals per payer for the life of the connection, sent every tick. On a reconnect `tollgated` adds the previous connection's last totals | A running total survives a lost report. Carrying totals across a reconnect keeps core's totals from going backwards |
 | Identity | One setting, `enforcer.identity: pubkey \| address`. Defaults: `address` for `ip` and `loopback`, `pubkey` for `fips`; `external` must write it. `pubkey` needs a network that proves keys, today FIPS, or `tollgated` refuses to start | Who a peer is decides what is bound, so it belongs in the config with the rest of the pairing. An external enforcer could match either, so it gets no default. Believing an announced key while the enforcer takes its subjects as proven keys opens a paying peer's traffic to anyone; so `pubkey` never means an announced key |
 | Identity names | `pubkey` and `address`, not `fips` and `claimed` | Named for what a peer is. FIPS is the only network that proves keys today, but a tunnel keyed by the TollGate key could too, and should not need a setting named after FIPS. `address` says what is actually trusted, where `claimed` said only what was not |

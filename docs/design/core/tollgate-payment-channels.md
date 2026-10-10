@@ -6,7 +6,7 @@ What peers pay each other with is documented in [tollgate-vouchers.md](tollgate-
 
 ## Overview
 
-Each pair of TollGate peers maintains **two unidirectional Spilman channels** — one per direction. Each is funded by the party that owes, and by default both sides owe: each pays for what it received from the other. A channel is absent only where a node has decided not to charge that peer at all.
+A Spilman channel is **unidirectional**, and there is one for each sale: the buyer funds it, and pays the seller on it. A customer — one node selling, the other buying — has one channel. A peering, where each node sells to the other, has two, one in each direction. There is none where a node has decided not to charge that peer at all.
 
 ![Channel Pair Structure](diagrams/channel-pair.svg)
 <details><summary>Text version</summary>
@@ -14,39 +14,41 @@ Each pair of TollGate peers maintains **two unidirectional Spilman channels** �
 ```
   Peer A                                          Peer B
   ┌──────────┐                              ┌──────────┐
-  │ receiver │←────── B delivers to A ──────│ sender   │
+  │ receiver │←──────── B sells to A ───────│ sender   │
   │ on A→B   │╌╌ Channel A→B: A pays B ────→│ on A→B   │
   │          │                              │          │
-  │ sender   │────── A delivers to B ──────→│ receiver │
+  │ sender   │──────── A sells to B ───────→│ receiver │
   │ on B→A   │←╌╌ Channel B→A: B pays A ╌╌╌│ on B→A   │
   └──────────┘                              └──────────┘
 
   ── resource   ╌╌ payment (Spilman channel)
-  Each side pays for what it received. Both channels, by default.
-  A received_multiplier adds a surcharge on top, where a node
-  would rather not carry what a peer pushes at it.
+  Peering: each node sells to the other, one channel per sale.
+  A customer has only the top half: one channel, A → B.
 ```
 </details>
 
 Spilman channels enable **streaming micropayments**: the sender locks ecash in a 2-of-2 multisig with a time-locked refund path, then signs successively larger balance updates. The receiver holds the latest signed update and can settle with the mint at any time.
 
-A Spilman channel is already a prepaid instrument — funding it is money committed before anything is delivered, and each update ratchets the receiver's claim upward. Grants use it as exactly that: **one TopUp is one signed update and one purchase**, and the state it carries is the cumulative total the payer has authorized on that channel ([tollgate-protocol.md](tollgate-protocol.md)).
+A Spilman channel is already a prepaid instrument — funding it is money committed before anything is delivered, and each update ratchets the receiver's claim upward. Purchases use it as exactly that: **one TopUp is one signed update and one purchase**, and the state it carries is the cumulative total the payer has authorized on that channel ([tollgate-protocol.md](tollgate-protocol.md)). What the purchase buys is kept apart from the channel, in the payer's budget.
 
-### Grants On A Channel
+### Purchases On A Channel
 
 <details><summary>Text version</summary>
 
 ```
   Channel A→B, funded by A, capacity 500 M units.
 
-  t=0    A → B: TopUp (cumulative 6.25M, window 5000 ms)
-                B verifies, shapes A to 1.25 M/s until t=5
+  t=0    A → B: TopUp (cumulative 6.25M, window 10000 ms,
+                       reserved 625,000/s)
+                B verifies, adds 6.25M to A's budget,
+                shapes A to at least 625,000/s
                 B's claim on the channel: 6.25M
 
-  t=3    A → B: TopUp (cumulative 106.25M, window 5000 ms)
-                grant 100M, so 20 M/s until t=8
-                B's claim on the channel: 106.25M
-                A forfeits whatever was left of the first grant
+  t=8    A → B: TopUp (cumulative 11.25M, window 10000 ms,
+                       reserved 625,000/s)
+                grant 5M, added to the 1.25M A had left
+                B's claim on the channel: 11.25M
+                nothing is forfeit
 
   No acknowledgment. Cumulative state is self-correcting, so a lost
   or reordered TopUp costs nothing and A never waits for a reply.
@@ -80,9 +82,11 @@ The Spilman channel lifecycle begins after peers have exchanged Announce and Off
 
 ### Funding
 
-Both peers can reach a mint. They exchange Accept messages containing Spilman funding proofs. Each side creates a channel where they are the sender (funder):
-- A creates and funds the A→B channel (A pays B for what B delivered to A)
-- B creates and funds the B→A channel (B pays A for what A delivered to B)
+Both peers can reach a mint. They exchange Accept messages, and each one that buys puts Spilman funding proofs in its Accept. A buyer creates the channel where it is the sender (funder):
+- A creates and funds the A→B channel when it buys from B
+- B creates and funds the B→A channel when it buys from A, in a peering
+
+A customer that only buys sends an Offer saying it will not charge, so its provider's Accept carries no funding.
 
 The sender's `tollgated` holds no vouchers, so it first gets them from its `merchantd`: `fund(mint, unit, amount)` returns vouchers of the chosen mint, paid from what `merchantd` holds or acquired on the spot ([tollgate-daemons.md](tollgate-daemons.md#funding-upstream)). They are locked into the channel as they arrive.
 
@@ -96,9 +100,9 @@ The funding process follows the Cashu Spilman protocol:
 
 ### Active
 
-Both channels are funded and verified. Each side buys grants on its own channel:
-- A payer sends TopUp whenever it wants capacity, at least once per window if it wants continuous service
-- The provider verifies, ratchets its claim, and shapes to `grant / window`
+Both channels are funded and verified. Each side buys on its own channel:
+- A payer sends TopUp whenever it wants capacity, and before its budget or its deadline runs out if it wants continuous service
+- The provider verifies, ratchets its claim, adds the grant to the payer's budget, and shapes the payer to at least its reserved rate while the budget lasts
 - Nothing is acknowledged and the two directions never synchronize
 
 ### RollingOver
@@ -154,31 +158,27 @@ This is a decision about a relationship, not a price — there is no delivery pr
 
 ---
 
-## What the Grant Window Is For
+## What the Window Is For
 
-The window is **not** a settlement clock and not a renegotiation point. It is
-the denominator of a rate: a grant of `n` units over a window of `w` buys
-`n / w` ([tollgate-vouchers.md](tollgate-vouchers.md)).
+The window is **not** a settlement clock and not a renegotiation point. It
+says how long the payer's budget is kept: a TopUp moves the deadline to the
+later of the old one and now plus its window
+([tollgate-protocol.md](tollgate-protocol.md#0x04-topup)).
 
-It is chosen by the payer, per grant, inside the range the provider advertised.
-Nothing is agreed between the two sides, and no boundary is shared — each side
-buys on its own schedule for its own windows.
+It is chosen by the payer, per purchase, inside the range the provider
+advertised. Nothing is agreed between the two sides, and no boundary is shared
+— each side buys on its own schedule.
 
-Three things follow from where the payer sets it:
+**The window does not tie up a channel.** A budget is kept in the provider's
+state, not in a channel, so it does not matter how long a window is compared
+with a channel's life. A budget bought on one channel is still there after the
+channel settles, and after the next one does. A provider that sells volume can
+accept windows of a month while its channels live an hour
+([Safety Margin](#safety-margin)).
 
-- **Batching.** One signature per grant rather than one per unit, which is the
-  whole point of a Spilman channel. A longer window means fewer signatures.
-- **Forfeiture risk.** Raising the rate before a window ends discards the
-  remainder, so the most a misjudgment can cost is one window's worth.
-- **Reaction granularity.** A short window makes a rate change cheap, so a
-  payer that expects bursty demand pays for that with message volume.
-
-The provider bounds it from both ends, for reasons of its own:
-
-| Bound | What it protects |
-|---|---|
-| `max_window_ms` | Stops capacity being bought off-peak and presented at peak |
-| `min_window_ms` | Caps signature verifications per second — the binding constraint on a constrained device, not bandwidth |
+How often a payer may buy is bounded by the provider's `min_topup_gap_ms`, not
+by the window: every TopUp costs a signature check per update and a write to
+disk, and the gap bounds how many a payer can cause.
 
 **The provider carries no delivery exposure at all.** Payment lands before the
 traffic it covers, so a peer that vanishes leaves nothing unpaid. What remains
@@ -186,12 +186,13 @@ is the payer's exposure, and it has two distinct bounds:
 
 | Risk | Bounded by |
 |---|---|
-| Payer buys a grant and the provider does not deliver | The grant — which is one window's worth |
+| Payer buys and the provider does not deliver | The payer's unspent budget with that provider, which is as large as the payer chooses to hold |
 | Payer funds a channel and the issuer refuses to honor the refund | Channel capacity |
 
-The second is the trust cost of the issuer being the mint
-([issuer-risk.md](../market/issuer-risk.md)). Shorter windows do not help it;
-funding smaller channels does.
+The first is the payer's own choice: a payer that tops up often, with what has
+drained, holds little ahead. The second is the trust cost of the issuer being
+the mint ([issuer-risk.md](../market/issuer-risk.md)). A smaller budget does
+not help it; funding smaller channels does.
 
 ---
 
@@ -267,7 +268,7 @@ A grant uses whichever channel has remaining capacity. When the old channel hold
 If mint connectivity is lost during rollover:
 - Balance updates on the old channel continue (they don't need the mint)
 - The new channel cannot be funded until mint returns
-- If the old channel exhausts before the new one is funded, that direction falls back to the minimum flow allowance — or pauses, if the allowance is zero — once the grant the old channel paid for runs out. That ends the TollGate session ([tollgate-access-control.md](tollgate-access-control.md)), but the connection stays open, so a new one starts as soon as the new channel is funded.
+- If the old channel exhausts before the new one is funded, that direction falls back to the minimum flow allowance — or pauses, if the allowance is zero — once the payer's budget runs out. That ends the TollGate session ([tollgate-access-control.md](tollgate-access-control.md)), but the connection stays open, so a new one starts as soon as the new channel is funded.
 - Once mint returns: new channel is funded, old channel is settled by the receiver
 
 ---
@@ -278,7 +279,7 @@ If mint connectivity is lost during rollover:
 
 | Operation | Needs mint? | Notes |
 |-----------|-------------|-------|
-| Grants (signing and verifying) | No | Signed between peers, no mint involvement |
+| Purchases (signing and verifying) | No | Signed between peers, no mint involvement |
 | Metering | No | Local computation, never exchanged |
 | Channel funding (open) | **Yes** | Must create 2-of-2 multisig token, from vouchers `merchantd` supplies |
 | Channel settlement (close) | **Yes** | Receiver must submit swap to mint, then burns or deposits its share |
@@ -288,7 +289,7 @@ If mint connectivity is lost during rollover:
 ### Offline Scenarios
 
 **Mint goes down during active session:**
-- Grants continue normally (no mint needed)
+- Purchases continue normally (no mint needed)
 - TopUp signing and verification work fine
 - If a channel exhausts, rollover is blocked until mint returns
 - If channel approaches expiry, urgency increases
@@ -305,17 +306,17 @@ If mint connectivity is lost during rollover:
 
 ## Reboot / State Loss
 
-Nodes are not expected to persist runtime state between restarts. On reboot, a node loses metering counters, grant state, channel tracking, and any signed TopUps it was holding. The identity key survives (it's in the config file), so the rebooted node has the same pubkey and can be recognized by peers.
+Nodes are not expected to persist most runtime state between restarts. On reboot, a node loses metering counters, reservations, channel tracking, and any signed TopUps it was holding. Two things survive on disk: its channel backups, and the budget of each payer that pays it, with its deadline ([Grant State](tollgate-protocol.md#grant-state)). The identity key survives (it's in the config file), so the rebooted node has the same pubkey and can be recognized by peers.
 
 The remaining peer (still online) is the only party that holds the latest channel state. Two scenarios apply, after a third that needs no recovery at all:
 
 ### Blip: both sides still hold state
 
-A dropped link is not a reboot. After an unclean disconnect each side holds the session for `stale_timeout_seconds`, and a peer that reconnects inside that time resumes both channels where they were: nothing is funded, and what was signed on them still counts. The grants are zeroed as for any new session, so each payer buys again as soon as the Offer arrives. The resume is confirmed with ChannelReady, not a new message — see Reconnection in [tollgate-protocol.md](tollgate-protocol.md#raw-tcp). A session held past the grace period is given up, and its incoming channels are settled. A held channel does not wait for that if its own settle point comes first: the receiver settles it at `expiry − safety_margin/2`, held or not, since past its expiry the payer can take it back through the refund path, and a resume then funds a new one in its place.
+A dropped link is not a reboot. After an unclean disconnect each side holds the session for `stale_timeout_seconds`, and a peer that reconnects inside that time resumes both channels where they were: nothing is funded, and what was signed on them still counts. Each payer's budget comes back as in any new session, and its reservation does not, so a payer that reserved a rate reserves it again with its next TopUp. The resume is confirmed with ChannelReady, not a new message — see Reconnection in [tollgate-protocol.md](tollgate-protocol.md#raw-tcp). A session held past the grace period is given up, and its incoming channels are settled. A held channel does not wait for that if its own settle point comes first: the receiver settles it at `expiry − safety_margin/2`, held or not, since past its expiry the payer can take it back through the refund path, and a resume then funds a new one in its place.
 
 ### Friendly recovery
 
-The online peer recognizes the reconnecting pubkey and shares back the channel state for both directions: channel IDs, cumulative balances, and signatures. The rebooted peer validates every signature before trusting any of it. If validation succeeds, both channels resume — the rebooted peer knows how much of its outgoing channel is spent, and holds the latest signed TopUp for its incoming channel. Grants themselves do not survive: the rebooted peer starts with no allowance for anyone, and each payer buys again.
+The online peer recognizes the reconnecting pubkey and shares back the channel state for both directions: channel IDs, cumulative balances, and signatures. The rebooted peer validates every signature before trusting any of it. If validation succeeds, both channels resume — the rebooted peer knows how much of its outgoing channel is spent, and holds the latest signed TopUp for its incoming channel. Budgets do not depend on it: the rebooted peer reads its payers' budgets from its own disk, whether or not the channels resume.
 
 This requires a protocol message (proposed `ChannelSync`) that the online peer sends after Announce when it detects a reconnecting pubkey with live channels. Not yet specified in [tollgate-protocol.md](tollgate-protocol.md) — **future work**.
 
@@ -323,7 +324,7 @@ This requires a protocol message (proposed `ChannelSync`) that the online peer s
 
 The online peer stays silent about the old channels. The rebooted peer falls back to a fresh session with new channels.
 
-`tollgated` keeps **channel backups on disk** — for each live channel, what it needs to settle or reclaim it: the funding, the keys, and the latest signed update. After a reboot it recovers from them where it can:
+`tollgated` keeps **channel backups on disk** — for each live channel, what it needs to settle or reclaim it: the funding, the keys, and the latest signed update. Beside them it keeps each payer's remaining budget and deadline, until that deadline. Settling a channel does not touch a budget, because the settlement collects the money that bought it, spent or not. After a reboot it recovers from them where it can:
 
 - **Outgoing channel** (rebooted peer was sender): the online peer holds the rebooted peer's last signed TopUp and can settle with the mint. The rebooted peer reclaims any remainder via Spilman's refund timelock after expiry, using its backup, then swaps it and reuses or deposits it like change. No loss beyond what was legitimately owed.
 - **Incoming channel** (rebooted peer was receiver): the backup holds the latest signed update it received, so it can still settle before expiry. What it loses is only what arrived after the last backup was written. **Without a backup, the rebooted peer loses all earned income on that channel**: the online peer waits for expiry and reclaims the full channel via the refund path.
@@ -347,15 +348,17 @@ Default TTL: **1 hour**. Configurable.
 The sender initiates a **rollover** when a channel enters the safety margin before expiry — creating a new channel and allowing the old one to be settled before the refund timelock activates.
 
 ```
-safety_margin = max(60 seconds, 2 × max_window_ms)
+safety_margin = channels.safety_margin_seconds     (default 60 seconds)
 ```
 
-`max_window_ms` is the **receiver's**, from its Offer, so both ends of a channel arrive at the same margin without negotiating it — provided they share the 60-second floor (`channels.safety_margin_seconds`), which is not advertised.
+Both ends of a channel need the same margin, so both must configure the same value; it is not advertised.
+
+**The margin does not depend on the window.** What a payer buys on a channel is kept in its budget, apart from the channel, and survives the channel's settlement ([Grant State](tollgate-protocol.md#grant-state)). So a window of any length, a second or a month, puts no lower bound on how long a channel must live, and `channels.ttl_seconds` need not grow with `max_window_ms`.
 
 Within the safety margin:
 1. Sender initiates rollover (RolloverInit) to create a new channel
 2. Once the replacement is confirmed, the sender moves onto it at once, giving up what is left on the old channel rather than draining it. Without a replacement it keeps buying on the old channel until the receiver's settle point, and from there nothing until the replacement arrives
-3. The receiver settles the old channel at its **settle point**, `safety_margin / 2` before expiry, leaving at least one window before the refund path opens
+3. The receiver settles the old channel at its **settle point**, `safety_margin / 2` before expiry, leaving time for the mint before the refund path opens
 4. If receiver is unresponsive: sender waits for expiry and reclaims via refund path
 5. If mint unreachable: receiver retries until expiry (see [Settlement Failure](#settlement-failure))
 
@@ -497,7 +500,7 @@ If channel funding fails (mint unreachable, `merchantd` cannot supply the vouche
 
 ### Settlement Failure
 
-Core emits `SettleChannel` once and drops the channel from the grant in the same step, so it never asks again. A failed settlement that nobody retried would be lost outright: after the refund timelock the funder reclaims the whole channel, including what it had already paid. Retrying is therefore the host's job — it is I/O and time, which core does not do.
+Core emits `SettleChannel` once and stops tracking the channel in the same step, so it never asks again. A failed settlement that nobody retried would be lost outright: after the refund timelock the funder reclaims the whole channel, including what it had already paid. Retrying is therefore the host's job — it is I/O and time, which core does not do.
 
 If settlement fails:
 - Keyset errors (12xxx): the backend refreshes keysets and retries once, inside the one `settle` call
@@ -506,7 +509,7 @@ If settlement fails:
 - One channel is never settled by two attempts at once
 - `settle` is idempotent: settling a channel that already settled succeeds and moves nothing, so a retry that races a success is harmless
 
-On shutdown the node settles every channel still in a grant, and every retry still waiting wakes for a last attempt. They all share a short grace period (5 s), retrying on the same backoff but never past it; whatever is still unsettled then is abandoned rather than holding the node open.
+On shutdown the node settles every channel it is still paid on, and every retry still waiting wakes for a last attempt. They all share a short grace period (5 s), retrying on the same backoff but never past it; whatever is still unsettled then is abandoned rather than holding the node open.
 
 Each retry gives up at the channel's refund expiry, since past it the funder can take the money back. `Action::SettleChannel` carries the expiry core holds for the channel, and the node puts it on its own clock as the retry's deadline; a channel with no expiry is retried without one.
 
@@ -514,7 +517,7 @@ Retries live in memory only. A settlement still failing when the node stops is f
 
 ### Balance Verification Failure
 
-A TopUp is honored or refused as a whole, and one TopUp can carry updates for several channels — a purchase spanning a rollover carries two. So verifying and keeping are separate steps. The host verifies every update's signature with `verify_update`, which records nothing, and hands core the TopUp only if all of them pass. Core decides whether to grant it; only when it accepts does it emit `Action::RecordUpdates`, and only then does the host call `record_update` on each, making it the state `settle` submits. A TopUp refused for any reason — one bad signature, a window out of range, a rate over capacity — leaves the backend's record where it was, so the backend never holds a signed state the grant did not pay for, and a payer retrying the same purchase is judged against the same state as the first time. `RecordUpdates` comes before any `SettleChannel` the same purchase sets off, so a channel the purchase filled settles at the state it paid for.
+A TopUp is honored or refused as a whole, and one TopUp can carry updates for several channels — a purchase spanning a rollover carries two. So verifying and keeping are separate steps. The host verifies every update's signature with `verify_update`, which records nothing, and hands core the TopUp only if all of them pass. Core decides whether to grant it; only when it accepts does it emit `Action::RecordUpdates`, and only then does the host call `record_update` on each, making it the state `settle` submits. A TopUp refused for any reason — one bad signature, a window out of range, a reserved rate over capacity — leaves the backend's record where it was, so the backend never holds a signed state no accepted purchase paid for, and a payer retrying the same purchase is judged against the same state as the first time. `RecordUpdates` comes before any `SettleChannel` the same purchase sets off, so a channel the purchase filled settles at the state it paid for.
 
 If a received TopUp fails signature verification, or its cumulative total does not exceed the current one (including a channel named twice in one purchase):
 - Send Reject (reason: grant signature invalid, or cumulative not increasing)
@@ -526,11 +529,11 @@ The signature is checked by the host; core is only told which channel failed. Fa
 
 ### Grant Rejected
 
-If a TopUp cannot be honored — the rate would oversubscribe committed capacity, the window falls outside the advertised range, or the grant exceeds what is left in the channel — the provider sends TopUpReject and does **not** ratchet its claim. The payer's money is untouched, because an unclaimed Spilman state is worth nothing. The payer re-purchases at the rate the reject offered, or stops.
+If a TopUp cannot be honored — it came inside the provider's gap between purchases, its reserved rate would oversubscribe committed capacity, its window or reserved rate falls outside the advertised range, or the grant exceeds what is left in the channel — the provider sends TopUpReject with the reason and does **not** ratchet its claim. The payer's money is untouched, because an unclaimed Spilman state is worth nothing. The payer acts on the reason: it waits out the gap, lowers its reserved rate to what the reject offered, fixes its terms, or stops ([tollgate-protocol.md](tollgate-protocol.md#0x05-topupreject)).
 
 ### Under-Delivery
 
-A payer that receives less than it bought has no protocol recourse: the grant was consumed and the provider holds the claim. This is deliberate — see [tollgate-metering.md](tollgate-metering.md). The channel layer's only role is to make the exit cheap: close the channel, settle at the current state, and take the remaining funding elsewhere.
+A payer that receives less than it bought has no protocol recourse: the budget was drawn and the provider holds the claim. This is deliberate — see [tollgate-metering.md](tollgate-metering.md). The channel layer's only role is to make the exit cheap: close the channel, settle at the current state, and take the remaining funding elsewhere.
 
 ---
 
@@ -538,19 +541,20 @@ A payer that receives less than it bought has no protocol recourse: the grant wa
 
 | Decision | Resolution | Rationale |
 |----------|-----------|-----------|
-| Channels per peer pair | Two unidirectional, one per direction | Each side pays for what it received, so both owe by default. Absent only where a node declines to charge a peer |
+| Channels per peer pair | One unidirectional channel per sale: one for a customer, two for a peering | The buyer funds what it buys. A customer's provider buys nothing back, so a customer needs no mint |
 | Channel ownership | Sender manages own channel lifecycle | Rollover initiated by the funder alone — only the party putting up new funds decides when |
 | Rollover threshold | 80% capacity (configurable, default 20% overlap) | New channel ready before old exhausts |
 | Rollover drain | Old channel drains to 100%, then new channel continues | No wasted capacity |
 | Stale session timeout | 60 seconds (configurable) | Close the connection to a peer that has gone silent; a lapsed payment ends the TollGate session but not the connection. The same time is the grace period for resuming channels after an unclean disconnect |
-| Grant window | Payer chooses per grant, inside a provider-advertised range | It is the denominator of a rate, not a settlement clock. Nothing is negotiated and no boundary is shared |
+| Window | Payer chooses per purchase, inside a provider-advertised range | It says how long the budget is kept, not when anything settles. Nothing is negotiated and no boundary is shared |
+| Budget and channels | Kept per payer in node state, apart from any channel, until its deadline; untouched by rollover and settlement; written to disk beside the channel backups | The budget was paid for by updates the provider already holds, so a channel ending is no reason to take it. Keeping it apart is what lets it survive a reconnect that funds a new channel, and what lets a window run for a month without month-long channels |
 | Provider delivery exposure | None | Payment lands before the traffic it covers, so a peer that vanishes leaves nothing unpaid |
-| Under-delivery | No recourse in the channel layer | The grant is consumed whether or not packets arrive. The remedy is to stop buying, and the channel layer's job is only to make leaving cheap |
+| Under-delivery | No recourse in the channel layer | The budget is drawn whether or not packets arrive. The remedy is to stop buying, and the channel layer's job is only to make leaving cheap |
 | Channel capacity | Start small, grow with relationship | Don't over-commit to new peers |
 | Channel TTL | 1 hour default, configurable | Balance between overhead and capital lockup |
-| Safety margin | max(60s, 2×max_window_ms) before expiry — triggers rollover | Create new channel, settle old before expiry |
+| Safety margin | `safety_margin_seconds` (60 s) before expiry, whatever the window — triggers rollover | Create new channel, settle old before expiry. The window does not count, because nothing bought on a channel is lost when it settles |
 | Settlement | Only receiver submits to mint | Receiver holds the signed proof |
 | Funding source | `tollgated` asks `merchantd` (`fund`) | The protocol daemon holds nothing of value |
 | After settlement | Own-mint share burned at `mintd`; another mint's kept (deposited with `merchantd`) or burned, per mint; funder's change and reclaimed refunds swapped for fresh proofs, then reused for the next channel in that mint or deposited | Delivered claims are cancelled; value lives only in `merchantd` ([tollgate-daemons.md](tollgate-daemons.md)) |
 | Channel backups | `tollgated` persists each live channel's funding, keys and latest signed update | A reboot costs at most what arrived since the last backup, instead of a whole channel's earnings |
-| Offline operation | Grants continue; funding/settlement queued | Mint only needed for channel lifecycle transitions |
+| Offline operation | Purchases continue; funding/settlement queued | Mint only needed for channel lifecycle transitions |

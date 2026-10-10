@@ -56,13 +56,14 @@ What a unit costs in money is settled where vouchers are bought, in the
 [market](docs/design/market/README.md), which the payment protocol never
 sees.
 
-A buyer prepays a **grant**: a quantity paired with a window, so what it
-buys is a rate. The seller shapes the buyer to exactly that rate. A
+A buyer prepays into a **budget** with the seller, and every second the
+seller draws from it the larger of what the buyer moved and the rate the
+buyer reserved. Reserving a rate buys time at a speed; reserving nothing
+pays only for what is used. Each purchase adds to the budget and can
+extend its deadline; whatever is left at the deadline expires. A
 purchase takes effect on arrival — the signed channel state is
-cumulative, so a lost message costs nothing — and raising a rate
-mid-window forfeits what was left of the grant in force. A peer that has
-bought nothing is held at a small minimum flow, enough to reach a mint
-and buy.
+cumulative, so a lost message costs nothing. A peer that has bought
+nothing is held at a small minimum flow, enough to reach a mint and buy.
 
 Payment flows over Cashu Spilman channels: the buyer funds a 2-of-2
 multisig token in the seller's mint, and each purchase is a signed
@@ -118,7 +119,7 @@ follow the reading order in the [design README](docs/design/README.MD).
 | Document | Description |
 | -------- | ----------- |
 | [tollgate-intro.md](docs/design/core/tollgate-intro.md) | Goals, architecture, payment model, security |
-| [tollgate-vouchers.md](docs/design/core/tollgate-vouchers.md) | Vouchers: denomination, grants and windows, who pays |
+| [tollgate-vouchers.md](docs/design/core/tollgate-vouchers.md) | Vouchers: denomination, budgets and reserved rates, who pays |
 | [tollgate-protocol.md](docs/design/core/tollgate-protocol.md) | CBOR wire protocol and message flow |
 | [tollgate-payment-channels.md](docs/design/core/tollgate-payment-channels.md) | Spilman channel lifecycle and rollover |
 | [tollgate-access-control.md](docs/design/core/tollgate-access-control.md) | Delivery gates, access levels, FIPS bloom filter visibility |
