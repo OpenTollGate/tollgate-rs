@@ -29,10 +29,15 @@ use crate::node::Node;
 use crate::wire::Connector;
 
 /// The window each purchase a session makes asks for, and so the budget it
-/// holds: ten seconds of the rate it reserves. A proxied device's rate holds
-/// until its user changes it, and a raised rate is bought at once whatever the
-/// window, so a longer one only means fewer purchases.
-const WINDOW_MS: u32 = 10_000;
+/// holds: an hour of the rate it reserves, or as long as the gateway allows.
+///
+/// A reserved budget drains at its rate whether it is used or not, so a long
+/// window costs no more than a short one. It means fewer purchases, and a
+/// budget that outlives a restart of the gateway or of the session. A raised
+/// rate is bought at once whatever the window. What the session can hold is
+/// also bounded by its channels: a purchase bigger than the channel in use
+/// takes what fits, and the rollover opens the rest.
+const WINDOW_MS: u32 = 3_600_000;
 
 /// How long before its budget runs out the session buys again. Below
 /// [`tollgate_core::buyer::BuyerPolicy::MIN_SAFE_LEAD_MS`]: the gateway is on

@@ -302,6 +302,12 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 ### Changed
 
+- `tollgate_net::client` sessions ask for an hour's window instead of ten
+  seconds. A reserved budget drains at its rate whatever the window, so the
+  longer one costs nothing more, buys less often, and outlives a restart. The
+  node's own `buying.window_ms` default stays 10 s, as
+  `tollgate-configuration.md` gives it.
+
 - One accounting rule replaces grants that replaced each other
   (`docs/design/core/tollgate-vouchers.md`, "The One Rule"). Each payer has a
   budget, a deadline and a reserved rate. A TopUp adds its grant to the budget
