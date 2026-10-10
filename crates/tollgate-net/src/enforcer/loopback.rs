@@ -5,10 +5,10 @@
 //! and the accounting are real, which is what lets the whole protocol be
 //! exercised on any platform.
 //!
-//! The shaper is a token bucket. A grant buys a rate that is fixed for the
-//! grant's life, so a bucket refilling at that rate and capped at a short burst
-//! is the natural enforcement: capacity left unused early is not banked, which
-//! is exactly what the cap expresses.
+//! The shaper is a token bucket. Core hands it one rate per peer, so a bucket
+//! refilling at that rate and capped at a short burst is the natural
+//! enforcement: capacity left unused early is not banked, which is exactly
+//! what the cap expresses.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -25,8 +25,8 @@ use super::Enforcer;
 ///
 /// Some slack absorbs scheduling jitter — a writer that wakes 30 ms late should
 /// still be able to send what it was owed. Too much and a buyer could idle and
-/// then burst, which is the thing grants exist to prevent, so this stays well
-/// under one window.
+/// then burst well past the rate it is shaped to, so this stays well under a
+/// second.
 const BURST_MS: u64 = 250;
 
 /// One peer's link, as the enforcer sees it.
@@ -39,7 +39,7 @@ struct Link {
     tokens: u64,
     /// Cumulative units delivered to and received from this peer, since the
     /// session started. Raw — the received multiplier is applied by core when
-    /// it draws the grant down, not here.
+    /// it draws the budget down, not here.
     counters: Counters,
     /// Units per second *we* want to pull from this peer. Drives our buying.
     demand: u64,

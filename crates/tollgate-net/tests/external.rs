@@ -727,6 +727,7 @@ fn config(identity: Identity, listen: std::net::SocketAddr, peers: Vec<PeerConfi
         mint_url: "http://127.0.0.1/unused".into(),
         mint_local: "http://127.0.0.1/unused".into(),
         connector: None,
+        budget_file: None,
         channel_ttl_seconds: 3_600,
         peers,
     }

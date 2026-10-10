@@ -9,7 +9,7 @@
 //!
 //! [`Ip`](super::Ip) binds a peer's public key to whatever address
 //! it announced itself from, on the peer's own say-so. On an unwrapped IP
-//! network that is a real hole: claim a paying peer's key and its grant gates
+//! network that is a real hole: claim a paying peer's key and its budget gates
 //! your address.
 //!
 //! FIPS names peers by npub and has already authenticated the link with a Noise
@@ -227,7 +227,7 @@ impl Fips {
         for peer in peers.values_mut() {
             // A peer FIPS has not reported keeps the reading it had. Zeroing it
             // would look like a settled channel rather than a missing answer,
-            // and core draws grants down from these.
+            // and core draws budgets down from these.
             if let Some(&(to_payer, from_payer)) = by_addr.get(peer.node_addr.as_str()) {
                 peer.counters = Counters {
                     to_payer,
@@ -379,7 +379,7 @@ impl Enforcer for Fips {
             return;
         };
         // Drop the policy rather than leaving the peer admitted at whatever it
-        // last bought: a session that has gone away has no grant behind it.
+        // last bought: a session that has gone away has no budget behind it.
         if let Err(e) = self.request(
             "clear_transit_policy",
             serde_json::json!({ "npub": entry.npub }),

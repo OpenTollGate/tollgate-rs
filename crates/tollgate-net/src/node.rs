@@ -21,6 +21,7 @@ use tollgate_protocol::{
 };
 use tracing::{debug, info, warn};
 
+use crate::budgets::{self, BudgetStore};
 use crate::channel::{self, ChannelBackend, MintNotAccepted};
 use crate::control;
 use crate::enforcer::Enforcer;
@@ -30,9 +31,9 @@ use crate::wire::{self, Connection, PeerIdentity, Wire};
 
 /// How often the node samples its meters and ticks core.
 ///
-/// The meter sample is what draws grants down, so this also bounds how far past
-/// its grant a peer can get before the shaper notices. It has to be well under
-/// the smallest grant window a payer can ask for.
+/// The meter sample is what draws budgets down, and a payer near the end of
+/// its budget is slowed so it cannot move more than is left in one of these.
+/// It has to be well under the shortest window a payer can ask for.
 pub(crate) const TICK: Duration = Duration::from_millis(100);
 
 /// How long a shutdown keeps retrying settlements that fail.
@@ -103,6 +104,9 @@ pub struct NodeConfig {
     pub channel_ttl_seconds: u64,
     /// Peers to dial. Anyone else has to dial us.
     pub peers: Vec<PeerConfig>,
+    /// Where each payer's budget is kept between sessions and across
+    /// restarts, or `None` to keep them in memory only.
+    pub budget_file: Option<std::path::PathBuf>,
     /// How to open a connection to a peer, if not the plain way.
     pub connector: Option<wire::Connector>,
 }
@@ -146,6 +150,14 @@ pub struct Node {
     /// Channel fundings a peer sent while the enforcer was not selling to it,
     /// verified once it is. See [`Enforcer::selling`].
     deferred: HashMap<PubKey, Vec<Vec<u8>>>,
+    /// Each payer's budget, kept between sessions.
+    budgets: BudgetStore,
+    /// What each peer's budget is kept under: its key, and under
+    /// `enforcer.identity: address` the address it last connected from. Kept
+    /// after the peer goes, since its session ends after its link does.
+    budget_keys: HashMap<PubKey, String>,
+    /// Who a connecting peer is, which decides what a budget is kept under.
+    peer_identity: PeerIdentity,
     /// What the node is doing, republished each tick for the control socket.
     published: control::Published,
     started: Instant,
@@ -179,6 +191,12 @@ impl Node {
             channels,
             links: HashMap::new(),
             deferred: HashMap::new(),
+            budgets: match &config.budget_file {
+                Some(path) => BudgetStore::open(path),
+                None => BudgetStore::in_memory(),
+            },
+            budget_keys: HashMap::new(),
+            peer_identity: config.peer_identity,
             published: Default::default(),
             started: Instant::now(),
         }
@@ -349,7 +367,15 @@ impl Node {
                 // Tie the key the protocol knows to the address the kernel
                 // knows, before anything is gated or shaped for this peer.
                 self.enforcer.register(peer, addr.ip());
-                self.dispatch(Event::PeerConnected { peer, budget: None }, done)
+                // The budget it left behind, if it is the same payer: the
+                // same key, and under address identity the same address.
+                let key = budgets::key(peer, addr.ip(), self.peer_identity);
+                let budget = self.budgets.get(&key, self.now());
+                if let Some(b) = budget {
+                    info!(%peer, remaining = b.remaining, "a payer came back to its budget");
+                }
+                self.budget_keys.insert(peer, key);
+                self.dispatch(Event::PeerConnected { peer, budget }, done)
                     .await;
             }
             Wire::PeerDown { peer, conn } => {
@@ -393,6 +419,15 @@ impl Node {
                     self.send(peer, Message::TopUpReject(reject)).await;
                     return;
                 }
+                // The gap between purchases first, before any signature is
+                // checked: it exists to bound how many a payer can cause. One
+                // that came too soon is refused unread.
+                if let Message::TopUp(ref t) = msg
+                    && let Some(refusal) = self.sessions.too_soon(peer, t, self.now())
+                {
+                    self.execute(refusal, done).await;
+                    return;
+                }
                 // Core trusts what it is handed, so the signature is checked
                 // here — before the message reaches anything that acts on it.
                 // Every update in the purchase, since it is honored or refused
@@ -417,6 +452,15 @@ impl Node {
                 }
                 match msg {
                     Message::TopUpReject(ref r) => log_refusal(peer, r, Side::Received),
+                    Message::Balance(ref b) => {
+                        debug!(
+                            %peer,
+                            remaining = b.remaining,
+                            expires_in_ms = b.expires_in_ms,
+                            reserved_rate = b.reserved_rate,
+                            "the peer reported our budget with it"
+                        );
+                    }
                     Message::Reject(ref r) => {
                         warn!(%peer, reason = ?r.reason, rejected_type = r.rejected_type, "a peer rejected our message");
                     }
@@ -733,7 +777,14 @@ impl Node {
             }
 
             Action::SaveBudget { peer, budget } => {
-                debug!(%peer, remaining = budget.remaining, "budget to keep");
+                let Some(key) = self.budget_keys.get(&peer) else {
+                    return;
+                };
+                let now = self.now();
+                if let Err(e) = self.budgets.put(key, budget, now) {
+                    // Kept in memory still; only a restart would lose it.
+                    warn!(%peer, error = format!("{e:#}"), "could not write a budget to disk");
+                }
             }
 
             Action::DropPeer { peer } => {
@@ -784,10 +835,12 @@ enum Side {
 ///
 /// Severity follows [`ReasonCode::avoidable_from_offer`]. Nearly every reason
 /// means the peer ignored something we advertised, or that a revised Offer
-/// crossed its message in flight — a real fault, and a warning. A rate refusal
-/// is not: the Offer carries no rate ceiling, so being refused and told what
-/// would be accepted is how a payer is *supposed* to find the limit. Logging
-/// that as a fault would bury the ones that are.
+/// crossed its message in flight — a real fault, and a warning. A capacity
+/// refusal is not: the Offer carries no rate ceiling, so being refused and told
+/// what would be accepted is how a payer is *supposed* to find the limit. Nor
+/// is one for coming too soon, which two TopUps sent a gap apart can earn by
+/// arriving closer together. Logging those as faults would bury the ones that
+/// are.
 fn log_refusal(peer: PubKey, reject: &TopUpReject, side: Side) {
     let direction = match side {
         Side::Sent => "refused a peer's purchase",
@@ -806,8 +859,9 @@ fn log_refusal(peer: PubKey, reject: &TopUpReject, side: Side) {
         info!(
             %peer,
             channels,
+            reason = ?reject.reason,
             max_reserved_rate = reject.max_reserved_rate,
-            "{direction}: rate above what is uncommitted"
+            "{direction}: over capacity, or sooner than the gap allows"
         );
     }
 }
@@ -916,6 +970,7 @@ mod tests {
             channel_ttl_seconds: 3_600,
             peers: Vec::new(),
             connector: None,
+            budget_file: None,
         };
         Node::new(&config, channels, enforcer)
     }

@@ -25,11 +25,11 @@
 //! involved, and that is a design choice rather than an omission.
 //!
 //! And only traffic we **forward**, never traffic that terminates here. The
-//! distinction is load-bearing rather than tidy. A peer whose grant has lapsed
+//! distinction matters; it is not tidiness. A peer whose budget has run out
 //! falls to the minimum flow allowance, and the whole point of that allowance is
 //! to leave it able to reach us and buy its way back up. Shaping by destination
 //! address would put the control plane and the mint in the same class as the
-//! bulk transit that just exhausted the grant, so a peer saturating its link
+//! bulk transit that just used up its budget, so a peer saturating its link
 //! would starve the very messages that would have renewed it — a deadlock that
 //! ends with the session dropped as stale.
 //!
@@ -71,7 +71,7 @@
 //! So a customer that is on the link is also tied to its **MAC**, read from
 //! the IPv4 neighbour table, and through the MAC to the IPv6 addresses the
 //! IPv6 neighbour table lists for it (a [`Link`]). Its IPv6 traffic is then
-//! charged to the same grant as its IPv4:
+//! charged to the same budget as its IPv4:
 //!
 //! - **gated** by source MAC on the way out, and by destination address on
 //!   the way in, through `known_mac` / `allowed_mac` and `known6` /
@@ -120,9 +120,9 @@ const TABLE: &str = "tollgate";
 
 /// Burst allowed by a peer's class, in milliseconds of its rate.
 ///
-/// Deliberately tiny, because a grant is a quantity as well as a rate. Burst is
-/// permission to run ahead of the rate, and a peer that runs ahead spends the
-/// quantity before the window that sized it has elapsed — so the grant lapses
+/// Deliberately tiny, because a budget is a quantity as well as a rate. Burst
+/// is permission to run ahead of the rate, and a peer that runs ahead spends
+/// the budget before the window that sized it has elapsed — so it runs out
 /// early, the class collapses to the allowance with a full window's worth of
 /// packets in flight, and the transfer it was carrying stalls for seconds
 /// recovering. A quarter-second of burst was enough to do that on every few
@@ -498,7 +498,7 @@ impl Ip {
                 info!(%peer, addr = %entry.addr, "the peer's MAC is back within its IPv6 addresses");
             }
             if link != entry.link {
-                info!(%peer, addr = %entry.addr, link = ?link, "the peer's IPv6 follows its grant");
+                info!(%peer, addr = %entry.addr, link = ?link, "the peer's IPv6 follows its budget");
             }
             entry.metering = metering;
             entry.link = link;
@@ -993,7 +993,7 @@ impl Enforcer for Ip {
         // packet headed for this peer is exactly the packet its class should
         // shape. For an upstream that is traffic that terminates at it, not
         // transit we route through it — shaping that to what the upstream has
-        // bought from us would cap our own customers' uploads at its grant.
+        // bought from us would cap our own customers' uploads at what it bought.
         let mark = MARK_BASE | classid as u32;
         let _ = nft(&[
             "add",

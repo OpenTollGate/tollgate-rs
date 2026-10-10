@@ -7,7 +7,7 @@
 //!
 //! Each side writes to the other at whatever its shaper currently permits, and
 //! counts what it writes as delivered and what it reads as received. Those are
-//! the same two counters core draws grants down against, so the loop closes:
+//! the same two counters core draws budgets down against, so the loop closes:
 //! demand drives a purchase, the purchase raises the shaping rate, the shaper
 //! releases more bytes, and the throughput the operator sees follows.
 //!

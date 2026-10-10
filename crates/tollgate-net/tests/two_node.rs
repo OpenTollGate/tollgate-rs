@@ -141,6 +141,7 @@ async fn spawn_node_with(
         // and nothing binds this.
         mint_local: "http://127.0.0.1/unused".into(),
         connector: None,
+        budget_file: None,
         mint_url: "http://127.0.0.1/unused".into(),
         channel_ttl_seconds: 3_600,
         peers,
@@ -584,6 +585,7 @@ async fn spawn_flaky_node(
         // and nothing binds this.
         mint_local: "http://127.0.0.1/unused".into(),
         connector: None,
+        budget_file: None,
         mint_url: "http://127.0.0.1/unused".into(),
         channel_ttl_seconds: 3_600,
         peers,

@@ -28,16 +28,16 @@ use crate::enforcer::{Enforcer, Loopback};
 use crate::node::Node;
 use crate::wire::Connector;
 
-/// How long each grant a session buys lasts. A proxied device's rate holds
-/// until its user changes it, so long windows cost little in reaction and keep
-/// the forfeit on each renewal (lead / window) small.
+/// The window each purchase a session makes asks for, and so the budget it
+/// holds: ten seconds of the rate it reserves. A proxied device's rate holds
+/// until its user changes it, and a raised rate is bought at once whatever the
+/// window, so a longer one only means fewer purchases.
 const WINDOW_MS: u32 = 10_000;
 
-/// How long before a grant runs out the session buys the next. Below
-/// [`tollgate_core::buyer::BuyerPolicy::MIN_SAFE_LEAD_MS`] on purpose: the
-/// gateway is on the same machine, and at 250 ms of 10 s only 2.5% of each
-/// grant is forfeit instead of 30%. If renewals land late under load, the
-/// phone's flows stall for seconds — raise this first.
+/// How long before its budget runs out the session buys again. Below
+/// [`tollgate_core::buyer::BuyerPolicy::MIN_SAFE_LEAD_MS`]: the gateway is on
+/// the same machine. Nothing is forfeit by buying early, so if purchases land
+/// late under load and the phone's flows stall for seconds, raise this first.
 const RENEW_LEAD_MS: u32 = 250;
 
 /// What a buyer session needs to know.

@@ -891,6 +891,7 @@ impl File {
             mint_url: self.mint.url.clone(),
             mint_local: self.mint.local_url().to_owned(),
             connector: None,
+            budget_file: None,
             channel_ttl_seconds: self.channels.ttl_seconds,
             peers,
         })
@@ -929,6 +930,13 @@ pub(crate) fn state_file(name: &str) -> PathBuf {
         return PathBuf::from(format!("{xdg}/tollgate/{name}"));
     }
     PathBuf::from(format!("/tmp/tollgate-{name}"))
+}
+
+/// Where an instance keeps its payers' budgets: in the state directory, beside
+/// the wallet and the mint, one file per instance so two instances on one
+/// machine never share one.
+pub fn budget_file(instance: &str) -> PathBuf {
+    state_file(&format!("budgets-{instance}.json"))
 }
 
 /// Parse a hex-encoded compressed public key.

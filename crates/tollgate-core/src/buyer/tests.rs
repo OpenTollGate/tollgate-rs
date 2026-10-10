@@ -460,6 +460,21 @@ fn a_capacity_refusal_is_answered_at_the_rate_the_provider_named() {
 }
 
 #[test]
+fn told_nothing_is_free_a_reserving_buyer_holds_until_the_cap_lapses() {
+    let mut buyer = opened(CAPACITY);
+    let p = buy(&mut buyer, &policy(), demand(400_000), Millis(0));
+    buyer.record_reject(
+        &refused(&p),
+        ReasonCode::RateExceedsCapacity,
+        0,
+        Millis(10),
+        10_000,
+    );
+    assert!(poll(&buyer, &policy(), demand(400_000), Millis(5_000)).is_none());
+    assert!(poll(&buyer, &policy(), demand(400_000), Millis(10_010)).is_some());
+}
+
+#[test]
 fn a_rebuy_under_a_named_cap_says_so() {
     let mut buyer = opened(CAPACITY);
     buy(&mut buyer, &policy(), demand(400_000), Millis(0));

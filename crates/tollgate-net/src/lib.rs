@@ -34,6 +34,7 @@
 //! - [`instance`] — named instances, and the runtime directory each keeps its
 //!   sockets in.
 
+pub mod budgets;
 pub mod channel;
 pub mod client;
 pub mod config;

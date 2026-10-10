@@ -179,5 +179,10 @@ fn reserved_rate(
     if let Some(cap) = buyer.cap(now) {
         rate = rate.min(cap);
     }
+    // A buyer of time at a speed that is told nothing is free holds there
+    // rather than buying a budget of nothing, until the cap lapses.
+    if policy.reserve && rate == 0 {
+        return None;
+    }
     (rate >= terms.min_reserved_rate).then_some(rate)
 }

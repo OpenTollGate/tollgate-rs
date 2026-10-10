@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
         })
         .init();
 
-    let config = file.resolve().context("resolve configuration")?;
+    let mut config = file.resolve().context("resolve configuration")?;
 
     if args.show_identity {
         println!("pubkey:     {}", hex::encode(config.identity.pubkey().0));
@@ -286,6 +286,11 @@ async fn main() -> Result<()> {
             anyhow::bail!("enforcer.kind: external needs a Unix socket")
         }
     };
+
+    // Each payer's budget outlives its session and this node's run.
+    let budgets = tollgate_net::config::budget_file(&instance);
+    info!(budgets = %budgets.display(), "payers' budgets kept at");
+    config.budget_file = Some(budgets);
 
     let node = Node::new(&config, channels, enforcer.clone());
 
