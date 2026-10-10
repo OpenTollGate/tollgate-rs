@@ -10,17 +10,17 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tollgate_protocol::{
-    ChannelId, ChannelUpdate, Disconnect, Message, PubKey, ReasonCode, Reject, Signature, TopUp,
-    TopUpReject,
+    Balance, ChannelId, ChannelUpdate, Disconnect, Message, PubKey, ReasonCode, Reject, Signature,
+    TopUp, TopUpReject,
 };
 
 use super::*;
 use crate::access::AccessLevel;
 use crate::action::Action;
 use crate::buyer::{BuyerPolicy, FUNDING_TIMEOUT_MS};
-use crate::config::{GrantPolicy, NodePolicy, PeerPolicy};
+use crate::config::{BurstPolicy, GrantPolicy, NodePolicy, PeerPolicy};
 use crate::event::Event;
-use crate::grant::MAX_VERIFICATION_FAILURES;
+use crate::grant::{Budget, MAX_VERIFICATION_FAILURES};
 use crate::meter::Counters;
 use crate::time::Millis;
 
@@ -36,18 +36,24 @@ fn node_policy(mint: &str) -> NodePolicy {
     NodePolicy {
         unit: "byte".into(),
         accepted_mints: vec![mint.into()],
-        received_multiplier: 0,
+        // What the payer sends is free unless a test says otherwise, so the
+        // numbers below are the download alone.
+        from_payer_weight: 0,
         minimum_flow: 4_096,
         grants: GrantPolicy {
             min_window_ms: 200,
             max_window_ms: 30_000,
+            min_reserved_rate: 0,
+            min_topup_gap_ms: 200,
             max_rate: None,
         },
+        burst: BurstPolicy::default(),
+        tick_ms: 1_000,
         initial_channel_capacity: CHANNEL_CAPACITY,
         min_channel_capacity: 1,
         max_channel_capacity: u64::MAX,
         capacity_growth_pct: 200,
-        safety_margin_floor_ms: 60_000,
+        safety_margin_ms: 60_000,
         stale_timeout_ms: 0,
         rollover_threshold_pct: 80,
     }
@@ -101,6 +107,13 @@ struct Node {
     offers_sent: BTreeMap<PubKey, usize>,
     /// The last Offer this node sent each peer.
     last_offer: BTreeMap<PubKey, tollgate_protocol::Offer>,
+    /// Each payer's budget as this node last asked for it to be kept: what
+    /// the host writes to disk, and hands back when the payer connects.
+    saved: BTreeMap<PubKey, Budget>,
+    /// Every Balance this node was sent, by whom, in order.
+    balances: Vec<(PubKey, Balance)>,
+    /// What this node's enforcer has counted for each peer, cumulative.
+    counted: BTreeMap<PubKey, Counters>,
 }
 
 impl Node {
@@ -120,6 +133,17 @@ impl Node {
             reclaimed: Vec::new(),
             offers_sent: BTreeMap::new(),
             last_offer: BTreeMap::new(),
+            saved: BTreeMap::new(),
+            balances: Vec::new(),
+            counted: BTreeMap::new(),
+        }
+    }
+
+    /// The peer connected, with whatever budget the host kept for it.
+    fn connected(&self, peer: PubKey) -> Event {
+        Event::PeerConnected {
+            peer,
+            budget: self.saved.get(&peer).copied(),
         }
     }
 
@@ -157,6 +181,24 @@ fn run(nodes: &mut [&mut Node], now: Millis, initial: impl IntoIterator<Item = (
             .iter_mut()
             .find(|n| n.id == to)
             .expect("event addressed to a node in the harness");
+        if let Event::MessageReceived {
+            peer,
+            msg: Message::Balance(balance),
+        } = &event
+        {
+            node.balances.push((*peer, *balance));
+        }
+        // As a host does: the gap is checked before any signature is, and a
+        // TopUp that came too soon goes no further.
+        if let Event::MessageReceived {
+            peer,
+            msg: Message::TopUp(topup),
+        } = &event
+            && let Some(refusal) = node.sessions.too_soon(*peer, topup, now)
+        {
+            carry_out(node, vec![refusal], now, &mut queue);
+            continue;
+        }
         let actions = node.sessions.handle(event, now);
         carry_out(node, actions, now, &mut queue);
     }
@@ -218,6 +260,7 @@ fn carry_out(
                 peer,
                 ratchets,
                 window_ms,
+                reserved_rate,
             } => queue.push_back((
                 peer,
                 Event::MessageReceived {
@@ -231,8 +274,8 @@ fn carry_out(
                                 signature: Signature([0; 64]),
                             })
                             .collect(),
-                        window_ms: window_ms as u64,
-                        reserved_rate: 0,
+                        window_ms,
+                        reserved_rate,
                     }),
                 },
             )),
@@ -255,6 +298,15 @@ fn carry_out(
             }
             Action::ReclaimChannel { channel_id, .. } => {
                 node.reclaimed.push(channel_id);
+            }
+            // The disk: a budget with nothing left is a record the host lets
+            // go.
+            Action::SaveBudget { peer, budget } => {
+                if budget.remaining == 0 {
+                    node.saved.remove(&peer);
+                } else {
+                    node.saved.insert(peer, budget);
+                }
             }
             // The channel backend's record, which only settlement reads.
             Action::RecordUpdates { .. } | Action::DropPeer { .. } => {}
@@ -307,15 +359,16 @@ impl Link {
     /// a real transport does: the link comes up, then it carries messages.
     fn connect(&mut self) {
         let (a, b) = (self.a.id, self.b.id);
-        self.pump([
-            (true, Event::PeerConnected { peer: b }),
-            (false, Event::PeerConnected { peer: a }),
-        ]);
+        let (to_a, to_b) = (self.a.connected(b), self.b.connected(a));
+        self.pump([(true, to_a), (false, to_b)]);
     }
 
     /// Both transports go away with no Disconnect — a Wi-Fi blip, a bare FIN.
     fn blip(&mut self) {
         let (a, b) = (self.a.id, self.b.id);
+        // Each connection's enforcer counts from zero.
+        self.a.counted.clear();
+        self.b.counted.clear();
         self.pump([
             (true, Event::PeerDisconnected { peer: b }),
             (false, Event::PeerDisconnected { peer: a }),
@@ -343,11 +396,50 @@ impl Link {
         }
     }
 
-    /// Advance the clock and tick both nodes.
+    /// Advance the clock, read both meters, and tick both nodes, as a host
+    /// does every tick. Nothing moved unless a test said so, so a reading
+    /// draws only what was reserved.
     fn advance(&mut self, ms: u64) {
         self.now = self.now + ms;
+        for to_a in [true, false] {
+            let node = if to_a { &self.a } else { &self.b };
+            let readings: Vec<Event> = node
+                .sessions
+                .peers()
+                .map(|s| Event::Metered {
+                    peer: s.peer,
+                    counters: node.counted.get(&s.peer).copied().unwrap_or_default(),
+                    carried: true,
+                })
+                .collect();
+            self.pump(readings.into_iter().map(|e| (to_a, e)));
+        }
         self.deliver(true, Event::Tick);
         self.deliver(false, Event::Tick);
+    }
+
+    /// Have one node's enforcer count traffic to and from a peer, and read
+    /// it, as the next tick would.
+    fn count(&mut self, on_a: bool, peer: PubKey, to_payer: u64, from_payer: u64) {
+        let node = if on_a { &mut self.a } else { &mut self.b };
+        let counted = node.counted.entry(peer).or_default();
+        counted.to_payer += to_payer;
+        counted.from_payer += from_payer;
+        let counters = *counted;
+        self.deliver(
+            on_a,
+            Event::Metered {
+                peer,
+                counters,
+                carried: true,
+            },
+        );
+    }
+
+    /// Let B's gap between purchases pass, and nothing else: a TopUp sooner
+    /// than that is refused before anything about it is looked at.
+    fn gap(&mut self) {
+        self.now = self.now + 200;
     }
 
     /// What A is shaping B to.
@@ -569,9 +661,10 @@ fn traffic_draws_the_grant_down_and_exhausting_it_falls_back_to_the_allowance() 
         Event::Metered {
             peer: a,
             counters: Counters {
-                delivered: bought,
-                received: 0,
+                to_payer: bought,
+                from_payer: 0,
             },
+            carried: true,
         },
     );
 
@@ -765,10 +858,10 @@ fn a_purchase_refused_for_one_of_its_updates_records_none_of_them() {
 }
 
 #[test]
-fn a_peers_uploads_draw_its_own_grant_when_the_multiplier_is_set() {
-    // m = 2 charges an uploaded unit the same as a downloaded one.
+fn a_payers_uploads_draw_its_budget_at_the_from_payer_weight() {
+    // A relay on a 100/10 line at weight 10: a unit the payer sends costs ten.
     let mut policy = node_policy("https://b.example/mint");
-    policy.received_multiplier = 2;
+    policy.from_payer_weight = 10;
 
     let mut link = Link::new();
     link.b = Node::new(link.b.id, policy);
@@ -790,21 +883,12 @@ fn a_peers_uploads_draw_its_own_grant_when_the_multiplier_is_set() {
         .grant
         .authorized();
 
-    // A uploads a quarter of its grant's worth. At m = 2 that draws half.
-    let upload = authorized / 4;
-    link.deliver(
-        false,
-        Event::Metered {
-            peer: a,
-            counters: Counters {
-                delivered: 0,
-                received: upload,
-            },
-        },
-    );
+    // A sends a twentieth of its budget's worth. At weight 10 that draws half.
+    let upload = authorized / 20;
+    link.count(false, a, 0, upload);
 
     let grant = &link.b.sessions.peer(&a).expect("session").grant;
-    assert_eq!(grant.consumed(), upload * 2, "each uploaded unit drew two");
+    assert_eq!(grant.consumed(), upload * 10, "each unit A sent drew ten");
 }
 
 // ---------------------------------------------------------------------------
@@ -831,9 +915,11 @@ fn a_rate_beyond_capacity_is_refused_and_the_payer_re_buys_at_what_was_offered()
         },
     );
 
-    // A asks for 125 M/s, B refuses and names 5 M/s, A re-buys at 5 M/s and B
-    // honors it — the whole exchange inside one round trip, which is the point
-    // of the refusal carrying a rate rather than just a "no".
+    // A asks for 125 M/s, B refuses and names 5 M/s, and one gap later A
+    // re-buys at 5 M/s and B honors it — the refusal carries a rate rather
+    // than just a "no", so A does not have to guess.
+    assert_eq!(link.b_shapes_a(), 4_096, "refused, so still the allowance");
+    link.advance(200);
     assert_eq!(link.b_shapes_a(), 5_000_000, "re-bought at what B offered");
 
     // A's own ratchet is where B's is: the refused purchase left no trace.
@@ -871,10 +957,34 @@ fn max_rate_is_shared_by_every_buyer_not_given_to_each() {
         &mut nodes,
         Millis(0),
         [
-            (a_id, Event::PeerConnected { peer: s }),
-            (s, Event::PeerConnected { peer: a_id }),
-            (c_id, Event::PeerConnected { peer: s }),
-            (s, Event::PeerConnected { peer: c_id }),
+            (
+                a_id,
+                Event::PeerConnected {
+                    peer: s,
+                    budget: None,
+                },
+            ),
+            (
+                s,
+                Event::PeerConnected {
+                    peer: a_id,
+                    budget: None,
+                },
+            ),
+            (
+                c_id,
+                Event::PeerConnected {
+                    peer: s,
+                    budget: None,
+                },
+            ),
+            (
+                s,
+                Event::PeerConnected {
+                    peer: c_id,
+                    budget: None,
+                },
+            ),
         ],
     );
 
@@ -893,7 +1003,8 @@ fn max_rate_is_shared_by_every_buyer_not_given_to_each() {
     assert_eq!(nodes[0].shaping.get(&a_id), Some(&4_000_000));
 
     // C asks for 5 M/s. Alone it would get all of it; with A holding 4 M/s
-    // the seller refuses and names 1 M/s, and C re-buys at that.
+    // the seller refuses and names 1 M/s, and C re-buys at that one gap
+    // later.
     run(
         &mut nodes,
         Millis(0),
@@ -905,6 +1016,7 @@ fn max_rate_is_shared_by_every_buyer_not_given_to_each() {
             },
         )],
     );
+    run(&mut nodes, Millis(200), [(c_id, Event::Tick)]);
     assert_eq!(
         nodes[0].shaping.get(&c_id),
         Some(&1_000_000),
@@ -913,7 +1025,7 @@ fn max_rate_is_shared_by_every_buyer_not_given_to_each() {
     assert_eq!(
         nodes[0].shaping.get(&a_id),
         Some(&4_000_000),
-        "A's grant is untouched by C's purchase"
+        "A's reservation is untouched by C's purchase"
     );
 }
 
@@ -923,9 +1035,13 @@ fn a_channel_funded_in_a_mint_we_do_not_list_is_refused() {
     // takes payment in: the mint is the credit risk, and that is ours to pick.
     let mut link = Link::new();
     let a = link.a.id;
-    link.b
-        .sessions
-        .handle(Event::PeerConnected { peer: a }, Millis(0));
+    link.b.sessions.handle(
+        Event::PeerConnected {
+            peer: a,
+            budget: None,
+        },
+        Millis(0),
+    );
 
     let actions = link.b.sessions.handle(
         Event::IncomingFundingVerified {
@@ -984,7 +1100,7 @@ fn a_peer_the_operator_does_not_charge_is_free_and_unmetered() {
 /// The Offer a node sends a freshly connected peer.
 fn opening_offer(node: &mut Node, peer: PubKey) -> tollgate_protocol::Offer {
     node.sessions
-        .handle(Event::PeerConnected { peer }, Millis(0))
+        .handle(Event::PeerConnected { peer, budget: None }, Millis(0))
         .into_iter()
         .find_map(|a| match a {
             Action::Send {
@@ -1120,10 +1236,13 @@ fn a_blocked_peer_is_dropped_without_a_session() {
         link.now,
     );
 
-    let actions = link
-        .b
-        .sessions
-        .handle(Event::PeerConnected { peer: a }, Millis(0));
+    let actions = link.b.sessions.handle(
+        Event::PeerConnected {
+            peer: a,
+            budget: None,
+        },
+        Millis(0),
+    );
 
     assert!(matches!(actions.last(), Some(Action::DropPeer { .. })));
     assert!(link.b.sessions.peer(&a).is_none());
@@ -1133,9 +1252,13 @@ fn a_blocked_peer_is_dropped_without_a_session() {
 fn a_version_mismatch_is_rejected() {
     let mut link = Link::new();
     let b = link.b.id;
-    link.a
-        .sessions
-        .handle(Event::PeerConnected { peer: b }, Millis(0));
+    link.a.sessions.handle(
+        Event::PeerConnected {
+            peer: b,
+            budget: None,
+        },
+        Millis(0),
+    );
 
     let actions = link.a.sessions.handle(
         Event::MessageReceived {
@@ -1179,9 +1302,10 @@ fn the_shaper_is_only_told_when_something_actually_changed() {
         Event::Metered {
             peer: a,
             counters: Counters {
-                delivered: 1_000,
-                received: 0,
+                to_payer: 1_000,
+                from_payer: 0,
             },
+            carried: true,
         },
         link.now,
     );
@@ -1206,7 +1330,7 @@ fn shutting_down_tells_every_peer_and_offers_its_channels_for_settlement() {
     let mut link = Link::new();
     link.connect();
 
-    let actions = link.b.sessions.shutdown();
+    let actions = link.b.sessions.shutdown(link.now);
     let a = link.a.id;
 
     assert!(
@@ -1251,7 +1375,7 @@ fn a_peer_that_goes_completely_silent_is_dropped() {
 
 #[test]
 fn a_peer_that_has_merely_stopped_paying_is_kept() {
-    // Non-payment enforces itself — the grant lapses and the peer falls to the
+    // Non-payment enforces itself — the budget runs out and the peer falls to the
     // allowance. A link costs nothing to hold open, so there is nothing here
     // for a timer to do.
     let mut policy = node_policy("https://b.example/mint");
@@ -1341,9 +1465,9 @@ fn a_payer_its_provider_never_answers_is_kept_alive_and_a_silent_one_still_dropp
     assert!(link.a.sessions.parked(&b).is_none(), "and never dropped it");
     assert_eq!(link.b.access.get(&a), Some(&AccessLevel::Active));
 
-    // What kept it alive: B's Offer again, every third of the timeout. A was
-    // topping up all along, so it never needed to.
-    assert_eq!(link.b.offers_sent[&a], 1 + 200 / 20, "opening + keepalives");
+    // What kept it alive: B's Balance after every purchase A made. A was
+    // topping up all along, so it never needed a keepalive either.
+    assert!(link.a.balances.len() > 100, "{}", link.a.balances.len());
     assert_eq!(link.a.offers_sent[&b], 1, "the opening Offer alone");
 
     // B hangs — its process stops, its socket stays open. A keeps ticking and
@@ -1545,105 +1669,71 @@ fn an_override_reaches_the_peer_when_made_and_the_keepalive_changes_nothing() {
     assert!(link.a.sessions.peer(&b).is_some() && link.b.sessions.peer(&a).is_some());
 }
 
+/// A wants 1 M/s down and pushes 500 k/s up to B, and buys from B.
+fn buy_while_uploading(link: &mut Link) {
+    let b = link.b.id;
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    link.now = Millis(1_000);
+    link.count(true, b, 500_000, 0);
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+}
+
 #[test]
-fn a_node_uploading_to_a_surcharging_peer_buys_for_the_surcharge_too() {
-    // At m = 2 an uploaded unit draws the same as a downloaded one, so a node
-    // that sized its purchase on download alone would be shaped for the
-    // difference — which is exactly what the surcharge is meant to make it feel.
+fn a_node_uploading_to_a_peer_that_charges_for_it_buys_for_that_too() {
+    // At weight 2 a unit A sends draws two, so a node that sized its purchase
+    // on download alone would run its budget down early.
     let mut policy = node_policy("https://b.example/mint");
-    policy.received_multiplier = 2;
+    policy.from_payer_weight = 2;
 
     let mut link = Link::new();
     link.b = Node::new(link.b.id, policy);
     link.connect();
-    let b = link.b.id;
+    buy_while_uploading(&mut link);
 
-    // A wants 1 M/s down, and is pushing 500 k/s up.
-    link.deliver(
-        true,
-        Event::DemandObserved {
-            peer: b,
-            rate: 1_000_000,
-        },
-    );
-    link.now = Millis(1_000);
-    link.deliver(
-        true,
-        Event::Metered {
-            peer: b,
-            counters: Counters {
-                delivered: 500_000,
-                received: 0,
-            },
-        },
-    );
-    link.deliver(
-        true,
-        Event::DemandObserved {
-            peer: b,
-            rate: 1_000_000,
-        },
-    );
-
-    // 1 M down + 500 k up x 2 = 2 M/s of draw, at 125% headroom.
+    // 1 M down + 500 k up × 2 = 2 M/s of draw, at 125% headroom.
     assert_eq!(
         link.b_shapes_a(),
         2_500_000,
-        "the purchase should cover the surcharge on what A uploads"
+        "the reservation should cover what A sends, at B's weight"
     );
 }
 
 #[test]
-fn a_peer_that_does_not_surcharge_is_bought_for_on_download_alone() {
+fn a_peer_at_weight_zero_is_bought_from_on_download_alone() {
+    // What a peering router usually offers: what the payer sends is free.
     let mut link = Link::new();
     link.connect();
-    let (a, b) = (link.a.id, link.b.id);
-    let _ = a;
-
-    link.deliver(
-        true,
-        Event::DemandObserved {
-            peer: b,
-            rate: 1_000_000,
-        },
-    );
-    link.now = Millis(1_000);
-    link.deliver(
-        true,
-        Event::Metered {
-            peer: b,
-            counters: Counters {
-                delivered: 500_000,
-                received: 0,
-            },
-        },
-    );
-    link.deliver(
-        true,
-        Event::DemandObserved {
-            peer: b,
-            rate: 1_000_000,
-        },
-    );
+    buy_while_uploading(&mut link);
 
     assert_eq!(
         link.b_shapes_a(),
         1_250_000,
-        "at m = 0 the peer pays for our uploads out of its own grant"
+        "at weight 0 what A sends costs it nothing"
     );
 }
 
 #[test]
-fn a_peer_with_an_overridden_multiplier_is_offered_it_and_buys_for_it() {
-    // The node-wide multiplier is 0, but B surcharges A at m = 2. The Offer is
-    // how A learns that, so it has to carry the override: advertise 0 and A
-    // buys for its download alone while B draws its uploads at two apiece.
+fn a_peer_with_an_overridden_weight_is_offered_it_and_buys_for_it() {
+    // The node-wide weight is 0, but B weights what A sends at 2. The Offer is
+    // how A learns that, so it has to carry the override.
     let mut link = Link::new();
     let (a, b) = (link.a.id, link.b.id);
     link.b.sessions.set_peer_policy(
         a,
         PeerPolicy {
-            received_multiplier: Some(2),
+            from_payer_weight: Some(2),
             ..PeerPolicy::default()
         },
         link.now,
@@ -1659,42 +1749,604 @@ fn a_peer_with_an_overridden_multiplier_is_offered_it_and_buys_for_it() {
         .as_ref()
         .expect("B offered");
     assert_eq!(
-        offer.received_multiplier, 2,
+        offer.terms.from_payer_weight, 2,
         "the override, not the default"
     );
 
-    // A wants 1 M/s down, and is pushing 500 k/s up.
-    link.deliver(
-        true,
-        Event::DemandObserved {
-            peer: b,
-            rate: 1_000_000,
-        },
-    );
-    link.now = Millis(1_000);
-    link.deliver(
-        true,
-        Event::Metered {
-            peer: b,
-            counters: Counters {
-                delivered: 500_000,
-                received: 0,
-            },
-        },
-    );
-    link.deliver(
-        true,
-        Event::DemandObserved {
-            peer: b,
-            rate: 1_000_000,
-        },
-    );
-
-    // 1 M down + 500 k up x 2 = 2 M/s of draw, at 125% headroom.
+    buy_while_uploading(&mut link);
     assert_eq!(
         link.b_shapes_a(),
         2_500_000,
-        "the purchase should cover the surcharge B actually applies"
+        "the reservation should cover the weight B actually applies"
+    );
+}
+
+#[test]
+fn the_weight_is_fixed_for_the_session_and_a_change_waits_for_the_next() {
+    // Every purchase adds to one budget, so a weight changed mid-session would
+    // reprice units already bought.
+    let mut link = Link::with_grace(60_000);
+    let (a, b) = (link.a.id, link.b.id);
+    link.connect();
+    assert_eq!(link.b.last_offer[&a].from_payer_weight, 0);
+    let offers = link.b.offers_sent[&a];
+
+    link.set_policy(
+        false,
+        a,
+        PeerPolicy {
+            from_payer_weight: Some(10),
+            ..PeerPolicy::default()
+        },
+    );
+    assert_eq!(link.b.offers_sent[&a], offers, "no revision for a weight");
+    assert_eq!(link.b.sessions.peer(&a).expect("session").weight, 0);
+
+    // A sends; this session still draws it at the old weight.
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    link.count(false, a, 0, 1_000);
+    assert_eq!(
+        link.b.sessions.peer(&a).expect("session").grant.consumed(),
+        0
+    );
+
+    // The next session's Offer carries it, and draws at it.
+    link.blip();
+    link.connect();
+    assert_eq!(link.b.last_offer[&a].from_payer_weight, 10);
+    assert_eq!(link.b.sessions.peer(&a).expect("session").weight, 10);
+    let offer = link.a.sessions.peer(&b).expect("session").offer.clone();
+    assert_eq!(offer.expect("offered").terms.from_payer_weight, 10);
+}
+
+#[test]
+fn a_revised_offer_does_not_change_the_weight_a_buyer_draws_its_count_at() {
+    // A peer that revises its weight mid-session anyway is held to the one
+    // its session opened with.
+    let mut link = Link::new();
+    link.connect();
+    let b = link.b.id;
+    let mut revised = link.b.last_offer[&link.a.id].clone();
+    revised.from_payer_weight = 9;
+    link.deliver(
+        true,
+        Event::MessageReceived {
+            peer: b,
+            msg: Message::Offer(revised),
+        },
+    );
+    let offer = link.a.sessions.peer(&b).expect("session").offer.clone();
+    assert_eq!(offer.expect("offered").terms.from_payer_weight, 0);
+}
+
+#[test]
+fn a_buyer_refuses_a_weight_above_its_limit_and_pays_nothing() {
+    let mut policy = node_policy("https://b.example/mint");
+    policy.from_payer_weight = 10;
+    let mut link = Link::new();
+    link.b = Node::new(link.b.id, policy);
+    link.a.sessions = Sessions::new(
+        link.a.id,
+        node_policy("https://a.example/mint"),
+        BuyerPolicy {
+            max_from_payer_weight: Some(2),
+            ..buyer_policy()
+        },
+    );
+    let (a, b) = (link.a.id, link.b.id);
+
+    let mut answered = Vec::new();
+    let opening = link.a.sessions.handle(link.a.connected(b), link.now);
+    let offer = link.b.sessions.handle(link.b.connected(a), link.now);
+    let _ = opening;
+    for action in offer {
+        if let Action::Send {
+            msg: msg @ Message::Offer(_),
+            ..
+        } = action
+        {
+            answered = link
+                .a
+                .sessions
+                .handle(Event::MessageReceived { peer: b, msg }, link.now);
+        }
+    }
+    assert!(
+        answered.iter().any(|x| matches!(
+            x,
+            Action::Send {
+                msg: Message::Reject(Reject {
+                    reason: ReasonCode::FromPayerWeightUnacceptable,
+                    ..
+                }),
+                ..
+            }
+        )),
+        "{answered:?}"
+    );
+    assert!(
+        !answered
+            .iter()
+            .any(|x| matches!(x, Action::FundChannel { .. })),
+        "nothing funded: {answered:?}"
+    );
+
+    // Nor later, on a tick or for demand.
+    let mut later = link.a.sessions.handle(
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+        Millis(1_000),
+    );
+    later.extend(link.a.sessions.handle(Event::Tick, Millis(2_000)));
+    assert!(
+        !later.iter().any(|x| matches!(
+            x,
+            Action::FundChannel { .. } | Action::SignAndSendTopUp { .. }
+        )),
+        "{later:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The one rule, budgets and Balance
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_reserved_rate_is_drawn_every_tick_used_or_not_and_both_sides_agree() {
+    // Time at a speed: B draws A's reservation while it carries A, whether A
+    // moves anything or not, and A's own count of its budget follows.
+    let mut link = Link::new();
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    link.deliver(true, Event::DemandObserved { peer: b, rate: 0 });
+
+    link.advance(500);
+    let provider = link.b.sessions.peer(&a).expect("session").grant.remaining();
+    let payer = link
+        .a
+        .sessions
+        .peer(&b)
+        .expect("session")
+        .buyer
+        .remaining_at(link.now);
+    assert_eq!(provider, 2_500_000 - 625_000, "half a second at 1.25 M/s");
+    assert_eq!(payer, provider);
+}
+
+#[test]
+fn nothing_is_drawn_while_the_payer_is_not_carried() {
+    // An enforcer that is not connected is not applying the payer's rate, so
+    // those seconds cost the payer nothing, reserved rate or not.
+    let mut link = Link::new();
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    let carried = |link: &mut Link, carried: bool| {
+        link.deliver(
+            false,
+            Event::Metered {
+                peer: a,
+                counters: Counters {
+                    to_payer: 1_000,
+                    from_payer: 0,
+                },
+                carried,
+            },
+        )
+    };
+    link.now = link.now + 500;
+    carried(&mut link, false);
+    link.now = link.now + 500;
+    carried(&mut link, false);
+    assert_eq!(
+        link.b.sessions.peer(&a).expect("session").grant.consumed(),
+        0
+    );
+
+    // Carried again: drawn from then on, not for the time it was not.
+    carried(&mut link, true);
+    link.now = link.now + 100;
+    carried(&mut link, true);
+    assert_eq!(
+        link.b.sessions.peer(&a).expect("session").grant.consumed(),
+        125_000
+    );
+}
+
+#[test]
+fn every_accepted_purchase_is_kept_and_answered_with_a_balance() {
+    let mut link = Link::new();
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+    assert_eq!(
+        link.a.balances,
+        vec![(
+            b,
+            Balance {
+                remaining: 0,
+                expires_in_ms: 0,
+                reserved_rate: 0
+            }
+        )],
+        "told at the session start that there is no budget"
+    );
+
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    assert_eq!(
+        link.a.balances.last(),
+        Some(&(
+            b,
+            Balance {
+                remaining: 2_500_000,
+                expires_in_ms: 2_000,
+                reserved_rate: 1_250_000,
+            }
+        ))
+    );
+    assert_eq!(
+        link.b.saved.get(&a),
+        Some(&Budget {
+            remaining: 2_500_000,
+            deadline: Millis(2_000),
+        }),
+        "written down at every purchase"
+    );
+}
+
+#[test]
+fn a_budget_that_expires_is_reported_once_and_let_go() {
+    let mut link = Link::new();
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    link.deliver(true, Event::DemandObserved { peer: b, rate: 0 });
+    let told = link.a.balances.len();
+
+    // Drawn at the reserved rate, it runs out at the deadline.
+    link.advance_to(Millis(3_000));
+    let zero = Balance {
+        remaining: 0,
+        expires_in_ms: 0,
+        reserved_rate: 0,
+    };
+    assert_eq!(&link.a.balances[told..], &[(b, zero)], "once");
+    assert!(!link.b.saved.contains_key(&a), "the record went with it");
+    assert_eq!(link.b_shapes_a(), 4_096);
+}
+
+/// A hotspot that sells pay per use, by the month, and a phone that buys a
+/// gigabyte at a time: tollgate-protocol.md, "Pay for What You Use".
+fn hotspot_and_phone() -> Link {
+    const MONTH: u64 = 2_592_000_000;
+    let mut link = Link::new();
+    let hotspot = NodePolicy {
+        grants: GrantPolicy {
+            min_window_ms: 1_000,
+            max_window_ms: MONTH,
+            min_reserved_rate: 0,
+            min_topup_gap_ms: 1_000,
+            max_rate: None,
+        },
+        ..node_policy("https://b.example/mint")
+    };
+    link.b = Node::new(link.b.id, hotspot);
+    link.a.sessions = Sessions::new(
+        link.a.id,
+        NodePolicy {
+            // Room for several gigabytes, so no purchase here fills it.
+            initial_channel_capacity: 10 * CHANNEL_CAPACITY,
+            ..node_policy("https://a.example/mint")
+        },
+        BuyerPolicy {
+            reserve: false,
+            budget: 1_000_000_000,
+            window_ms: MONTH,
+            ..BuyerPolicy::default()
+        },
+    );
+    link
+}
+
+#[test]
+fn a_payer_that_drops_and_comes_back_still_has_its_budget() {
+    const DAY: u64 = 86_400_000;
+    let mut link = hotspot_and_phone();
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+
+    // Day 0: 1 GB for 30 days, nothing reserved.
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 10_000_000,
+        },
+    );
+    assert_eq!(
+        link.a.balances.last(),
+        Some(&(
+            b,
+            Balance {
+                remaining: 1_000_000_000,
+                expires_in_ms: 30 * DAY,
+                reserved_rate: 0,
+            }
+        ))
+    );
+    let first = channel_a_pays_b_on(&link);
+
+    // A downloads 300 MB, then the link drops for good: B settles A's
+    // channel, and keeps A's budget.
+    link.count(false, a, 300_000_000, 0);
+    link.now = Millis(40 * 60_000);
+    link.blip();
+    assert!(link.b.settled.contains(&first), "the channel is settled");
+    assert_eq!(
+        link.b.saved.get(&a),
+        Some(&Budget {
+            remaining: 700_000_000,
+            deadline: Millis(30 * DAY),
+        }),
+        "and the budget written to disk"
+    );
+
+    // An hour later A reconnects with nothing of its own: a new channel, and
+    // B tells it what it left behind.
+    link.a = Node::new(a, node_policy("https://a.example/mint"));
+    link.a.next_channel = 0x50;
+    link.a.sessions = hotspot_and_phone().a.sessions;
+    link.now = Millis(100 * 60_000);
+    link.connect();
+    assert_ne!(channel_a_pays_b_on(&link), first);
+    assert_eq!(
+        link.a.balances.last(),
+        Some(&(
+            b,
+            Balance {
+                remaining: 700_000_000,
+                expires_in_ms: 30 * DAY - 100 * 60_000,
+                reserved_rate: 0,
+            }
+        ))
+    );
+    assert_eq!(link.b.access.get(&a), Some(&AccessLevel::Active));
+    assert!(
+        link.b_shapes_a() > 4_096,
+        "carried at once on what it brought"
+    );
+
+    // It buys nothing while 700 MB is plenty, and when it is nearly used up
+    // it adds back what it used on the new channel.
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 10_000_000,
+        },
+    );
+    assert_eq!(
+        link.b.sessions.peer(&a).expect("session").grant.channels()[0].signed,
+        0
+    );
+    link.now = Millis(3 * DAY);
+    link.count(true, b, 0, 690_000_000);
+    link.count(false, a, 690_000_000, 0);
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 10_000_000,
+        },
+    );
+    let grant = &link.b.sessions.peer(&a).expect("session").grant;
+    assert_eq!(grant.channels()[0].signed, 990_000_000, "what it used");
+    assert_eq!(grant.remaining(), 1_000_000_000);
+    assert_eq!(grant.deadline(), Millis(33 * DAY));
+}
+
+#[test]
+fn a_budget_whose_deadline_passes_while_away_is_lost() {
+    let mut link = hotspot_and_phone();
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 10_000_000,
+        },
+    );
+    link.blip();
+    assert!(link.b.saved.contains_key(&a));
+
+    link.now = Millis(2_592_000_000);
+    link.connect();
+    assert_eq!(
+        link.a.balances.last().map(|(_, balance)| balance.remaining),
+        Some(0)
+    );
+    assert_eq!(link.b_shapes_a(), 4_096);
+}
+
+#[test]
+fn a_payer_held_after_a_blip_reserves_nothing_and_frees_capacity() {
+    // A reservation sets capacity aside for a payer that is connected.
+    let mut policy = node_policy("https://s.example/mint");
+    policy.grants.max_rate = Some(5_000_000);
+    policy.stale_timeout_ms = 60_000;
+    let mut seller = Node::new(pubkey(0x5E), policy);
+    let mut a = Node::new(pubkey(0xA1), node_policy("https://a.example/mint"));
+    let mut c = Node::new(pubkey(0xC3), node_policy("https://c.example/mint"));
+    let (s, a_id, c_id) = (seller.id, a.id, c.id);
+    let mut nodes = [&mut seller, &mut a, &mut c];
+
+    let connect = |peer, budget| Event::PeerConnected { peer, budget };
+    run(
+        &mut nodes,
+        Millis(0),
+        [
+            (a_id, connect(s, None)),
+            (s, connect(a_id, None)),
+            (c_id, connect(s, None)),
+            (s, connect(c_id, None)),
+        ],
+    );
+    run(
+        &mut nodes,
+        Millis(0),
+        [(
+            a_id,
+            Event::DemandObserved {
+                peer: s,
+                rate: 3_200_000,
+            },
+        )],
+    );
+    assert_eq!(nodes[0].shaping.get(&a_id), Some(&4_000_000));
+
+    // A drops; the seller holds it for a return, but sets nothing aside.
+    run(
+        &mut nodes,
+        Millis(100),
+        [(s, Event::PeerDisconnected { peer: a_id })],
+    );
+    run(
+        &mut nodes,
+        Millis(100),
+        [(
+            c_id,
+            Event::DemandObserved {
+                peer: s,
+                rate: 4_000_000,
+            },
+        )],
+    );
+    assert_eq!(nodes[0].shaping.get(&c_id), Some(&5_000_000), "all of it");
+}
+
+#[test]
+fn a_peer_can_be_let_burst_above_what_it_reserved() {
+    let mut link = Link::new();
+    let (a, b) = (link.a.id, link.b.id);
+    link.b.sessions.set_peer_policy(
+        a,
+        PeerPolicy {
+            burst_rate: Some(2_500_000),
+            ..PeerPolicy::default()
+        },
+        link.now,
+    );
+    link.connect();
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    assert_eq!(
+        link.b_shapes_a(),
+        2_097_152,
+        "up to the burst, clipped to what a tick can take of the budget"
+    );
+
+    // And a node that carries unreserved payers at a set speed.
+    let mut link = Link::new();
+    link.b.sessions.set_peer_policy(
+        a,
+        PeerPolicy {
+            unreserved_rate: Some(0),
+            ..PeerPolicy::default()
+        },
+        link.now,
+    );
+    link.connect();
+    link.b.sessions.handle(
+        Event::MessageReceived {
+            peer: a,
+            msg: Message::TopUp(TopUp {
+                updates: vec![ChannelUpdate {
+                    channel_id: channel_a_pays_b_on(&link),
+                    cumulative: 1_000_000,
+                    signature: Signature([0; 64]),
+                }],
+                window_ms: 2_000,
+                reserved_rate: 0,
+            }),
+        },
+        link.now,
+    );
+    let rate = link
+        .b
+        .sessions
+        .peer(&a)
+        .expect("session")
+        .grant
+        .shaping_rate(
+            link.now,
+            PeerPolicy {
+                unreserved_rate: Some(0),
+                ..PeerPolicy::default()
+            }
+            .burst(link.b.sessions.node_policy()),
+            4_096,
+            1_000,
+        );
+    assert_eq!(rate, 4_096, "only the allowance until it reserves");
+}
+
+#[test]
+fn shutting_down_keeps_every_payers_budget() {
+    let mut link = Link::with_grace(60_000);
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    let actions = link.b.sessions.shutdown(link.now);
+    assert!(
+        actions.iter().any(|x| matches!(
+            x,
+            Action::SaveBudget { peer, budget } if *peer == a && budget.remaining == 2_500_000
+        )),
+        "{actions:?}"
     );
 }
 
@@ -1785,6 +2437,7 @@ fn a_topup_whose_total_does_not_increase_is_answered_with_reject() {
     let channel_id = channel_a_pays_b_on(&link);
 
     link.deliver(false, topup_from_a(&link, channel_id, 10_000));
+    link.gap();
     let stale = topup_from_a(&link, channel_id, 10_000);
     let actions = link.b.sessions.handle(stale, link.now);
 
@@ -1819,6 +2472,7 @@ fn a_channel_that_keeps_failing_verification_is_closed() {
         channel_id,
     };
     for _ in 1..MAX_VERIFICATION_FAILURES {
+        link.gap();
         let actions = link.b.sessions.handle(bad.clone(), link.now);
         assert!(
             !actions
@@ -1827,6 +2481,7 @@ fn a_channel_that_keeps_failing_verification_is_closed() {
         );
     }
     // A stale total counts against the channel the same as a bad signature.
+    link.gap();
     let actions = link
         .b
         .sessions
@@ -1846,6 +2501,7 @@ fn a_channel_that_keeps_failing_verification_is_closed() {
     );
 
     // Anything further on it is refused as an unknown channel.
+    link.gap();
     let actions = link
         .b
         .sessions
@@ -1876,9 +2532,12 @@ fn only_failures_in_a_row_count_against_a_channel() {
         channel_id,
     };
     for _ in 1..MAX_VERIFICATION_FAILURES {
+        link.gap();
         link.b.sessions.handle(bad.clone(), link.now);
     }
+    link.gap();
     link.deliver(false, topup_from_a(&link, channel_id, 10_000));
+    link.gap();
     let actions = link.b.sessions.handle(bad, link.now);
 
     assert!(
@@ -1917,6 +2576,71 @@ fn a_channel_named_twice_fails_verification_once() {
     let grant = &link.b.sessions.peer(&link.a.id).expect("session").grant;
     assert_eq!(grant.channel(channel_id).expect("still open").failures, 1);
     assert_eq!(grant.authorized(), 0, "refused as a whole");
+}
+
+#[test]
+fn a_topup_inside_the_gap_is_refused_as_too_soon_before_anything_else() {
+    // tollgate-protocol.md: the gap is checked first, before any signature,
+    // and a TopUp refused for it does not move the time of the last one.
+    let mut link = Link::new();
+    link.connect();
+    let (a, b) = (link.a.id, link.b.id);
+    let channel_id = channel_a_pays_b_on(&link);
+    link.deliver(false, topup_from_a(&link, channel_id, 10_000));
+
+    link.now = link.now + 199;
+    let Event::MessageReceived {
+        msg: Message::TopUp(early),
+        ..
+    } = topup_from_a(&link, channel_id, 20_000)
+    else {
+        unreachable!()
+    };
+    let refusal = link.b.sessions.too_soon(a, &early, link.now);
+    assert!(
+        matches!(
+            &refusal,
+            Some(Action::Send {
+                peer,
+                msg: Message::TopUpReject(TopUpReject {
+                    reason: ReasonCode::TooSoon,
+                    refused,
+                    max_reserved_rate: u64::MAX,
+                }),
+            }) if *peer == a && refused[0].cumulative == 20_000
+        ),
+        "{refusal:?}"
+    );
+    // Core refuses it the same way if it gets that far, and buys nothing.
+    let actions = link
+        .b
+        .sessions
+        .handle(topup_from_a(&link, channel_id, 20_000), link.now);
+    assert!(!records_anything(&actions));
+    assert_eq!(
+        link.b
+            .sessions
+            .peer(&a)
+            .expect("session")
+            .grant
+            .authorized(),
+        10_000
+    );
+
+    // Asking moved nothing: one millisecond on, the gap is up.
+    link.now = link.now + 1;
+    assert!(link.b.sessions.too_soon(a, &early, link.now).is_none());
+    link.deliver(false, topup_from_a(&link, channel_id, 20_000));
+    assert_eq!(
+        link.b
+            .sessions
+            .peer(&a)
+            .expect("session")
+            .grant
+            .authorized(),
+        20_000
+    );
+    let _ = b;
 }
 
 #[test]
@@ -1992,8 +2716,8 @@ fn a_slowly_drawn_channel_rolls_over_before_expiry_and_is_settled_in_time() {
         .id;
     assert_eq!(link.a.funded.len(), 1);
 
-    // `max(60 s, 2 × 30 s)` before expiry, and not a moment sooner.
-    let margin = link.a.sessions.node_policy().safety_margin_ms(30_000);
+    // The safety margin before expiry, and not a moment sooner.
+    let margin = link.a.sessions.node_policy().safety_margin_ms;
     assert_eq!(margin, 60_000);
     link.advance(TTL_MS - margin - 1);
     assert_eq!(link.a.funded.len(), 1, "outside the margin: nothing to do");
@@ -2024,8 +2748,8 @@ fn a_slowly_drawn_channel_rolls_over_before_expiry_and_is_settled_in_time() {
     assert_ne!(now_using, first, "A has moved onto the replacement");
 
     // B, the receiver, settles the old channel ahead of expiry — half the
-    // margin, leaving a window's worth of time to retry a failed settlement.
-    let settle_at = TTL_MS - link.b.sessions.node_policy().settle_lead_ms(30_000);
+    // margin, leaving time to retry a failed settlement.
+    let settle_at = TTL_MS - link.b.sessions.node_policy().settle_lead_ms();
     link.advance(settle_at - 1 - link.now.0);
     assert!(!link.b.settled.contains(&first), "not settled early");
     link.advance(1);
@@ -2318,12 +3042,13 @@ fn channel_sizes_are_clamped_to_the_operators_bounds() {
 }
 
 #[test]
-fn the_safety_margin_is_a_minute_or_two_windows_whichever_is_longer() {
+fn the_safety_margin_does_not_depend_on_the_window() {
+    // A budget is kept apart from channels, so a window of a month puts no
+    // requirement on how long a channel lives.
     let policy = NodePolicy::default();
-    assert_eq!(policy.safety_margin_ms(30_000), 60_000);
-    assert_eq!(policy.safety_margin_ms(10_000), 60_000, "the floor");
-    assert_eq!(policy.safety_margin_ms(45_000), 90_000, "two windows");
-    assert_eq!(policy.settle_lead_ms(45_000), 45_000, "the receiver's half");
+    assert_eq!(policy.safety_margin_ms, 60_000);
+    assert_eq!(policy.settle_lead_ms(), 30_000, "the receiver's half");
+    assert_eq!(policy.grants.max_window_ms, 2_592_000_000);
 }
 
 // ---------------------------------------------------------------------------
@@ -2408,10 +3133,10 @@ fn a_peer_that_blips_and_comes_back_in_time_resumes_its_channels() {
 }
 
 #[test]
-fn a_grant_does_not_outlive_the_session_it_was_bought_in() {
-    // A new connection is a new session, and a session starts with the grant
-    // zeroed. The channels are what is worth keeping; a grant is at most one
-    // window, and the payer buys again the moment the Offer is in.
+fn a_budget_outlives_the_session_but_the_reservation_does_not() {
+    // A new connection is a new session. The budget is the payer's and comes
+    // with it; the reservation set capacity aside for a payer that was
+    // connected, and ends with the session.
     let mut link = Link::with_grace(60_000);
     link.connect();
     let (a, b) = (link.a.id, link.b.id);
@@ -2423,22 +3148,61 @@ fn a_grant_does_not_outlive_the_session_it_was_bought_in() {
             rate: 1_000_000,
         },
     );
+    let before = link
+        .b
+        .sessions
+        .peer(&a)
+        .expect("session")
+        .grant
+        .budget(link.now);
+    assert_eq!(before.remaining, 2_500_000);
     link.blip();
-    let b_to_a = link.b.sessions.parked(&a).expect("held");
-    assert!(b_to_a.grant.started());
+    let held = link.b.sessions.parked(&a).expect("held");
+    assert_eq!(
+        held.grant.reserved_rate(),
+        0,
+        "nothing set aside while away"
+    );
 
     // Demand is a reading of the old link, so the new one starts without it
     // and nothing is bought until the host reports some.
+    link.now = link.now + 500;
     link.connect();
 
     let b_to_a = link.b.sessions.peer(&a).expect("session");
-    assert!(!b_to_a.grant.started(), "the grant went with the session");
-    assert_eq!(link.b_shapes_a(), 4_096, "back to the allowance");
     assert_eq!(
-        link.b.access.get(&a),
-        Some(&AccessLevel::Active),
-        "but the channel is still open"
+        b_to_a.grant.budget(link.now),
+        before,
+        "the budget came back"
     );
+    assert_eq!(b_to_a.grant.reserved_rate(), 0, "the reservation did not");
+    assert_eq!(
+        link.b_shapes_a(),
+        2_097_152,
+        "carried as a payer that reserved nothing, clipped to what is left"
+    );
+    assert_eq!(
+        link.a.balances.last(),
+        Some(&(
+            b,
+            Balance {
+                remaining: 2_500_000,
+                expires_in_ms: 1_500,
+                reserved_rate: 0,
+            }
+        )),
+        "and A is told what it left behind"
+    );
+
+    // A reserves again with its next purchase.
+    link.deliver(
+        true,
+        Event::DemandObserved {
+            peer: b,
+            rate: 1_000_000,
+        },
+    );
+    assert_eq!(link.b_shapes_a(), 1_250_000);
 }
 
 #[test]
@@ -2477,7 +3241,7 @@ fn an_orderly_disconnect_ends_the_session_and_holds_nothing() {
     link.connect();
     let (a, b) = (link.a.id, link.b.id);
 
-    for action in link.b.sessions.shutdown() {
+    for action in link.b.sessions.shutdown(link.now) {
         if let Action::Send { msg, .. } = action {
             link.deliver(true, Event::MessageReceived { peer: b, msg });
         }
@@ -2667,7 +3431,7 @@ fn shutting_down_settles_what_a_held_peer_paid_us() {
     link.blip();
     assert!(link.b.sessions.parked(&a).is_some());
 
-    let actions = link.b.sessions.shutdown();
+    let actions = link.b.sessions.shutdown(link.now);
     assert!(
         actions.iter().any(|x| matches!(
             x,
@@ -2692,7 +3456,7 @@ fn a_held_channel_is_settled_when_its_expiry_comes_round_inside_the_grace() {
     let (a_pays_on, b_pays_on) = channels_in_use(&link);
 
     link.blip();
-    let settle_at = TTL_MS - link.b.sessions.node_policy().settle_lead_ms(30_000);
+    let settle_at = TTL_MS - link.b.sessions.node_policy().settle_lead_ms();
     link.advance(settle_at - 1 - link.now.0);
     assert!(link.a.settled.is_empty() && link.b.settled.is_empty());
 

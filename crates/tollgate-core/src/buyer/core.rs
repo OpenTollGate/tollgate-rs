@@ -1,71 +1,108 @@
 //! The pure buy/hold decision.
 //!
 //! Snapshot in, decision out. The host measures demand and supplies the clock;
-//! this decides only whether to buy and how much.
+//! this decides only whether to buy, at what reserved rate, and how much.
 //!
-//! The rule is deliberately rudimentary — three cases, no control theory:
+//! Nothing is forfeit at a purchase, so there is nothing to time and no reason
+//! to hold one back. The rule:
 //!
-//! 1. **Nothing bought yet** — buy for the demand we see.
-//! 2. **The grant is about to lapse** — renew. Costs nothing; the remainder was
-//!    nearly gone anyway.
-//! 3. **Demand climbed a lot** — buy now and eat the forfeit. Only past a
-//!    threshold, because raising the rate early burns whatever is left of the
-//!    grant in force. The design's own table is the argument for hysteresis:
-//!    a large jump costs ~2.5% of the new grant, a small one ~67%.
-//!
-//! Anything else holds.
+//! - **What to reserve.** Following demand, with headroom, within the
+//!   operator's bounds and never below the provider's smallest — or nothing,
+//!   for a buyer that pays per use.
+//! - **How much.** Whatever has drained since the last purchase: each one
+//!   brings the budget back up to the size wanted — the reserved rate times
+//!   the window, or the fixed budget of a pay-per-use buyer — and never
+//!   further.
+//! - **When.** Before the budget, at the rate it is drawn, or the deadline
+//!   runs out; at once when demand outgrows the rate reserved; and never
+//!   sooner after the last purchase than the provider's gap. Only while
+//!   something wants the link.
 
-use crate::buyer::state::{Buyer, BuyerPolicy, Leg, Purchase, Trigger, WindowBounds};
-use crate::grant::grant_for;
+use crate::buyer::state::{Buyer, BuyerPolicy, Leg, Purchase, Terms, Trigger};
+use crate::grant::{budget_for, units_in};
 use crate::time::Millis;
 
-/// What the host observed since the last decision.
+/// What the host observed, and the terms of the provider it would buy from.
 #[derive(Debug, Clone, Copy)]
 pub struct Demand {
-    /// Units per second the host currently wants to move over this link.
+    /// Units per second this node wants to move over this link, as the
+    /// provider will draw them: what it pulls, plus what it pushes weighted by
+    /// the provider's from-payer weight.
     ///
     /// How it is measured is the host's business — offered load, recent
-    /// throughput, queue depth. The demo measures what the traffic generator is
-    /// asking for.
+    /// throughput, queue depth.
     pub observed_rate: u64,
-    /// Window bounds the provider advertised in its Offer.
-    pub bounds: WindowBounds,
+    /// The provider's terms, from its Offer.
+    pub terms: Terms,
 }
 
 /// Decide whether to buy.
 ///
-/// Returns `None` to hold. The caller sends a TopUp per leg and then calls
+/// Returns `None` to hold. The caller sends the TopUp and then calls
 /// [`Buyer::record`] — the two are separate so a host that fails to send does
 /// not advance its own ratchet past what the provider saw.
 pub fn poll(buyer: &Buyer, policy: &BuyerPolicy, demand: Demand, now: Millis) -> Option<Purchase> {
     let active = buyer.active()?;
+    let terms = demand.terms;
 
-    let target = target_rate(buyer, policy, demand.observed_rate, now);
-    let window_ms = demand.bounds.clamp(policy.window_ms);
+    // Only while something wants the link: observed demand, or the standing
+    // demand the operator set.
+    let wanted_rate = demand.observed_rate.max(policy.demand);
+    if wanted_rate == 0 {
+        return None;
+    }
 
-    let trigger = if !buyer.started {
-        Trigger::First
-    } else if buyer.cap(now).is_some() && target != buyer.rate {
-        // The provider named a rate it would take; go straight back with it
-        // rather than waiting out a grant we never got.
-        Trigger::Rebuy
+    // Never sooner than the provider accepts. It would be refused unread.
+    if buyer
+        .last_topup()
+        .is_some_and(|last| now.saturating_since(last) < terms.min_topup_gap_ms)
+    {
+        return None;
+    }
+
+    let reserve = reserved_rate(buyer, policy, terms, wanted_rate, now)?;
+    let window_ms = terms.clamp_window(policy.window_ms);
+    let size = if policy.reserve {
+        budget_for(reserve, window_ms)
+    } else {
+        policy.budget
+    };
+
+    let remaining = buyer.remaining_at(now);
     // Against the window actually in force, not the one asked for: a provider
-    // that caps the window shorter than the configured lead would otherwise put
-    // the buyer in a renewal loop.
-    } else if now + policy.lead_within(window_ms) as u64 >= buyer.deadline {
-        Trigger::Renewal
-    } else if worth_the_forfeit(buyer.rate, target, policy) {
-        Trigger::DemandRose
+    // that bounds the window shorter than the configured lead would otherwise
+    // put the buyer in a loop.
+    let lead = policy.lead_within(window_ms);
+    let draining = buyer.reserved().max(demand.observed_rate);
+    let running_out = remaining <= units_in(draining, lead) || now + lead >= buyer.deadline();
+
+    let trigger = if reserve > buyer.reserved() && wanted_rate > buyer.reserved() {
+        if !buyer.started {
+            Trigger::First
+        } else if buyer.cap(now).is_some() {
+            Trigger::Rebuy
+        } else {
+            Trigger::RateRose
+        }
+    } else if running_out {
+        if buyer.started {
+            Trigger::Renewal
+        } else {
+            Trigger::First
+        }
     } else {
         return None;
     };
 
-    let wanted = grant_for(target, window_ms);
+    // What has drained since the last purchase. A TopUp has to add at least
+    // one unit, since a cumulative total must rise, so one that only changes
+    // the reserved rate, or only keeps the deadline, buys a little.
+    let wanted = size.saturating_sub(remaining).max(1);
 
     // A grant that overflows the channel in use is signed across both: the
     // first is topped to exactly its capacity, and the remainder starts the
     // replacement. A cumulative total only means anything against the channel
-    // it was signed on, so this cannot be one message.
+    // it was signed on, so this cannot be one update.
     let (first, second, grant) = if wanted <= active.headroom() {
         (
             Leg {
@@ -76,11 +113,7 @@ pub fn poll(buyer: &Buyer, policy: &BuyerPolicy, demand: Demand, now: Millis) ->
             wanted,
         )
     } else if let Some(next) = buyer.next_channel() {
-        let overflow = wanted - active.headroom();
-        // The replacement is the same size as the one it replaces, so this only
-        // binds if a single grant is larger than a whole channel — in which
-        // case buying what fits is the best available answer.
-        let overflow = overflow.min(next.headroom());
+        let overflow = (wanted - active.headroom()).min(next.headroom());
         (
             Leg {
                 channel_id: active.id,
@@ -105,8 +138,8 @@ pub fn poll(buyer: &Buyer, policy: &BuyerPolicy, demand: Demand, now: Millis) ->
         )
     };
 
-    // Buying nothing is not a purchase. This covers an idle link with
-    // `min_rate: 0`, and a channel with no headroom left and no replacement.
+    // Buying nothing is not a purchase: a channel with no headroom left and
+    // no replacement.
     if grant == 0 {
         return None;
     }
@@ -115,50 +148,36 @@ pub fn poll(buyer: &Buyer, policy: &BuyerPolicy, demand: Demand, now: Millis) ->
         first,
         second,
         window_ms,
-        // What was actually bought may be less than the target asked for, when
-        // a channel ran out mid-purchase. Report the rate this grant really
-        // buys, since that is what the provider will shape to.
-        rate: rate_of(grant, window_ms, target, wanted),
+        reserved_rate: reserve,
         grant,
-        forfeited: buyer.unspent_at(now),
         trigger,
     })
 }
 
-/// The rate a grant buys, given that a channel boundary may have truncated it.
-fn rate_of(grant: u64, window_ms: u32, target: u64, wanted: u64) -> u64 {
-    if grant == wanted {
-        target
-    } else {
-        crate::grant::rate_from(grant, window_ms)
-    }
-}
-
-/// The rate we would like, given demand, headroom, and any ceiling the provider
-/// has told us about.
-fn target_rate(buyer: &Buyer, policy: &BuyerPolicy, observed: u64, now: Millis) -> u64 {
-    let with_headroom = (observed as u128) * (policy.headroom_pct as u128) / 100;
-    let mut target = with_headroom.min(u64::MAX as u128) as u64;
-
-    target = target.clamp(policy.min_rate, policy.max_rate);
-
-    // A provider that refused us has already said what it will take. Asking for
-    // more again would just be refused again.
-    if let Some(cap) = buyer.cap(now) {
-        target = target.min(cap);
-    }
-    target
-}
-
-/// Whether the jump from `current` to `target` clears the hysteresis threshold.
+/// The rate to reserve, given what is wanted, the operator's bounds, the
+/// provider's smallest, and any ceiling the provider has told us about.
 ///
-/// Only upward: demand falling is not a reason to buy at all, since the cheaper
-/// grant would still forfeit the expensive one's remainder. We simply let the
-/// current grant run out and renew lower.
-fn worth_the_forfeit(current: u64, target: u64, policy: &BuyerPolicy) -> bool {
-    if target <= current {
-        return false;
+/// `None` when nothing fits: the provider's smallest is above what the
+/// operator will reserve, or above the ceiling the provider named.
+fn reserved_rate(
+    buyer: &Buyer,
+    policy: &BuyerPolicy,
+    terms: Terms,
+    wanted: u64,
+    now: Millis,
+) -> Option<u64> {
+    let rate = if policy.reserve {
+        let with_headroom = (wanted as u128) * (policy.headroom_pct as u128) / 100;
+        (with_headroom.min(u64::MAX as u128) as u64).max(policy.min_rate)
+    } else {
+        0
+    };
+    let mut rate = rate.max(terms.min_reserved_rate).min(policy.max_rate);
+
+    // A provider that refused us has already said what it will take. Asking
+    // for more again would just be refused again.
+    if let Some(cap) = buyer.cap(now) {
+        rate = rate.min(cap);
     }
-    let scaled = (current as u128) * (policy.raise_threshold_pct as u128) / 100;
-    (target as u128) >= scaled
+    (rate >= terms.min_reserved_rate).then_some(rate)
 }

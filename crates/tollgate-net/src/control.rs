@@ -101,37 +101,66 @@ pub struct PeerSnapshot {
     pub access: String,
 
     // --- what they bought from us -----------------------------------------
-    /// Units per second we are letting them draw. Their grant, or the minimum
-    /// flow allowance if it has lapsed.
+    /// Units per second we are letting them move: their speed, or the minimum
+    /// flow allowance once their budget has run out.
     pub shaped_rate: u64,
-    /// Cumulative units they have paid for, across every channel.
+    /// Units left in their budget with us.
+    pub budget: u64,
+    /// Milliseconds until what is left of it expires. Zero if there is none.
+    pub budget_expires_in_ms: u64,
+    /// Units per second they have reserved; zero for none.
+    pub reserved_rate: u64,
+    /// What a unit they send us draws from their budget, for this session.
+    pub from_payer_weight: u16,
+    /// Cumulative units they may draw this session, the budget they brought
+    /// with them included.
     pub authorized: u64,
-    /// Cumulative units drawn against them.
+    /// Cumulative units drawn against them this session.
     pub consumed: u64,
-    /// Milliseconds until the grant in force lapses. Zero if none is live.
-    pub grant_expires_in_ms: u64,
     /// Channels they pay us on, and how full each is.
     pub incoming_channels: Vec<ChannelSnapshot>,
 
     // --- what we bought from them -----------------------------------------
-    /// Units per second we last bought.
-    pub bought_rate: u64,
+    /// Our own count of our budget with them.
+    pub bought_budget: u64,
+    /// Milliseconds until it expires. Zero if there is none.
+    pub bought_expires_in_ms: u64,
+    /// Units per second we have reserved with them.
+    pub bought_reserved_rate: u64,
+    /// What a unit we send them draws from our budget, from their Offer.
+    pub their_from_payer_weight: u16,
+    /// What they last told us is left of our budget, if they have.
+    pub reported_balance: Option<BalanceSnapshot>,
     /// Units per second we want from them.
     pub demand: u64,
     /// Units per second we are pushing at them.
     pub upload_rate: u64,
-    /// Their surcharge on what we push at them.
-    pub received_multiplier: u16,
+    /// We refused their terms — their from-payer weight is above ours — and
+    /// buy nothing from them.
+    pub refused_terms: bool,
     /// The channel we are paying on, if one is open.
     pub outgoing_channel: Option<ChannelSnapshot>,
     /// Whether a replacement is funded and waiting behind it.
     pub rollover_ready: bool,
 
     // --- what actually moved ----------------------------------------------
-    /// Cumulative units delivered to them.
-    pub delivered: u64,
-    /// Cumulative units received from them.
-    pub received: u64,
+    /// `units_to_payer`: cumulative units we sent them.
+    pub to_payer: u64,
+    /// `units_from_payer`: cumulative units we got from them.
+    pub from_payer: u64,
+}
+
+/// A Balance a provider sent us: information, never an instruction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BalanceSnapshot {
+    /// Units it says are left.
+    pub remaining: u64,
+    /// Milliseconds it said were left to the deadline.
+    pub expires_in_ms: u64,
+    /// The reserved rate it says we hold.
+    pub reserved_rate: u64,
+    /// How long ago it said so.
+    pub age_ms: u64,
 }
 
 /// One channel, and how much of it is spent.
@@ -165,6 +194,10 @@ pub fn snapshot(
             let counters = enforcer.counters(session.peer);
             let grant = &session.grant;
 
+            let budget = grant.budget(now);
+            let bought = &session.buyer;
+            let bought_budget = bought.remaining_at(now);
+
             PeerSnapshot {
                 pubkey: hex::encode(session.peer.0),
                 phase: match session.phase {
@@ -182,13 +215,12 @@ pub fn snapshot(
                 .into(),
 
                 shaped_rate: enforcer.shaping_rate(session.peer),
+                budget: budget.remaining,
+                budget_expires_in_ms: budget.expires_in_ms(now),
+                reserved_rate: grant.reserved_rate(),
+                from_payer_weight: session.weight,
                 authorized: grant.authorized(),
                 consumed: grant.consumed(),
-                grant_expires_in_ms: if grant.is_live(now) {
-                    grant.deadline().saturating_since(now)
-                } else {
-                    0
-                },
                 incoming_channels: grant
                     .channels()
                     .iter()
@@ -199,23 +231,36 @@ pub fn snapshot(
                     })
                     .collect(),
 
-                bought_rate: session.buyer.rate(),
-                demand: session.demand,
-                upload_rate: session.upload_rate,
-                received_multiplier: session
+                bought_budget,
+                bought_expires_in_ms: if bought_budget == 0 {
+                    0
+                } else {
+                    bought.deadline().saturating_since(now)
+                },
+                bought_reserved_rate: bought.reserved(),
+                their_from_payer_weight: session
                     .offer
                     .as_ref()
-                    .map(|o| o.received_multiplier)
+                    .map(|o| o.terms.from_payer_weight)
                     .unwrap_or(0),
-                outgoing_channel: session.buyer.active().map(|c| ChannelSnapshot {
+                reported_balance: session.balance.map(|(b, at)| BalanceSnapshot {
+                    remaining: b.remaining,
+                    expires_in_ms: b.expires_in_ms,
+                    reserved_rate: b.reserved_rate,
+                    age_ms: now.saturating_since(at),
+                }),
+                demand: session.demand,
+                upload_rate: session.upload_rate,
+                refused_terms: session.refused_terms,
+                outgoing_channel: bought.active().map(|c| ChannelSnapshot {
                     id: short(&c.id.0),
                     capacity: c.capacity,
                     signed: c.cumulative,
                 }),
-                rollover_ready: session.buyer.next_channel().is_some(),
+                rollover_ready: bought.next_channel().is_some(),
 
-                delivered: counters.delivered,
-                received: counters.received,
+                to_payer: counters.to_payer,
+                from_payer: counters.from_payer,
             }
         })
         .collect();

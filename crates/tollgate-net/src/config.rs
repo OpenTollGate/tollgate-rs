@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tollgate_core::buyer::BuyerPolicy;
-use tollgate_core::config::{GrantPolicy, NodePolicy, PeerPolicy};
+use tollgate_core::config::{BurstPolicy, GrantPolicy, NodePolicy, PeerPolicy};
 use tollgate_protocol::{DEFAULT_PORT, PubKey};
 use tracing::warn;
 
@@ -37,7 +37,7 @@ pub struct File {
     pub identity: IdentitySection,
     /// This node's own mint, and the unit it denominates in.
     pub mint: MintSection,
-    /// Which mints this node takes payment in, and the default surcharge.
+    /// Which mints this node takes payment in.
     pub vouchers: VouchersSection,
     /// Where `merchantd` is: what funds this node's channels.
     pub merchant: MerchantSection,
@@ -45,8 +45,11 @@ pub struct File {
     pub access: AccessSection,
     /// Channel parameters.
     pub channels: ChannelsSection,
-    /// Bounds on what a payer may buy in one purchase.
+    /// What a payer may buy: the from-payer weight, windows, reserved rates
+    /// and how often.
     pub grants: GrantsSection,
+    /// How fast a payer is carried above its reserved rate.
+    pub burst: BurstSection,
     /// How this node buys from its peers.
     pub buying: BuyingSection,
     /// Where to listen.
@@ -118,10 +121,6 @@ impl MintSection {
 pub struct VouchersSection {
     /// Most preferred first, at least one. Defaults to this node's own mint.
     pub accepted_mints: Vec<AcceptedMint>,
-    /// Unsigned surcharge on what a peer pushes at us. The net rate is `m - 1`,
-    /// so `2` charges an upload like a download and `k + 1` charges it `k`
-    /// times.
-    pub received_multiplier: u16,
 }
 
 /// A mint this node takes payment in, and what becomes of its vouchers once a
@@ -252,9 +251,10 @@ pub struct ChannelsSection {
     pub ttl_seconds: u64,
     /// Percentage of capacity at which the funder starts a rollover.
     pub rollover_threshold_pct: u8,
-    /// The shortest safety margin before a channel's expiry, in which the
-    /// funder rolls it over and the receiver settles it. The margin in force is
-    /// this or two of the receiver's longest windows, whichever is longer.
+    /// The safety margin before a channel's expiry, in which the funder rolls
+    /// it over and the receiver settles it. It does not depend on the window:
+    /// a budget is kept apart from channels. Both ends of a channel must use
+    /// the same value.
     pub safety_margin_seconds: u64,
     /// Drop a peer that has sent nothing at all for this long. Zero disables it.
     pub stale_timeout_seconds: u64,
@@ -270,7 +270,7 @@ impl Default for ChannelsSection {
             capacity_growth_factor: d.capacity_growth_pct as f64 / 100.0,
             ttl_seconds: 3_600,
             rollover_threshold_pct: d.rollover_threshold_pct,
-            safety_margin_seconds: d.safety_margin_floor_ms / 1_000,
+            safety_margin_seconds: d.safety_margin_ms / 1_000,
             stale_timeout_seconds: 60,
         }
     }
@@ -280,7 +280,7 @@ impl ChannelsSection {
     /// Check the channel parameters hang together.
     ///
     /// Returns the growth factor as the percentage core works in.
-    fn validate(&self, max_window_ms: u32) -> Result<u32> {
+    fn validate(&self) -> Result<u32> {
         let c = self;
         if c.min_capacity == 0 || c.min_capacity > c.max_capacity {
             bail!(
@@ -310,16 +310,14 @@ impl ChannelsSection {
         // A channel that is born inside its own safety margin is rolled over
         // the moment it opens, and again for its replacement: a funding loop,
         // not a short TTL. Twice the margin leaves the channel at least as long
-        // in use as in retirement.
-        let margin_ms = (c.safety_margin_seconds.saturating_mul(1_000))
-            .max((max_window_ms as u64).saturating_mul(2));
-        if c.ttl_seconds.saturating_mul(1_000) < margin_ms.saturating_mul(2) {
+        // in use as in retirement. No window comes into it: what a payer buys
+        // is kept in its budget, which outlives any channel.
+        if c.ttl_seconds < c.safety_margin_seconds.saturating_mul(2) {
             bail!(
-                "channels.ttl_seconds ({}) must be at least twice the safety margin \
-                 ({} s: the longer of channels.safety_margin_seconds and two of \
-                 grants.window_range_ms's longest window)",
+                "channels.ttl_seconds ({}) must be at least twice \
+                 channels.safety_margin_seconds ({})",
                 c.ttl_seconds,
-                margin_ms / 1_000
+                c.safety_margin_seconds
             );
         }
         Ok((c.capacity_growth_factor * 100.0)
@@ -328,49 +326,70 @@ impl ChannelsSection {
     }
 }
 
-/// What this node will accept when a peer buys capacity.
+/// What this node will accept when a peer buys from it.
+///
+/// Each payer has a budget, a deadline and a reserved rate; a purchase adds to
+/// the budget, and every second the node draws `max(units moved, reserved rate
+/// × 1 s)` from it. The first four are advertised in the Offer.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct GrantsSection {
+    /// What a unit from the payer draws from its budget, against one for a
+    /// unit to it: `moved = to_payer + from_payer × from_payer_weight`. `1`
+    /// charges both directions alike, `10` suits a 100/10 line, `0` makes
+    /// what the payer sends free. Fixed for a session; per-peer overrides in
+    /// `peers`.
+    pub from_payer_weight: u16,
     /// `[min, max]` window in milliseconds. The payer picks any window in this
-    /// range, per grant, without negotiating.
-    pub window_range_ms: [u32; 2],
-    /// Units per second this node will commit across all its peers together —
-    /// a node-wide ceiling, not a per-peer one, so what one peer can buy is
-    /// what the others' live grants leave. Absent means the link is the only
-    /// limit.
+    /// range, per purchase; the upper end is how long a budget can be kept
+    /// without buying again. The lower end may not be below
+    /// [`Self::min_topup_gap_ms`].
+    pub window_range_ms: [u64; 2],
+    /// Smallest reserved rate a payer may choose, units per second. `0` lets a
+    /// payer reserve nothing and pay for what it uses; above `0` this node
+    /// sells only time at a speed.
+    pub min_reserved_rate: u64,
+    /// A TopUp sooner than this after a payer's last is refused as too soon,
+    /// before any signature on it is checked.
+    pub min_topup_gap_ms: u64,
+    /// Units per second this node will reserve across all its payers together
+    /// — a node-wide ceiling, not a per-peer one. A TopUp whose reserved rate
+    /// would take the sum past it is refused, with the rate still free
+    /// attached. Absent means the link is the only limit.
     pub max_rate: Option<u64>,
 }
 
 impl Default for GrantsSection {
     fn default() -> Self {
+        let d = NodePolicy::default();
         Self {
-            window_range_ms: [200, 30_000],
-            max_rate: None,
+            from_payer_weight: d.from_payer_weight,
+            window_range_ms: [d.grants.min_window_ms, d.grants.max_window_ms],
+            min_reserved_rate: d.grants.min_reserved_rate,
+            min_topup_gap_ms: d.grants.min_topup_gap_ms,
+            max_rate: d.grants.max_rate,
         }
     }
+}
+
+/// How fast a payer is carried above what it reserved. The node's own policy;
+/// it never reaches the protocol, and `grants.max_rate` does not count it.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BurstSection {
+    /// Carry a payer that reserved a rate at up to this, units per second, if
+    /// that is more. `0`, the default, carries it at exactly its rate.
+    pub rate: Option<u64>,
+    /// Carry a payer that reserved nothing at this, units per second. Absent
+    /// is as fast as the link allows; `0` gives it only the minimum flow
+    /// allowance until it reserves.
+    pub unreserved_rate: Option<u64>,
 }
 
 /// How this node buys.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct BuyingSection {
-    /// Buy this percentage of observed demand.
-    pub headroom_pct: u32,
-    /// Only jump mid-window if the target exceeds the rate in force by this
-    /// percentage. This hysteresis is what keeps forfeiture affordable.
-    pub raise_threshold_pct: u32,
-    /// Renew this long before the deadline.
-    pub renew_lead_ms: u32,
-    /// How long to respect a rate ceiling a provider named before testing
-    /// whether capacity has freed up.
-    pub cap_hold_ms: u64,
-    /// Window to ask for, clamped to what the provider advertises.
-    pub window_ms: u32,
-    /// Never buy below this rate.
-    pub min_rate: u64,
-    /// Never buy above this rate — the operator's spending ceiling.
-    pub max_rate: u64,
     /// Units per second to want from every peer, whether or not anything is
     /// asking for them.
     ///
@@ -380,24 +399,49 @@ pub struct BuyingSection {
     /// how much of its own traffic it would like to be able to send, so an
     /// operator who wants it to keep a link paid for says how much here.
     ///
-    /// It is a standing order, and it spends money: at 2 MB/s against a
-    /// gateway charging 1550 sat/GiB, a day costs about 250,000 sat whether or
-    /// not the link is used. `--demand` overrides it for one run.
+    /// It is a standing order, and it spends money. `--demand` overrides it for
+    /// one run.
     pub demand: u64,
+    /// Reserve a rate that follows demand — time at a speed. `false` reserves
+    /// nothing, or the peer's smallest reserved rate, and pays per use.
+    pub reserve: bool,
+    /// Reserve this percentage of observed demand.
+    pub headroom_pct: u32,
+    /// Never reserve below this; raised to the peer's smallest reserved rate.
+    pub min_rate: u64,
+    /// Never reserve above this — the operator's spending ceiling. Absent is
+    /// no ceiling.
+    pub max_rate: Option<u64>,
+    /// Refuse a peer whose from-payer weight is above this: fund nothing, buy
+    /// nothing, pay nothing. Absent takes any.
+    pub max_from_payer_weight: Option<u16>,
+    /// Window to ask for, clamped to the peer's range. With `reserve` it also
+    /// sets the budget: the reserved rate times the window.
+    pub window_ms: u64,
+    /// Without `reserve`, the units to hold with each peer. Must be set for a
+    /// buyer that pays per use.
+    pub budget: u64,
+    /// Buy again this long before the budget or the deadline would run out.
+    pub renew_lead_ms: u64,
+    /// How long to keep to a reserved rate a peer named in a TopUpReject
+    /// before trying higher again.
+    pub cap_hold_ms: u64,
 }
 
 impl Default for BuyingSection {
     fn default() -> Self {
         let d = BuyerPolicy::default();
         Self {
+            demand: d.demand,
+            reserve: d.reserve,
             headroom_pct: d.headroom_pct,
-            raise_threshold_pct: d.raise_threshold_pct,
+            min_rate: d.min_rate,
+            max_rate: None,
+            max_from_payer_weight: d.max_from_payer_weight,
+            window_ms: d.window_ms,
+            budget: d.budget,
             renew_lead_ms: d.renew_lead_ms,
             cap_hold_ms: d.cap_hold_ms,
-            window_ms: d.window_ms,
-            min_rate: d.min_rate,
-            max_rate: d.max_rate,
-            demand: 0,
         }
     }
 }
@@ -626,8 +670,13 @@ pub struct PeerSection {
     pub no_charge: bool,
     /// Refuse this peer entirely.
     pub blocked: bool,
-    /// Override the node-wide received multiplier.
-    pub received_multiplier: Option<u16>,
+    /// What a unit this peer sends us draws from its budget, against one for a
+    /// unit we send it. Usually `0` for a peering partner. Absent takes
+    /// `grants.from_payer_weight`.
+    pub from_payer_weight: Option<u16>,
+    /// How fast this peer is carried above what it reserved, or when it
+    /// reserved nothing. Each key absent takes the `burst` block's.
+    pub burst: BurstSection,
     /// Static endpoint to dial. Peers without one have to dial us, and
     /// everything else written here still applies to them when they do.
     pub endpoint: Option<String>,
@@ -706,55 +755,81 @@ impl File {
         };
 
         let [min_window_ms, max_window_ms] = self.grants.window_range_ms;
-        if min_window_ms == 0 || min_window_ms > max_window_ms {
-            bail!("grants.window_range_ms must be a non-empty range starting above zero");
+        let grants = GrantPolicy {
+            min_window_ms,
+            max_window_ms,
+            min_reserved_rate: self.grants.min_reserved_rate,
+            min_topup_gap_ms: self.grants.min_topup_gap_ms,
+            max_rate: self.grants.max_rate,
+        };
+        if min_window_ms == 0 || !grants.window_range_valid() {
+            bail!(
+                "grants.window_range_ms [{min_window_ms}, {max_window_ms}] must be a range \
+                 starting above zero and no shorter than grants.min_topup_gap_ms ({}): \
+                 a shorter window would let a budget expire before its payer may renew it",
+                grants.min_topup_gap_ms
+            );
         }
 
-        let capacity_growth_pct = self.channels.validate(max_window_ms)?;
+        let capacity_growth_pct = self.channels.validate()?;
 
+        let node_burst = BurstPolicy::default();
         let policy = NodePolicy {
             unit: self.mint.unit.clone(),
             accepted_mints,
-            received_multiplier: self.vouchers.received_multiplier,
+            from_payer_weight: self.grants.from_payer_weight,
             minimum_flow: if self.access.minimum_flow.enabled {
                 self.access.minimum_flow.bytes_per_second
             } else {
                 0
             },
-            grants: GrantPolicy {
-                min_window_ms,
-                max_window_ms,
-                max_rate: self.grants.max_rate,
+            grants,
+            burst: BurstPolicy {
+                rate: self.burst.rate.unwrap_or(node_burst.rate),
+                unreserved_rate: self
+                    .burst
+                    .unreserved_rate
+                    .unwrap_or(node_burst.unreserved_rate),
             },
+            tick_ms: crate::node::TICK.as_millis() as u64,
             initial_channel_capacity: self.channels.initial_capacity,
             min_channel_capacity: self.channels.min_capacity,
             max_channel_capacity: self.channels.max_capacity,
             capacity_growth_pct,
-            safety_margin_floor_ms: self.channels.safety_margin_seconds.saturating_mul(1_000),
+            safety_margin_ms: self.channels.safety_margin_seconds.saturating_mul(1_000),
             stale_timeout_ms: self.channels.stale_timeout_seconds.saturating_mul(1_000),
             rollover_threshold_pct: self.channels.rollover_threshold_pct,
         };
 
         let buyer = BuyerPolicy {
+            demand: self.buying.demand,
+            reserve: self.buying.reserve,
             headroom_pct: self.buying.headroom_pct,
-            raise_threshold_pct: self.buying.raise_threshold_pct,
+            min_rate: self.buying.min_rate,
+            max_rate: self.buying.max_rate.unwrap_or(u64::MAX),
+            max_from_payer_weight: self.buying.max_from_payer_weight,
+            window_ms: self.buying.window_ms,
+            budget: self.buying.budget,
             renew_lead_ms: self.buying.renew_lead_ms,
             cap_hold_ms: self.buying.cap_hold_ms,
-            window_ms: self.buying.window_ms,
-            min_rate: self.buying.min_rate,
-            max_rate: self.buying.max_rate,
         };
 
         // A lead at least as long as the window it renews inside is not a
-        // conservative setting, it is a contradiction: every grant starts
-        // already inside its own renewal lead. Core clamps it rather than
-        // looping, but an operator who wrote this meant something else.
+        // conservative setting, it is a contradiction: every purchase starts
+        // already inside its own lead. Core clamps it rather than looping, but
+        // an operator who wrote this meant something else.
         if self.buying.renew_lead_ms >= self.buying.window_ms {
             bail!(
                 "buying.renew_lead_ms ({}) must be shorter than buying.window_ms ({})",
                 self.buying.renew_lead_ms,
                 self.buying.window_ms
             );
+        }
+        // A buyer that pays per use holds a budget of `budget` units: with none
+        // it would buy nothing at all, which is not what turning reserve off
+        // means.
+        if !self.buying.reserve && self.buying.budget == 0 {
+            bail!("buying.reserve is false, so buying.budget must say how much to hold");
         }
         // Not an error: a node carrying nothing but small requests can live
         // with a short lead, and on an idle link it is free. It is a trap for
@@ -763,11 +838,9 @@ impl File {
         if lead == Lead::Operator && buyer.lead_is_thin() {
             warn!(
                 renew_lead_ms = self.buying.renew_lead_ms,
-                window_ms = self.buying.window_ms,
-                forfeit_pct = buyer.forfeit_pct(self.buying.window_ms),
                 suggested_lead_ms = BuyerPolicy::MIN_SAFE_LEAD_MS,
-                "a renewal this late lapses the grant under load; scale the \
-                 window and the lead together to buy slack at the same cost"
+                "a purchase this late runs the budget out under load; buying \
+                 earlier costs nothing, since nothing is forfeit"
             );
         }
 
@@ -781,7 +854,9 @@ impl File {
             let policy = PeerPolicy {
                 no_charge: section.no_charge,
                 blocked: section.blocked,
-                received_multiplier: section.received_multiplier,
+                from_payer_weight: section.from_payer_weight,
+                burst_rate: section.burst.rate,
+                unreserved_rate: section.burst.unreserved_rate,
             };
             // A peer with no endpoint is one that dials us. It is still carried
             // here, because the policy is the point: `blocked` on a peer that
@@ -1052,14 +1127,114 @@ mod tests {
         let file: File = serde_yaml::from_str("{}").expect("parse");
         let buyer = file.resolve().expect("resolve").buyer;
         assert!(!buyer.lead_is_thin());
-        assert_eq!(buyer.forfeit_pct(buyer.window_ms), 30);
+        assert_eq!((buyer.window_ms, buyer.renew_lead_ms), (10_000, 1_200));
+        assert!(buyer.reserve);
+        assert_eq!(buyer.max_rate, u64::MAX, "no ceiling");
     }
 
     #[test]
     fn an_inverted_window_range_is_rejected() {
         let file: File =
-            serde_yaml::from_str("grants:\n  window_range_ms: [30000, 200]\n").expect("parse");
+            serde_yaml::from_str("grants:\n  window_range_ms: [30000, 2000]\n").expect("parse");
         assert!(file.resolve().is_err());
+    }
+
+    #[test]
+    fn the_grants_default_to_the_documented_terms() {
+        let file: File = serde_yaml::from_str("{}").expect("parse");
+        let p = file.resolve().expect("resolve").policy;
+        assert_eq!(p.from_payer_weight, 1);
+        assert_eq!(
+            (p.grants.min_window_ms, p.grants.max_window_ms),
+            (1_000, 2_592_000_000),
+            "one second to thirty days"
+        );
+        assert_eq!(p.grants.min_reserved_rate, 0);
+        assert_eq!(p.grants.min_topup_gap_ms, 1_000);
+        assert_eq!(p.grants.max_rate, None);
+        assert_eq!(
+            p.burst,
+            BurstPolicy::default(),
+            "no burst; unreserved at the link"
+        );
+    }
+
+    #[test]
+    fn a_window_shorter_than_the_gap_refuses_to_start() {
+        // A budget could expire before its payer is allowed to renew it.
+        let e = resolved("grants:\n  window_range_ms: [500, 30000]\n  min_topup_gap_ms: 1000\n")
+            .expect_err("refused");
+        assert!(format!("{e:#}").contains("min_topup_gap_ms"), "{e:#}");
+        assert!(
+            resolved("grants:\n  window_range_ms: [200, 30000]\n  min_topup_gap_ms: 200\n").is_ok()
+        );
+    }
+
+    #[test]
+    fn a_year_long_window_fits() {
+        let config =
+            resolved("grants:\n  window_range_ms: [1000, 31536000000]\n").expect("resolve");
+        assert_eq!(config.policy.grants.max_window_ms, 31_536_000_000);
+    }
+
+    #[test]
+    fn the_from_payer_weight_is_set_per_node_and_per_peer() {
+        let key = "02".to_string() + &"11".repeat(32);
+        let yaml = format!(
+            "grants:\n  from_payer_weight: 10\npeers:\n  \"{key}\":\n    from_payer_weight: 0\n"
+        );
+        let config = resolved(&yaml).expect("resolve");
+        assert_eq!(config.policy.from_payer_weight, 10);
+        assert_eq!(config.peers[0].policy.weight(&config.policy), 0);
+        // Unsigned: there is no way to write a negative one.
+        assert!(serde_yaml::from_str::<File>("grants:\n  from_payer_weight: -1\n").is_err());
+        // The old key is gone, not an alias.
+        assert!(serde_yaml::from_str::<File>("vouchers:\n  received_multiplier: 2\n").is_err());
+    }
+
+    #[test]
+    fn burst_is_set_per_node_and_per_peer() {
+        let key = "02".to_string() + &"11".repeat(32);
+        let yaml = format!(
+            "burst:\n  unreserved_rate: 2500000\npeers:\n  \"{key}\":\n    burst:\n      rate: 2500000\n"
+        );
+        let config = resolved(&yaml).expect("resolve");
+        assert_eq!(
+            config.policy.burst,
+            BurstPolicy {
+                rate: 0,
+                unreserved_rate: 2_500_000
+            }
+        );
+        assert_eq!(
+            config.peers[0].policy.burst(&config.policy),
+            BurstPolicy {
+                rate: 2_500_000,
+                unreserved_rate: 2_500_000
+            }
+        );
+    }
+
+    #[test]
+    fn the_buying_keys_reach_the_buyer() {
+        let config = resolved(
+            "buying:\n  reserve: false\n  budget: 1000000000\n  max_rate: 5000000\n  \
+             max_from_payer_weight: 2\n  demand: 100000\n  window_ms: 2592000000\n",
+        )
+        .expect("resolve");
+        let b = config.buyer;
+        assert!(!b.reserve);
+        assert_eq!(b.budget, 1_000_000_000);
+        assert_eq!(b.max_rate, 5_000_000);
+        assert_eq!(b.max_from_payer_weight, Some(2));
+        assert_eq!(b.demand, 100_000);
+        assert_eq!(b.window_ms, 2_592_000_000);
+    }
+
+    #[test]
+    fn a_buyer_that_pays_per_use_has_to_say_how_much_to_hold() {
+        let e = resolved("buying:\n  reserve: false\n").expect_err("refused");
+        assert!(format!("{e:#}").contains("buying.budget"), "{e:#}");
     }
 
     #[test]
@@ -1145,7 +1320,7 @@ mod tests {
         assert_eq!(p.max_channel_capacity, 1 << 34, "16 GiB");
         assert_eq!(p.capacity_growth_pct, 200);
         assert_eq!(p.rollover_threshold_pct, 80);
-        assert_eq!(p.safety_margin_ms(p.grants.max_window_ms), 60_000);
+        assert_eq!(p.safety_margin_ms, 60_000);
         assert_eq!(p.stale_timeout_ms, 60_000, "silence only");
         assert_eq!(config.channel_ttl_seconds, 3_600);
     }
@@ -1165,12 +1340,13 @@ mod tests {
         let short: File = serde_yaml::from_str("channels:\n  ttl_seconds: 119\n").expect("parse");
         assert!(short.resolve().is_err());
 
-        // And the margin follows the longest window, not just the floor.
-        let wide: File = serde_yaml::from_str(
-            "channels:\n  ttl_seconds: 200\ngrants:\n  window_range_ms: [200, 60000]\n",
+        // And no window comes into it: a month-long window needs no
+        // month-long channel.
+        let long: File = serde_yaml::from_str(
+            "channels:\n  ttl_seconds: 120\ngrants:\n  window_range_ms: [1000, 2592000000]\n",
         )
         .expect("parse");
-        assert!(wide.resolve().is_err(), "a 120 s margin needs 240 s");
+        assert!(long.resolve().is_ok());
     }
 
     #[test]
@@ -1280,8 +1456,8 @@ mod tests {
 
     #[test]
     fn a_misspelt_key_is_an_error_rather_than_silently_ignored() {
-        // `deny_unknown_fields` is what stops `recieved_multiplier` from
+        // `deny_unknown_fields` is what stops `from_payer_wieght` from
         // quietly meaning "default".
-        assert!(serde_yaml::from_str::<File>("vouchers:\n  recieved_multiplier: 2\n").is_err());
+        assert!(serde_yaml::from_str::<File>("grants:\n  from_payer_wieght: 2\n").is_err());
     }
 }

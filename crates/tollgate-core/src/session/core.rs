@@ -20,16 +20,16 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use tollgate_protocol::{
-    Accept, Announce, ChannelReady, Disconnect, Message, Offer, PROTOCOL_VERSION, PubKey,
-    ReasonCode, RefusedUpdate, Reject, RolloverInit, RolloverReady, TopUpReject,
+    Accept, Announce, Balance, ChannelReady, Disconnect, Message, Offer, PROTOCOL_VERSION, PubKey,
+    ReasonCode, RefusedUpdate, Reject, RolloverInit, RolloverReady, TopUp, TopUpReject,
 };
 
 use crate::access::AccessLevel;
 use crate::action::Action;
-use crate::buyer::{self, Buyer, BuyerPolicy, Demand, RolloverReason, WindowBounds};
+use crate::buyer::{self, Buyer, BuyerPolicy, Demand, RolloverReason, Terms};
 use crate::config::{NodePolicy, PeerPolicy};
 use crate::event::Event;
-use crate::grant::{self, Admission, Verdict};
+use crate::grant::{self, Admission, Budget, Verdict};
 use crate::session::state::{PeerOffer, PeerSession, Phase};
 use crate::time::Millis;
 
@@ -73,11 +73,13 @@ impl Sessions {
 
     /// Set an operator override for a peer, before or after it connects.
     ///
-    /// For a peer already connected it takes effect at once: its access is
-    /// recomputed, and if the Offer it would now get differs from the one it
-    /// last got — a new multiplier, or a change to whether we charge it — the
-    /// revision is sent in what this returns. Before it connects there is
-    /// nothing to do, and nothing is returned.
+    /// For a peer already connected it takes effect at once: its access and
+    /// speed are recomputed, and if the Offer it would now get differs from
+    /// the one it last got — a change to whether we charge it — the revision
+    /// is sent in what this returns. A changed from-payer weight is not part
+    /// of that: the weight is fixed for a session, and the peer gets the new
+    /// one in the Offer of its next. Before it connects there is nothing to
+    /// do, and nothing is returned.
     ///
     /// Sent here rather than left for the keepalive, which only repeats the
     /// last Offer: an override is the operator's decision, and should reach
@@ -99,7 +101,8 @@ impl Sessions {
         }
         // Only a peer that has had an Offer is owed a revision. One that has
         // not gets its first with the new policy in it.
-        let revised = self.offer_for(&policy);
+        let weight = session.weight;
+        let revised = self.offer_for(&policy, weight);
         if let Some(session) = self.peers.get(&peer)
             && session.offer_sent.is_some()
             && session.offer_sent.as_ref() != Some(&revised)
@@ -147,10 +150,14 @@ impl Sessions {
     /// A bare FIN is treated as an unclean disconnect and triggers the same
     /// cleanup as a timeout, so saying so first is the difference between a peer
     /// tearing our state down on a timer and doing it at once.
-    pub fn shutdown(&mut self) -> Vec<Action> {
+    pub fn shutdown(&mut self, now: Millis) -> Vec<Action> {
         let mut out = Vec::new();
         for (peer, session) in &mut self.peers {
             session.phase = Phase::Closing;
+
+            // The budget outlives this node's run: kept on disk, it is there
+            // for the payer when we come back.
+            Self::save_budget(*peer, session, now, &mut out);
 
             // Every channel a peer paid us on holds value we can still claim.
             // Settling is the point at which our own spent-proof set stops
@@ -168,9 +175,38 @@ impl Sessions {
         // A peer held after an unclean disconnect will not find us when it
         // comes back, so what it paid us is claimed now or not at all.
         for (peer, mut parked) in core::mem::take(&mut self.parked) {
+            Self::save_budget(peer, &parked.session, now, &mut out);
             Self::discard(peer, &mut parked.session, &mut out);
         }
         out
+    }
+
+    /// Whether a TopUp from `peer` arriving at `now` comes sooner after its
+    /// last than our gap between purchases allows, and if so the refusal to
+    /// send it.
+    ///
+    /// For the host to ask **before it verifies any signature** on the
+    /// TopUp: the gap exists to bound how many signature checks a payer can
+    /// cause, so it has to be checked before any are made. A TopUp refused
+    /// here goes no further and does not move the time of the payer's last
+    /// one. Asking changes nothing; core checks the gap again when the TopUp
+    /// reaches it, against the same time.
+    pub fn too_soon(&self, peer: PubKey, topup: &TopUp, now: Millis) -> Option<Action> {
+        let session = self.peers.get(&peer)?;
+        if !session
+            .grant
+            .too_soon(now, self.node.grants.min_topup_gap_ms)
+        {
+            return None;
+        }
+        Some(Action::Send {
+            peer,
+            msg: Message::TopUpReject(TopUpReject {
+                refused: refused_updates(topup),
+                max_reserved_rate: self.admission(&peer).rate_available(),
+                reason: ReasonCode::TooSoon,
+            }),
+        })
     }
 
     /// Feed in something that happened; get back what to do about it.
@@ -178,13 +214,15 @@ impl Sessions {
         let mut out = Vec::new();
         let tick = matches!(event, Event::Tick);
         match event {
-            Event::PeerConnected { peer } => self.on_connected(peer, now, &mut out),
+            Event::PeerConnected { peer, budget } => self.on_connected(peer, budget, now, &mut out),
             Event::PeerDisconnected { peer } => self.on_disconnected(peer, now, &mut out),
             Event::MessageReceived { peer, msg } => self.on_message(peer, msg, now, &mut out),
             Event::TopUpSignatureInvalid { peer, channel_id } => {
                 // Still something heard from them, even if it bought nothing.
+                // Its signatures were checked, so it counts toward the gap.
                 if let Some(session) = self.peers.get_mut(&peer) {
                     session.last_seen = now;
+                    session.grant.topup_checked(now);
                 }
                 self.on_unverified_topup(peer, &[channel_id], now, &mut out);
             }
@@ -250,27 +288,12 @@ impl Sessions {
             Event::IncomingFundingRejected { peer, reason } => {
                 self.reject(peer, reason, &mut out);
             }
-            Event::Metered { peer, counters } => {
-                let multiplier = match self.peers.get(&peer) {
-                    Some(s) => s.policy.multiplier(&self.node),
-                    None => return out,
-                };
-                if let Some(session) = self.peers.get_mut(&peer) {
-                    // What we have been pushing at them, as a rate. Read before
-                    // `observe` consumes the reading.
-                    let grew = counters.delta_since(session.meter.totals());
-                    let elapsed = now.saturating_since(session.last_meter_at);
-                    if elapsed > 0 {
-                        session.upload_rate = crate::grant::rate_from(
-                            grew.delivered,
-                            elapsed.min(u32::MAX as u64) as u32,
-                        );
-                        session.last_meter_at = now;
-                    }
-
-                    let drawn = session.meter.observe(counters, multiplier);
-                    session.grant.draw(drawn);
-                }
+            Event::Metered {
+                peer,
+                counters,
+                carried,
+            } => {
+                self.on_metered(peer, counters, carried, now);
                 self.refresh(peer, now, &mut out);
             }
             Event::DemandObserved { peer, rate } => {
@@ -284,7 +307,7 @@ impl Sessions {
                 for peer in peers {
                     // A peer that has said nothing at all for this long is
                     // gone. Nothing needs to detect a peer that merely stops
-                    // *paying* — its grant lapses and it drops to the minimum
+                    // *paying* — its budget runs out and it drops to the minimum
                     // flow allowance — so this only catches silence.
                     if self.node.stale_timeout_ms > 0
                         && let Some(session) = self.peers.get(&peer)
@@ -382,6 +405,7 @@ impl Sessions {
         };
         if session.phase == Phase::Closing {
             if let Some(mut session) = self.peers.remove(&peer) {
+                Self::save_budget(peer, &session, now, out);
                 Self::discard(peer, &mut session, out);
             }
             return;
@@ -394,6 +418,12 @@ impl Sessions {
         let Some(mut session) = self.peers.remove(&peer) else {
             return;
         };
+        // The session is over, if not yet given up on: nothing is drawn while
+        // it is down, no capacity is set aside for it, and its budget is kept
+        // on disk in case it is this node that goes next.
+        session.grant.end_reservation();
+        session.drawn_at = None;
+        Self::save_budget(peer, &session, now, out);
         if self.resume_grace_ms() == 0 {
             Self::discard(peer, &mut session, out);
             return;
@@ -454,11 +484,30 @@ impl Sessions {
         }
     }
 
+    /// Have the host keep a payer's budget, as it stands at `now`.
+    ///
+    /// Only for a peer we charge: one we carry free has no budget.
+    fn save_budget(peer: PubKey, session: &PeerSession, now: Millis, out: &mut Vec<Action>) {
+        if session.policy.no_charge {
+            return;
+        }
+        out.push(Action::SaveBudget {
+            peer,
+            budget: session.grant.budget(now),
+        });
+    }
+
     // -----------------------------------------------------------------------
     // Opening
     // -----------------------------------------------------------------------
 
-    fn on_connected(&mut self, peer: PubKey, now: Millis, out: &mut Vec<Action>) {
+    fn on_connected(
+        &mut self,
+        peer: PubKey,
+        budget: Option<Budget>,
+        now: Millis,
+        out: &mut Vec<Action>,
+    ) {
         let policy = self.overrides.get(&peer).copied().unwrap_or_default();
 
         if policy.blocked {
@@ -494,8 +543,10 @@ impl Sessions {
                 })
             }
         };
-        let session = match kept {
+        let mut session = match kept {
             Some(mut session) => {
+                // What we still hold of its budget is at least as current as
+                // what the host kept on disk.
                 session.resume(policy, now);
                 // A channel already due to be settled is not one to carry on
                 // with: settle it now rather than affirm it and settle it on
@@ -504,8 +555,17 @@ impl Sessions {
                 Self::settle_expiring_in(peer, &mut session, now, lead_ms, out);
                 session
             }
-            None => PeerSession::new(peer, policy, now),
+            None => {
+                let mut session = PeerSession::new(peer, policy, now);
+                if let Some(budget) = budget {
+                    session.grant.restore(budget, now);
+                }
+                session
+            }
         };
+        // Fixed for the session: an override made since applies from the
+        // next.
+        session.weight = policy.weight(&self.node);
         let held: Vec<tollgate_protocol::ChannelId> =
             session.grant.channels().iter().map(|c| c.id).collect();
         self.peers.insert(peer, session);
@@ -540,8 +600,21 @@ impl Sessions {
             });
         }
 
-        let offer = self.offer_for(&policy);
+        let offer = self.offer_for(&policy, policy.weight(&self.node));
         self.send_offer(peer, offer, out);
+
+        // What it left behind with us, if anything, and that its reservation
+        // did not come with it. A peer we do not charge has no budget to hear
+        // about.
+        if !policy.no_charge
+            && let Some(session) = self.peers.get_mut(&peer)
+        {
+            session.budget_live = session.grant.is_live(now);
+            out.push(Action::Send {
+                peer,
+                msg: Message::Balance(balance_of(session, now)),
+            });
+        }
         self.refresh(peer, now, out);
     }
 
@@ -558,27 +631,28 @@ impl Sessions {
     }
 
     /// What this node advertises to one peer: which mints it will take, the
-    /// unit, the window range, one unsigned multiplier, and whether we charge
-    /// it at all. No price anywhere.
+    /// unit, the terms a purchase must fit, the from-payer weight, and whether
+    /// we charge it at all. No price anywhere.
     ///
-    /// The multiplier is the one that peer's grant will be drawn down under,
-    /// override included. The payer sizes its purchases from it, so
-    /// advertising the node-wide value to a peer we surcharge harder would
-    /// have it under-buy and be shaped below what it needs.
+    /// The weight is the one that peer's budget is drawn at, override
+    /// included, fixed when its session started. The payer sizes its purchases
+    /// from it, so advertising the node-wide value to a peer we weight
+    /// differently would have it buy the wrong amount.
     ///
     /// Not charging is our decision alone, but the peer has to hear it —
     /// otherwise its buyer funds a channel and tops up toward a node that was
     /// never going to meter it.
-    fn offer_for(&self, policy: &PeerPolicy) -> Offer {
+    fn offer_for(&self, policy: &PeerPolicy, weight: u16) -> Offer {
+        let grants = &self.node.grants;
         Offer {
             accepted_mints: self.node.accepted_mints.clone(),
             unit: self.node.unit.clone(),
-            min_window_ms: self.node.grants.min_window_ms as u64,
-            max_window_ms: self.node.grants.max_window_ms as u64,
-            from_payer_weight: policy.multiplier(&self.node),
+            min_window_ms: grants.min_window_ms,
+            max_window_ms: grants.max_window_ms,
+            from_payer_weight: weight,
             no_charge: policy.no_charge,
-            min_reserved_rate: 0,
-            min_topup_gap_ms: 0,
+            min_reserved_rate: grants.min_reserved_rate,
+            min_topup_gap_ms: grants.min_topup_gap_ms,
         }
     }
 
@@ -619,9 +693,19 @@ impl Sessions {
                     let hold = self.buyer_policy.cap_hold_ms;
                     session
                         .buyer
-                        .record_reject(&refused, m.max_reserved_rate, now, hold);
+                        .record_reject(&refused, m.reason, m.max_reserved_rate, now, hold);
                 }
                 self.poll_buyer(peer, now, out);
+            }
+            Message::Balance(m) => {
+                // Information, not an instruction: kept for the operator, and
+                // never a reason to buy more than our own count says.
+                if let Some(session) = self.peers.get_mut(&peer) {
+                    session
+                        .buyer
+                        .note_balance(m.remaining, m.expires_in_ms, now);
+                    session.balance = Some((m, now));
+                }
             }
             Message::RolloverInit(m) => {
                 // Their outgoing channel is filling up. Verify the replacement
@@ -666,7 +750,6 @@ impl Sessions {
                 // Nothing to unwind: we never advanced state on a proposal that
                 // had not been confirmed.
             }
-            Message::Balance(_) => {}
             Message::Disconnect(_) => {
                 // Orderly: the session ends here, and is not held for a return.
                 if let Some(session) = self.peers.get_mut(&peer) {
@@ -706,18 +789,24 @@ impl Sessions {
             return;
         };
 
-        // The multiplier may change mid-session; a revised Offer replaces the
-        // one we hold and takes effect on our *next* grant. One already bought
-        // keeps the multiplier it was bought under.
+        // A revised Offer replaces the terms we hold, and they apply to our
+        // next purchase. The from-payer weight is the exception: it is fixed
+        // for the session, so the one the opening Offer carried stands.
         let was_established = session.offer.is_some();
+        let weight = session
+            .offer
+            .as_ref()
+            .map_or(m.from_payer_weight, |o| o.terms.from_payer_weight);
         session.offer = Some(PeerOffer {
             accepted_mints: m.accepted_mints.clone(),
             unit: m.unit,
-            bounds: WindowBounds {
-                min_ms: m.min_window_ms.min(u32::MAX as u64) as u32,
-                max_ms: m.max_window_ms.min(u32::MAX as u64) as u32,
+            terms: Terms {
+                min_window_ms: m.min_window_ms,
+                max_window_ms: m.max_window_ms,
+                min_reserved_rate: m.min_reserved_rate,
+                min_topup_gap_ms: m.min_topup_gap_ms,
+                from_payer_weight: weight,
             },
-            received_multiplier: m.from_payer_weight,
             no_charge: m.no_charge,
         });
         if session.phase == Phase::Opening {
@@ -744,7 +833,20 @@ impl Sessions {
         // us while we were away, or we stopped buying. Then we let the channel
         // go and answer with the empty Accept below, which also tells the peer
         // to settle what we signed on it.
-        let buying = !m.no_charge && self.buyer_policy.max_rate > 0;
+        // A weight above what we buy at is refused before any money moves:
+        // we say so, fund nothing and pay nothing.
+        if !m.no_charge && !self.buyer_policy.accepts_weight(m.from_payer_weight) {
+            session.refused_terms = true;
+            out.push(Action::Send {
+                peer,
+                msg: Message::Reject(Reject {
+                    rejected_type: tollgate_protocol::MsgType::Offer as u8,
+                    reason: ReasonCode::FromPayerWeightUnacceptable,
+                    text: None,
+                }),
+            });
+        }
+        let buying = !m.no_charge && !session.refused_terms && self.buyer_policy.buying();
         if session.buyer.active().is_some() && session.kept_by_peer && buying {
             // A channel it never confirmed is one it does not know about.
             session.buyer.forget_pending();
@@ -767,6 +869,7 @@ impl Sessions {
         // channel, and the empty Accept tells them so.
         let mint = m.accepted_mints.first().cloned();
         match mint {
+            _ if session.refused_terms => {}
             Some(mint_url) if buying => {
                 // Start small: a new peering may not last. The capacity grows
                 // as rollovers show that it does.
@@ -881,39 +984,47 @@ impl Sessions {
     // Payment
     // -----------------------------------------------------------------------
 
-    fn on_topup(
-        &mut self,
-        peer: PubKey,
-        m: tollgate_protocol::TopUp,
-        now: Millis,
-        out: &mut Vec<Action>,
-    ) {
-        // Sum what we have already promised everyone else. Being able to do
-        // this at all is what admission control rests on: the payer states the
-        // rate it wants up front, for a bounded horizon, so we can refuse
-        // before taking the money rather than shaping below what we sold.
-        let committed_elsewhere = self.committed_rate_excluding(&peer, now);
+    fn on_topup(&mut self, peer: PubKey, m: TopUp, now: Millis, out: &mut Vec<Action>) {
+        // The gap first. The host asked the same question before it checked
+        // any signature, against an earlier clock, so this only refuses what
+        // it did too.
+        if let Some(refusal) = self.too_soon(peer, &m, now) {
+            out.push(refusal);
+            return;
+        }
+
+        // Sum what everyone else has reserved. Being able to do this at all is
+        // what admission control rests on: the payer states the rate it wants
+        // set aside up front, so we can refuse before taking the money rather
+        // than shaping below what we promised.
+        let reserved_elsewhere = self.reserved_elsewhere(&peer);
 
         let Some(session) = self.peers.get_mut(&peer) else {
             return;
         };
+        session.grant.topup_checked(now);
+        let admission = Admission {
+            policy: &self.node.grants,
+            reserved_elsewhere,
+        };
 
         let verdict = grant::evaluate_topup(
             &session.grant,
-            Admission {
-                policy: &self.node.grants,
-                committed_elsewhere,
-            },
+            admission,
             &m.updates,
             m.window_ms,
+            m.reserved_rate,
         );
-        let window_ms = m.window_ms.min(u32::MAX as u64) as u32;
 
         match verdict {
-            Verdict::Accept {
-                ratchets, grant, ..
-            } => {
-                session.grant.apply(&ratchets, grant, window_ms, now);
+            Verdict::Accept { ratchets, grant } => {
+                session
+                    .grant
+                    .apply(&ratchets, grant, m.window_ms, m.reserved_rate, now);
+                // A reservation is drawn from the moment it is bought.
+                if session.drawn_at.is_none() {
+                    session.drawn_at = Some(now);
+                }
 
                 // Only now does the backend keep them: before this, the
                 // purchase could still have been refused, and a backend that
@@ -926,7 +1037,8 @@ impl Sessions {
 
                 // A channel drained to its capacity carries nothing further.
                 // Settling it is what keeps our spent-proof set bounded, which
-                // is the reason channels exist at all.
+                // is the reason channels exist at all. The budget it paid for
+                // stays.
                 let done: Vec<_> = session.grant.exhausted_channels().collect();
                 for channel_id in done {
                     let expires_at = session
@@ -939,6 +1051,15 @@ impl Sessions {
                         expires_at,
                     });
                 }
+
+                // Kept at every purchase, so a crash loses at most what was
+                // drawn since — in the payer's favor.
+                Self::save_budget(peer, session, now, out);
+                session.budget_live = session.grant.is_live(now);
+                out.push(Action::Send {
+                    peer,
+                    msg: Message::Balance(balance_of(session, now)),
+                });
             }
             Verdict::Reject {
                 reason: ReasonCode::GrantInvalid,
@@ -953,28 +1074,64 @@ impl Sessions {
             }
             Verdict::Reject {
                 reason,
-                max_rate_available,
+                max_reserved_rate,
             } => {
                 // Echoed in full: a purchase may span several channels, so one
                 // channel id no longer identifies which one was refused.
                 out.push(Action::Send {
                     peer,
                     msg: Message::TopUpReject(TopUpReject {
-                        refused: m
-                            .updates
-                            .iter()
-                            .map(|u| RefusedUpdate {
-                                channel_id: u.channel_id,
-                                cumulative: u.cumulative,
-                            })
-                            .collect(),
-                        max_reserved_rate: max_rate_available,
+                        refused: refused_updates(&m),
+                        max_reserved_rate,
                         reason,
                     }),
                 });
             }
         }
         self.refresh(peer, now, out);
+    }
+
+    /// A meter reading for a peer: draw its budget with us, and our own count
+    /// of our budget with it.
+    ///
+    /// Its budget is drawn by the one rule, `max(moved, reserved × time)`, for
+    /// the time since the last reading — but only if we were carrying it all
+    /// that time. Ours is drawn the same way, from the same counts read the
+    /// other way round and weighted by its from-payer weight.
+    fn on_metered(
+        &mut self,
+        peer: PubKey,
+        counters: crate::meter::Counters,
+        carried: bool,
+        now: Millis,
+    ) {
+        let Some(session) = self.peers.get_mut(&peer) else {
+            return;
+        };
+
+        // What we have been pushing at them, as a rate. Read before `observe`
+        // consumes the reading.
+        let grew = session.meter.observe(counters);
+        let elapsed = now.saturating_since(session.last_meter_at);
+        if elapsed > 0 {
+            session.upload_rate = grant::rate_from(grew.to_payer, elapsed);
+            session.last_meter_at = now;
+        }
+
+        if carried && session.access.metered() {
+            let tick_ms = session.drawn_at.map_or(0, |at| now.saturating_since(at));
+            session.grant.draw(grew.weighted(session.weight), tick_ms);
+            session.drawn_at = Some(now);
+        } else {
+            session.drawn_at = None;
+        }
+
+        if let Some(offer) = session.offer.as_ref()
+            && !offer.no_charge
+        {
+            let weight = offer.terms.from_payer_weight;
+            session.buyer.draw(grew.swapped().weighted(weight), now);
+        }
     }
 
     /// Answer a TopUp that failed verification: a signature the host could not
@@ -1025,13 +1182,22 @@ impl Sessions {
         self.refresh(peer, now, out);
     }
 
-    /// Rate committed to every peer but this one, for admission control.
-    fn committed_rate_excluding(&self, exclude: &PubKey, now: Millis) -> u64 {
+    /// The terms a purchase from `payer` is judged against, and what every
+    /// other connected payer has reserved. A reservation ends with its
+    /// session, so a payer held after an unclean disconnect reserves nothing.
+    fn admission(&self, payer: &PubKey) -> Admission<'_> {
+        Admission {
+            policy: &self.node.grants,
+            reserved_elsewhere: self.reserved_elsewhere(payer),
+        }
+    }
+
+    /// What every connected payer but `payer` has reserved.
+    fn reserved_elsewhere(&self, payer: &PubKey) -> u64 {
         self.peers
             .iter()
-            .filter(|(p, _)| *p != exclude)
-            .filter(|(_, s)| s.grant.is_live(now))
-            .map(|(_, s)| s.grant.rate())
+            .filter(|(p, _)| *p != payer)
+            .map(|(_, s)| s.grant.reserved_rate())
             .fold(0u64, u64::saturating_add)
     }
 
@@ -1049,7 +1215,7 @@ impl Sessions {
         let Some(offer) = session.offer.as_ref() else {
             return;
         };
-        if offer.no_charge {
+        if offer.no_charge || session.refused_terms {
             // Nothing to buy, and no channel to sign against.
             return;
         }
@@ -1057,22 +1223,19 @@ impl Sessions {
         // A channel inside the safety margin is about to be settled by the
         // peer, so nothing more is signed on it once there is somewhere else to
         // go — and nothing at all once the peer is due to settle it.
-        let max_window_ms = offer.bounds.max_ms;
-        session.buyer.retire_expiring(
-            now,
-            self.node.safety_margin_ms(max_window_ms),
-            self.node.settle_lead_ms(max_window_ms),
-        );
+        session
+            .buyer
+            .retire_expiring(now, self.node.safety_margin_ms, self.node.settle_lead_ms());
 
-        // A unit we download draws one from our grant; a unit we upload draws
-        // the peer's multiplier. Buying for the download alone would leave us
-        // shaped for the difference, which is exactly what the surcharge is for.
-        let surcharged = session
+        // A unit we download draws one from our budget; a unit we upload draws
+        // the peer's from-payer weight. Buying for the download alone would
+        // leave the budget running out early.
+        let weighted_upload = session
             .upload_rate
-            .saturating_mul(offer.received_multiplier as u64);
+            .saturating_mul(offer.terms.from_payer_weight as u64);
         let demand = Demand {
-            observed_rate: session.demand.saturating_add(surcharged),
-            bounds: offer.bounds,
+            observed_rate: session.demand.saturating_add(weighted_upload),
+            terms: offer.terms,
         };
         let Some(purchase) = buyer::poll(&session.buyer, &self.buyer_policy, demand, now) else {
             return;
@@ -1093,6 +1256,7 @@ impl Sessions {
                 .map(|leg| (leg.channel_id, leg.cumulative))
                 .collect(),
             window_ms: purchase.window_ms,
+            reserved_rate: purchase.reserved_rate,
         });
 
         // A channel drained to its capacity has nothing left to carry, and its
@@ -1122,10 +1286,9 @@ impl Sessions {
         let Some(offer) = session.offer.as_ref() else {
             return;
         };
-        // The margin is reckoned from the peer's window range, not ours: it is
-        // the receiver who has to settle in time, so both ends of the channel
-        // use the receiver's numbers and arrive at the same one.
-        let margin_ms = self.node.safety_margin_ms(offer.bounds.max_ms);
+        // The margin is not advertised, so both ends of a channel arrive at
+        // the same one by being configured alike.
+        let margin_ms = self.node.safety_margin_ms;
         let Some(reason) =
             session
                 .buyer
@@ -1174,7 +1337,7 @@ impl Sessions {
         let Some(offer) = session.offer.as_ref() else {
             return;
         };
-        if offer.no_charge || self.buyer_policy.max_rate == 0 {
+        if offer.no_charge || session.refused_terms || !self.buyer_policy.buying() {
             return;
         }
         let buyer = &session.buyer;
@@ -1235,7 +1398,7 @@ impl Sessions {
 
     /// How long before a channel's expiry we, as its receiver, settle it.
     fn settle_lead_ms(&self) -> u64 {
-        self.node.settle_lead_ms(self.node.grants.max_window_ms)
+        self.node.settle_lead_ms()
     }
 
     /// Settle, and stop recognising, every channel in `session` within
@@ -1284,21 +1447,24 @@ impl Sessions {
     /// only where something actually changed.
     fn refresh(&mut self, peer: PubKey, now: Millis, out: &mut Vec<Action>) {
         let minimum_flow = self.node.minimum_flow;
+        let tick_ms = self.node.tick_ms;
         let Some(session) = self.peers.get_mut(&peer) else {
             return;
         };
+        let burst = session.policy.burst(&self.node);
 
         let access = if session.policy.no_charge {
             AccessLevel::Free
         } else if !session.grant.channels().is_empty() || session.grant.is_live(now) {
             // Paying, or still delivering what was paid for after the last
-            // channel filled — the session lasts until that grant runs out.
+            // channel filled or was settled — or what the payer brought with
+            // it from an earlier session.
             AccessLevel::Active
         } else {
             // Never paid, or every channel it paid us on has been drained and
-            // settled with nothing replacing it. Either way there is no session
-            // — only the allowance — and the peer can still negotiate one
-            // without reconnecting.
+            // settled with nothing left of its budget. Either way there is no
+            // session — only the allowance — and the peer can still negotiate
+            // one without reconnecting.
             AccessLevel::None
         };
 
@@ -1307,11 +1473,28 @@ impl Sessions {
             out.push(Action::SetAccess { peer, access });
         }
 
+        // The moment its budget runs out or expires, the payer hears so, and
+        // the host can let its record go.
+        let live = session.grant.is_live(now);
+        if session.budget_live && !live && access != AccessLevel::Free {
+            out.push(Action::Send {
+                peer,
+                msg: Message::Balance(balance_of(session, now)),
+            });
+            out.push(Action::SaveBudget {
+                peer,
+                budget: Budget::NONE,
+            });
+        }
+        session.budget_live = live;
+
         let rate = if access == AccessLevel::Free {
-            // Unmetered: no grant exists in either direction.
+            // Unmetered: no budget exists in either direction.
             u64::MAX
         } else {
-            session.grant.shaping_rate(now, minimum_flow)
+            session
+                .grant
+                .shaping_rate(now, burst, minimum_flow, tick_ms)
         };
 
         if session.applied_rate != Some(rate) {
@@ -1355,4 +1538,27 @@ fn not_increasing(
         }
     }
     failed
+}
+
+/// The states a refused purchase would have ratcheted to, echoed in full: a
+/// purchase may span several channels, so one channel id does not identify it.
+fn refused_updates(topup: &TopUp) -> Vec<RefusedUpdate> {
+    topup
+        .updates
+        .iter()
+        .map(|u| RefusedUpdate {
+            channel_id: u.channel_id,
+            cumulative: u.cumulative,
+        })
+        .collect()
+}
+
+/// What we tell a payer about its budget with us.
+fn balance_of(session: &PeerSession, now: Millis) -> Balance {
+    let budget = session.grant.budget(now);
+    Balance {
+        remaining: budget.remaining,
+        expires_in_ms: budget.expires_in_ms(now),
+        reserved_rate: session.grant.reserved_rate(),
+    }
 }

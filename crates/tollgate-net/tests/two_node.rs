@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tollgate_core::buyer::BuyerPolicy;
-use tollgate_core::config::{GrantPolicy, NodePolicy, PeerPolicy};
+use tollgate_core::config::{BurstPolicy, GrantPolicy, NodePolicy, PeerPolicy};
 use tollgate_net::channel::{ChannelBackend, FundedChannel, LocalChannels, VerifiedChannel};
 use tollgate_net::enforcer::{Enforcer, Loopback};
 use tollgate_net::identity::Identity;
@@ -38,18 +38,23 @@ fn node_policy(mint: &str) -> NodePolicy {
     NodePolicy {
         unit: "byte".into(),
         accepted_mints: vec![mint.into()],
-        received_multiplier: 0,
+        // What the payer sends is free here, so the numbers are downloads.
+        from_payer_weight: 0,
         minimum_flow: 4_096,
         grants: GrantPolicy {
             min_window_ms: 200,
             max_window_ms: 30_000,
+            min_reserved_rate: 0,
+            min_topup_gap_ms: 200,
             max_rate: None,
         },
+        burst: BurstPolicy::default(),
+        tick_ms: 100,
         initial_channel_capacity: 10_000_000_000,
         min_channel_capacity: 1,
         max_channel_capacity: 1 << 34,
         capacity_growth_pct: 200,
-        safety_margin_floor_ms: 60_000,
+        safety_margin_ms: 60_000,
         stale_timeout_ms: 0,
         rollover_threshold_pct: 80,
     }
@@ -202,10 +207,10 @@ async fn wait_for(label: &str, mut check: impl FnMut() -> bool) {
 /// sleep on a loaded machine overruns, and dividing by the nominal window
 /// would credit the overrun's bytes to a shorter interval.
 async fn measure_download(enforcer: &Loopback, peer: PubKey, window: Duration) -> u64 {
-    let before = enforcer.counters(peer).received;
+    let before = enforcer.counters(peer).from_payer;
     let started = Instant::now();
     tokio::time::sleep(window).await;
-    let after = enforcer.counters(peer).received;
+    let after = enforcer.counters(peer).from_payer;
     let elapsed_ms = started.elapsed().as_millis().max(1) as u64;
     (after - before) * 1_000 / elapsed_ms
 }
@@ -409,13 +414,13 @@ async fn a_channel_that_fills_up_rolls_over_and_buying_continues() {
     // boundary before the checks below, instead of measuring a window too
     // short to reach one. A client that stopped buying after a rollover is
     // held at the 4 KB/s allowance and would need hours to get here.
-    let start = client_enforcer.counters(provider).received;
+    let start = client_enforcer.counters(provider).from_payer;
     let started = Instant::now();
     let probe = Arc::clone(&client_enforcer);
     let note = note_channel;
     wait_for("three channels' worth of traffic", move || {
         note();
-        probe.counters(provider).received - start >= 3 * CAPACITY
+        probe.counters(provider).from_payer - start >= 3 * CAPACITY
     })
     .await;
     let sustained = 3 * CAPACITY * 1_000 / started.elapsed().as_millis().max(1) as u64;

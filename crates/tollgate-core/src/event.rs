@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 
 use tollgate_protocol::{ChannelId, Message, PubKey, ReasonCode};
 
+use crate::grant::Budget;
 use crate::meter::Counters;
 use crate::time::Millis;
 
@@ -20,6 +21,13 @@ pub enum Event {
     PeerConnected {
         /// The peer.
         peer: PubKey,
+        /// The budget this peer left behind with us in an earlier session, as
+        /// the host kept it on disk, if it did. Under `enforcer.identity:
+        /// address` the host looks it up by the address as well as the key.
+        ///
+        /// Core prefers the one it still holds itself, for a peer it is
+        /// holding after an unclean disconnect.
+        budget: Option<Budget>,
     },
 
     /// A peer's transport went away, cleanly or otherwise.
@@ -33,6 +41,11 @@ pub enum Event {
     /// **The host has already verified any signature it carries.** Core decides
     /// what is owed, never whether the peer is who it claims to be — exactly as
     /// FIPS terminates Noise before the protocol layer sees anything.
+    ///
+    /// For a TopUp, the host first asks
+    /// [`Sessions::too_soon`](crate::session::Sessions::too_soon), and checks
+    /// no signature on one that came too soon: the gap between purchases
+    /// exists to bound those checks.
     MessageReceived {
         /// Who sent it.
         peer: PubKey,
@@ -136,6 +149,10 @@ pub enum Event {
         peer: PubKey,
         /// Cumulative units since session start, both directions.
         counters: Counters,
+        /// Whether the node was carrying the peer since the last reading: its
+        /// enforcer connected and applying the peer's rate. A peer that was
+        /// not carried is drawn nothing, reserved rate or not.
+        carried: bool,
     },
 
     /// What this node currently wants to move over a link, in units per second.
@@ -149,7 +166,7 @@ pub enum Event {
         rate: u64,
     },
 
-    /// Time passed. Drives deadline expiry, renewals, rollover, and settling
+    /// Time passed. Drives deadlines, renewals, rollover, and settling
     /// channels before they expire.
     Tick,
 }

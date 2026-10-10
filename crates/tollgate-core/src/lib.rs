@@ -13,12 +13,12 @@
 //! Module layout follows the same split throughout — `core.rs` holds the pure
 //! decisions, `state.rs` the data they read, `limits.rs` the arithmetic:
 //!
-//! - [`grant`] — what a peer bought and what it has drawn down. The provider
-//!   side of payment.
-//! - [`buyer`] — when to buy and how much. The payer side, including the demand
-//!   -tracking algorithm that raises the purchased rate as traffic climbs.
+//! - [`grant`] — each payer's budget, deadline and reserved rate, and the
+//!   one rule that draws it. The provider side of payment.
+//! - [`buyer`] — when to buy, at what reserved rate, and how much. The payer
+//!   side: it adds back what has drained and follows demand.
 //! - [`session`] — the per-peer message lifecycle that ties the two together.
-//! - [`meter`] — cumulative delivered/received counters, link-local.
+//! - [`meter`] — cumulative counters to and from the payer, link-local.
 //! - [`access`] — the delivery gate.
 //!
 //! # What the host must do before calling in
@@ -28,6 +28,15 @@
 //! [`Event::MessageReceived`], exactly as FIPS terminates Noise before the
 //! protocol layer sees a peer. Core decides *what* is owed and *when*; it never
 //! decides whether a peer is who it claims to be.
+//!
+//! Two more things are the host's, because they touch a signature check or a
+//! disk:
+//!
+//! - **The gap between purchases**, before any signature on a TopUp is
+//!   checked: [`Sessions::too_soon`](session::Sessions::too_soon).
+//! - **Each payer's budget, on disk**: written when core asks with
+//!   [`Action::SaveBudget`], and handed back in
+//!   [`Event::PeerConnected`] when the payer returns.
 
 #![no_std]
 
@@ -46,7 +55,7 @@ mod time;
 
 pub use access::AccessLevel;
 pub use action::Action;
-pub use config::{GrantPolicy, NodePolicy, PeerPolicy};
+pub use config::{BurstPolicy, GrantPolicy, NodePolicy, PeerPolicy};
 pub use event::Event;
 pub use time::Millis;
 

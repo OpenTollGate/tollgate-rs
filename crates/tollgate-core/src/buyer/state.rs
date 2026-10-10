@@ -25,136 +25,147 @@
 //! refund path. A slowly drawn channel reaches that long before it fills, so
 //! it is replaced when it enters the safety margin before expiry as well, and
 //! abandoned for its replacement rather than drained.
+//!
+//! What was bought is kept apart from the channels, in the buyer's own count
+//! of its **budget** with the provider: what it signed for, less what it
+//! measured crossing the link, drawn by the same rule the provider uses. The
+//! budget is the payer's, not a channel's, so it outlives channels and
+//! sessions.
 
-use tollgate_protocol::ChannelId;
+use tollgate_protocol::{ChannelId, ReasonCode};
 
 use crate::time::Millis;
 
-/// How aggressively to buy. Deliberately simple — the design leaves window
-/// choice open ("the payer trades responsiveness against forfeiture and message
-/// count, with no obvious default"), so this is one workable policy rather than
-/// the policy.
+/// How this node buys. One workable policy rather than the policy: the design
+/// leaves choosing a budget to the payer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuyerPolicy {
-    /// Buy this percentage of observed demand. Above 100 leaves headroom so a
-    /// rising flow is not shaped before the next purchase lands.
+    /// Units per second to want from every peer whether or not anything asks:
+    /// a standing order, which spends money. `0` buys only for what is
+    /// observed.
+    pub demand: u64,
+    /// Reserve a rate that follows demand — time at a speed. `false` reserves
+    /// nothing, or the provider's smallest reserved rate, and pays for what it
+    /// uses.
+    pub reserve: bool,
+    /// Reserve this percentage of observed demand. Above 100 leaves headroom so
+    /// a rising flow is not held back before the next purchase lands, and is
+    /// what keeps the buyer from buying again for every small rise.
     pub headroom_pct: u32,
-    /// Only jump mid-window if the target exceeds the rate in force by this
-    /// percentage.
-    ///
-    /// This is the hysteresis that makes the forfeiture rule livable: raising
-    /// the rate early burns the remainder, and the design points out that large
-    /// jumps are cheap while small adjustments are punitive. A high threshold
-    /// is what stops the buyer fiddling.
-    pub raise_threshold_pct: u32,
-    /// Renew this long before the deadline, so the next grant lands before the
-    /// current one lapses and the peer drops to the minimum flow allowance.
-    ///
-    /// This is the one knob measured in absolute time rather than in
-    /// proportion, and it is the one that decides whether a real flow survives.
-    /// See [`BuyerPolicy::MIN_SAFE_LEAD_MS`].
-    pub renew_lead_ms: u32,
-    /// How long to respect a rate ceiling a provider named before testing
-    /// whether capacity has freed up.
-    pub cap_hold_ms: u64,
-    /// Window to ask for, clamped to what the provider advertised.
-    ///
-    /// Short windows keep the forfeit small and reaction quick, at the cost of
-    /// more signature verifications for the provider.
-    pub window_ms: u32,
-    /// Never buy below this rate, so an idle link keeps a little capacity ready.
+    /// Never reserve below this, units per second. Raised to the provider's
+    /// smallest reserved rate.
     pub min_rate: u64,
-    /// Never buy above this rate. The operator's spending ceiling — vouchers
+    /// Never reserve above this. The operator's spending ceiling — vouchers
     /// cost money to acquire, whatever the protocol thinks.
     pub max_rate: u64,
+    /// The highest from-payer weight this node buys at. A provider offering
+    /// more is refused before any money moves. `None` takes any.
+    pub max_from_payer_weight: Option<u16>,
+    /// Window to ask for, clamped to the provider's range. With
+    /// [`Self::reserve`] it also sets the budget: the reserved rate times the
+    /// window.
+    pub window_ms: u64,
+    /// Without [`Self::reserve`], the units to hold with each provider.
+    pub budget: u64,
+    /// Buy again this long before the budget, at the rate it is drawn, or the
+    /// deadline would run out. See [`BuyerPolicy::MIN_SAFE_LEAD_MS`].
+    pub renew_lead_ms: u64,
+    /// How long to keep to a reserved rate a provider named in a TopUpReject
+    /// before trying higher again.
+    pub cap_hold_ms: u64,
 }
 
 impl BuyerPolicy {
-    /// A renewal lead below this is asking for a lapsed grant.
+    /// A renewal lead below this is asking for a lapsed budget.
     ///
-    /// The lead is how late a renewal may be and still land before the grant it
-    /// replaces runs out — an absolute tolerance, in milliseconds, against
-    /// everything between deciding to buy and the provider applying the result:
-    /// a signature, a round trip, the provider's tick, a scheduler that had
+    /// The lead is how late a purchase may be and still land before the budget
+    /// runs out — an absolute tolerance, in milliseconds, against everything
+    /// between deciding to buy and the provider applying the result: a
+    /// signature, a round trip, the provider's tick, a scheduler that had
     /// something else to do. A node under load misses a few hundred
     /// milliseconds without much trying.
     ///
-    /// Missing it is expensive out of all proportion to the gap. The grant
-    /// lapses, the shaper drops to the minimum flow allowance with a window's
-    /// worth of packets in flight, and a TCP flow crossing that spends seconds
-    /// in backoff recovering from a gap of a tenth of a second. Measured, in
-    /// `testing/forwarding`: a 300 ms lead flaked under load; 1.2 s held.
-    ///
-    /// A thousand is not a fact about the protocol. It is the smallest lead
-    /// that has survived a loaded machine here.
-    pub const MIN_SAFE_LEAD_MS: u32 = 1_000;
+    /// Missing it is expensive out of all proportion to the gap. The budget
+    /// runs out, the shaper drops to the minimum flow allowance with a
+    /// window's worth of packets in flight, and a TCP flow crossing that spends
+    /// seconds in backoff recovering from a gap of a tenth of a second.
+    /// Measured, in `testing/forwarding`: a 300 ms lead flaked under load;
+    /// 1.2 s held.
+    pub const MIN_SAFE_LEAD_MS: u64 = 1_000;
 
     /// The lead this policy can actually use inside a window of `window_ms`.
     ///
-    /// The window is not entirely the payer's to choose — the provider bounds
-    /// it, and a short bound can leave a configured lead longer than the window
-    /// it renews inside. Taken literally that renews continuously: every grant
-    /// is already inside its own lead the moment it starts.
-    ///
-    /// Half the window is the ceiling. Past that a renewal forfeits more of the
-    /// grant than it keeps, which is a worse answer than renewing late.
-    pub fn lead_within(&self, window_ms: u32) -> u32 {
+    /// The provider bounds the window, and a short bound can leave a
+    /// configured lead longer than the window itself — taken literally, every
+    /// purchase would be inside its own lead the moment it is made. Half the
+    /// window is the ceiling.
+    pub fn lead_within(&self, window_ms: u64) -> u64 {
         self.renew_lead_ms.min(window_ms / 2)
-    }
-
-    /// What renewing early costs, as a percentage of each grant.
-    ///
-    /// The forfeit is the lead over the window: buying again abandons whatever
-    /// is left of the grant in force. Absolute tolerance is bought with a
-    /// proportion of every grant, which is why scaling both together is free
-    /// and shortening the window is not.
-    pub fn forfeit_pct(&self, window_ms: u32) -> u32 {
-        if window_ms == 0 {
-            return 100;
-        }
-        self.lead_within(window_ms).saturating_mul(100) / window_ms
     }
 
     /// Whether the lead is too short to absorb ordinary scheduling jitter.
     pub fn lead_is_thin(&self) -> bool {
         self.renew_lead_ms < Self::MIN_SAFE_LEAD_MS
     }
+
+    /// Whether this policy buys anything at all: a reserving buyer whose
+    /// ceiling is zero does not, nor a pay-per-use one with no budget to hold.
+    pub fn buying(&self) -> bool {
+        if self.reserve {
+            self.max_rate > 0
+        } else {
+            self.budget > 0
+        }
+    }
+
+    /// Whether this policy buys at a provider's from-payer weight.
+    pub fn accepts_weight(&self, weight: u16) -> bool {
+        self.max_from_payer_weight.is_none_or(|max| weight <= max)
+    }
 }
 
 impl Default for BuyerPolicy {
-    /// A window and a lead that carry a real TCP flow.
-    ///
-    /// 1.2 s of tolerance for 30% of each grant. Both numbers were arrived at
-    /// by measurement rather than by taste: shorter leads lapse under load, and
-    /// the pair scales — a wider window at the same ratio buys more absolute
-    /// slack for the same proportional forfeit, at the cost of reacting to a
-    /// change in demand one window later.
+    /// Time at a speed that follows demand, a ten-second budget, and a lead
+    /// that carries a real TCP flow.
     fn default() -> Self {
         Self {
+            demand: 0,
+            reserve: true,
             headroom_pct: 125,
-            raise_threshold_pct: 150,
-            renew_lead_ms: 1_200,
-            cap_hold_ms: 10_000,
-            window_ms: 4_000,
             min_rate: 0,
             max_rate: u64::MAX,
+            max_from_payer_weight: None,
+            window_ms: 10_000,
+            budget: 0,
+            renew_lead_ms: 1_200,
+            cap_hold_ms: 10_000,
         }
     }
 }
 
-/// Window bounds the provider advertised in its Offer.
+/// The terms a provider advertised in its Offer, which every purchase from it
+/// has to fit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WindowBounds {
-    /// Smallest window the provider will accept.
-    pub min_ms: u32,
-    /// Largest window the provider will accept.
-    pub max_ms: u32,
+pub struct Terms {
+    /// Shortest window it accepts.
+    pub min_window_ms: u64,
+    /// Longest window it accepts.
+    pub max_window_ms: u64,
+    /// Smallest reserved rate it accepts.
+    pub min_reserved_rate: u64,
+    /// Shortest time it accepts between two TopUps.
+    pub min_topup_gap_ms: u64,
+    /// What a unit we send it draws from our budget. Fixed for the session.
+    pub from_payer_weight: u16,
 }
 
-impl WindowBounds {
+impl Terms {
     /// Fit a preferred window into what the provider will take.
-    pub fn clamp(&self, want_ms: u32) -> u32 {
-        want_ms.clamp(self.min_ms, self.max_ms)
+    pub fn clamp_window(&self, want_ms: u64) -> u64 {
+        want_ms.clamp(
+            self.min_window_ms,
+            self.max_window_ms.max(self.min_window_ms),
+        )
     }
 }
 
@@ -220,16 +231,14 @@ pub struct Purchase {
     /// The update on the replacement channel, when the purchase overflowed the
     /// first. Present only when a rollover is already funded and confirmed.
     pub second: Option<Leg>,
-    /// Window to spend it in, already clamped to the provider's range.
-    pub window_ms: u32,
-    /// Rate this buys.
-    pub rate: u64,
-    /// Units bought by this purchase alone, across both legs.
+    /// How long the provider is to keep the budget, already clamped to its
+    /// range.
+    pub window_ms: u64,
+    /// The rate to reserve from now on.
+    pub reserved_rate: u64,
+    /// Units bought by this purchase alone, across both legs: what has drained
+    /// since the last, so the budget is back to the size wanted.
     pub grant: u64,
-    /// Units of the previous grant given up to make this one. Zero on a
-    /// renewal that waited for the deadline; the price of reacting early
-    /// otherwise. Worth logging — it is the cost the policy is trading against.
-    pub forfeited: u64,
     /// Why the buyer acted, for the operator's benefit.
     pub trigger: Trigger,
 }
@@ -279,25 +288,26 @@ pub enum RolloverReason {
 /// What prompted a purchase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trigger {
-    /// No grant has been bought yet on this channel.
+    /// Nothing has been bought yet in this session.
     First,
-    /// The grant in force is about to lapse.
+    /// The budget or its deadline is about to run out.
     Renewal,
-    /// Demand climbed far enough to be worth forfeiting the remainder for.
-    DemandRose,
-    /// The provider refused the last purchase and named a rate it would take.
+    /// Demand outgrew the rate reserved, so the reservation is raised at once.
+    RateRose,
+    /// The provider refused the last purchase and named the reserved rate it
+    /// would take.
     Rebuy,
 }
 
-/// The buyer's channel and grant state before a purchase, kept so a rejection
-/// can be undone.
+/// The buyer's state before a purchase, kept so a refusal can be undone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Prior {
     pub(super) active: Option<ChannelBuyer>,
     pub(super) next: Option<ChannelBuyer>,
-    pub(super) rate: u64,
     pub(super) deadline: Millis,
+    pub(super) reserved: u64,
     pub(super) started: bool,
+    pub(super) grant: u64,
 }
 
 /// The payer's side of one peering.
@@ -315,19 +325,28 @@ pub struct Buyer {
     /// and have had no channel back for. No channel exists yet, so there is
     /// nothing to put in `pending`, but a channel is already on the way.
     pub(super) funding: Option<FundingRequests>,
-    /// Rate the grant in force bought.
-    pub(super) rate: u64,
-    /// When it lapses.
+    /// Our own count of the budget we hold with the provider: what we signed
+    /// for, less what we measured it draw.
+    pub(super) remaining: u64,
+    /// When that budget expires.
     pub(super) deadline: Millis,
-    /// Whether anything has been bought yet.
+    /// The rate we reserved with our last purchase. It ends with the session,
+    /// at the deadline, and when the budget runs out, as it does at the
+    /// provider.
+    pub(super) reserved: u64,
+    /// When we last drew our own count down, so a reserved rate can be drawn
+    /// for the time between.
+    pub(super) drawn_at: Option<Millis>,
+    /// When we last sent a TopUp, so the next waits out the provider's gap.
+    pub(super) last_topup: Option<Millis>,
+    /// Whether anything has been bought in this session.
     pub(super) started: bool,
-    /// Ceiling the provider last told us it would honor, from a TopUpReject,
-    /// and when it is worth testing again.
+    /// The reserved rate the provider last told us it would accept, from a
+    /// TopUpReject, and until when we keep to it.
     ///
     /// Held for a while rather than forgotten on the next purchase: capacity
-    /// may free up, but re-probing every window means a peer parked above the
-    /// cap is refused once per window forever, which walks straight through the
-    /// signature-verification budget `min_window_ms` exists to protect.
+    /// may free up, but probing above it every gap means a buyer parked above
+    /// the cap is refused once a gap forever.
     pub(super) capped_at: Option<(u64, Millis)>,
     /// Units bought by the most recent purchase, so a rollover can be started
     /// before a channel is too small to carry another one.
@@ -336,10 +355,9 @@ pub struct Buyer {
     ///
     /// A TopUp is fire-and-forget, so we assume it landed and advance. If a
     /// TopUpReject comes back, the provider never turned its ratchet — and if
-    /// we kept our own advanced, every subsequent purchase would be computed
-    /// from a total the provider does not recognise, and would be refused for
-    /// the same reason as the first. So we keep exactly one step of history to
-    /// undo.
+    /// we kept our own advanced, every later purchase would be computed from a
+    /// total the provider does not recognise, and refused for the same reason
+    /// as the first. So we keep exactly one step of history to undo.
     pub(super) prior: Option<Prior>,
 }
 
@@ -351,8 +369,11 @@ impl Buyer {
             next: None,
             pending: None,
             funding: None,
-            rate: 0,
+            remaining: 0,
             deadline: Millis::ZERO,
+            reserved: 0,
+            drawn_at: None,
+            last_topup: None,
             started: false,
             capped_at: None,
             last_grant: 0,
@@ -382,17 +403,32 @@ impl Buyer {
         self.active.map(|c| c.cumulative).unwrap_or(0)
     }
 
-    /// The rate currently bought.
-    pub fn rate(&self) -> u64 {
-        self.rate
+    /// Our own count of the budget left at `now`: nothing past its deadline.
+    pub fn remaining_at(&self, now: Millis) -> u64 {
+        if now >= self.deadline {
+            0
+        } else {
+            self.remaining
+        }
     }
 
-    /// When the grant in force lapses.
+    /// When the budget expires.
     pub fn deadline(&self) -> Millis {
         self.deadline
     }
 
-    /// The rate ceiling in force, if a provider named one recently enough.
+    /// The rate reserved now.
+    pub fn reserved(&self) -> u64 {
+        self.reserved
+    }
+
+    /// When we last sent a TopUp.
+    pub fn last_topup(&self) -> Option<Millis> {
+        self.last_topup
+    }
+
+    /// The reserved-rate ceiling in force, if a provider named one recently
+    /// enough.
     pub(super) fn cap(&self, now: Millis) -> Option<u64> {
         self.capped_at
             .filter(|(_, until)| now < *until)
@@ -404,11 +440,13 @@ impl Buyer {
         self.active.is_some_and(|c| c.id == id)
     }
 
-    /// Start a new session over the channels kept from the last one.
+    /// Start a new session over the channels and budget kept from the last
+    /// one.
     ///
-    /// The grant bought in the old session is forgotten, as the provider
-    /// forgets it, so the next purchase is a first one and lands at once. The
-    /// channels and what has been signed on them stay.
+    /// The budget is ours, and the provider keeps it across sessions, so our
+    /// count of it stays too. The reservation does not: it ends with the
+    /// session at the provider, so the next purchase reserves again, and it
+    /// may come at once since the provider starts the gap over as well.
     pub fn restart(&mut self) {
         *self = Self {
             active: self.active,
@@ -416,8 +454,50 @@ impl Buyer {
             pending: self.pending,
             funding: self.funding,
             last_grant: self.last_grant,
+            remaining: self.remaining,
+            deadline: self.deadline,
             ..Self::new()
         };
+    }
+
+    /// Draw our own count down for what crossed the link, by the provider's
+    /// rule: `max(moved, reserved × time)`. `moved` is already weighted by the
+    /// provider's from-payer weight.
+    ///
+    /// When it reaches zero the reservation ends with it, as it does at the
+    /// provider.
+    pub fn draw(&mut self, moved: u64, now: Millis) {
+        let elapsed = self.drawn_at.map_or(0, |at| now.saturating_since(at));
+        self.drawn_at = Some(now);
+        if now >= self.deadline {
+            self.remaining = 0;
+            self.reserved = 0;
+            return;
+        }
+        let drawn = moved.max(crate::grant::units_in(self.reserved, elapsed));
+        self.remaining = self.remaining.saturating_sub(drawn);
+        if self.remaining == 0 {
+            self.reserved = 0;
+        }
+    }
+
+    /// Take in a Balance the provider sent: what it says is left, and for how
+    /// long.
+    ///
+    /// Information, not an instruction. It never makes us buy more: a Balance
+    /// below our own count is a gap between what we bought and what we got,
+    /// not a reason to top up. It can make us buy less, when it says more is
+    /// left than we knew of — which is what a buyer that came back without
+    /// its own count learns from it, the budget it left behind.
+    pub fn note_balance(&mut self, remaining: u64, expires_in_ms: u64, now: Millis) {
+        if remaining == 0 || expires_in_ms == 0 {
+            return;
+        }
+        let ours = self.remaining_at(now);
+        if remaining > ours {
+            self.remaining = remaining;
+            self.deadline = self.deadline.max(now + expires_in_ms);
+        }
     }
 
     /// Forget a channel we funded that the peer never confirmed.
@@ -526,12 +606,9 @@ impl Buyer {
     /// 1. **Past the threshold.** The channel is far enough through its
     ///    capacity to be worth replacing.
     /// 2. **Not enough headroom for another purchase like the last one.**
-    ///    A threshold alone is reactive, and a purchase is not gradual: a grant
+    ///    A threshold alone is reactive, and a purchase is not gradual: one
     ///    can take a channel from empty to full in a single step, and then
-    ///    there is nothing to move onto. The peer falls to the minimum flow
-    ///    allowance while a replacement is funded and verified — a round trip
-    ///    plus a mint swap — which is a visible stall for something entirely
-    ///    predictable.
+    ///    there is nothing to move onto.
     pub fn needs_rollover(&self, threshold_pct: u8) -> bool {
         if self.next.is_some() || self.pending.is_some() {
             return false;
@@ -561,10 +638,9 @@ impl Buyer {
     /// [`Self::needs_rollover`], plus the second clock a channel runs on: past
     /// its expiry we can reclaim it, so the receiver has to settle it before
     /// then, and it has to be replaced before the receiver does. A channel drawn
-    /// slowly enough reaches that long before it fills — 100 KB/s takes about
-    /// three hours through 1 GiB, three times a one-hour TTL.
+    /// slowly enough reaches that long before it fills.
     ///
-    /// `margin_ms` is the safety margin, from
+    /// `margin_ms` is the safety margin,
     /// [`NodePolicy::safety_margin_ms`](crate::config::NodePolicy::safety_margin_ms).
     ///
     /// Quiet while a funding request is out, from the moment it is asked for —
@@ -596,7 +672,8 @@ impl Buyer {
     /// and anything signed on it after that is refused. Without a replacement
     /// the old channel stays in use until `settle_lead_ms` before expiry, when
     /// the receiver settles it — and from then there is nothing to buy on until
-    /// the replacement is confirmed.
+    /// the replacement is confirmed. The budget is not touched: what was
+    /// bought on the channel is kept apart from it.
     ///
     /// Returns the channel given up, which is the receiver's to settle, not
     /// ours.
@@ -618,21 +695,16 @@ impl Buyer {
             return None;
         }
         // The undo step describes channels that are no longer both there, so
-        // a late rejection must not bring the retired one back.
+        // a late refusal must not bring the retired one back.
         self.prior = None;
         Some(active.id)
     }
 
-    /// Units of the grant in force still unspent from our side's point of view
-    /// — an upper bound, since we cannot see the provider's counters.
-    pub fn unspent_at(&self, now: Millis) -> u64 {
-        if !self.started || now >= self.deadline {
-            return 0;
-        }
-        crate::grant::units_in(self.rate, self.deadline.saturating_since(now))
-    }
-
     /// Commit to a purchase we have decided to send.
+    ///
+    /// The grant is added to our count of the budget, the deadline becomes the
+    /// later of the old one and now plus the window, and the reserved rate
+    /// replaces the one before — exactly as the provider will apply it.
     ///
     /// Returns the channel that this purchase exhausted, if any. That channel
     /// has been drained to its capacity and can be settled — its replacement is
@@ -641,9 +713,10 @@ impl Buyer {
         self.prior = Some(Prior {
             active: self.active,
             next: self.next,
-            rate: self.rate,
             deadline: self.deadline,
+            reserved: self.reserved,
             started: self.started,
+            grant: purchase.grant,
         });
 
         if let Some(active) = self.active.as_mut() {
@@ -657,10 +730,15 @@ impl Buyer {
             next.cumulative = leg.cumulative;
         }
 
-        self.rate = purchase.rate;
-        self.deadline = now + purchase.window_ms as u64;
+        self.remaining = self.remaining_at(now).saturating_add(purchase.grant);
+        self.deadline = self.deadline.max(now + purchase.window_ms);
+        self.reserved = purchase.reserved_rate;
         self.started = true;
+        self.last_topup = Some(now);
         self.last_grant = purchase.grant;
+        if self.drawn_at.is_none() {
+            self.drawn_at = Some(now);
+        }
 
         // A purchase at or under the cap does not disprove it, so the cap
         // stands until it expires on its own.
@@ -682,27 +760,32 @@ impl Buyer {
         Some(active.id)
     }
 
-    /// Record that the provider refused a purchase, and at what rate it said it
-    /// would accept one.
+    /// Record that the provider refused a purchase, why, and the highest
+    /// reserved rate it said it would accept.
     ///
     /// The refusal costs nothing directly — an unclaimed state is worth nothing
-    /// to the provider, so our money is untouched. What it buys us is the rate
-    /// to re-purchase at, in one round trip.
+    /// to the provider, so our money is untouched. Because the provider did not
+    /// turn its ratchet, we undo ours: the next purchase has to be built on the
+    /// last total the provider actually accepted, or it would be refused for
+    /// exactly the same reason. `refused` identifies which purchase was
+    /// refused, so a stale refusal for one we have already moved past rewinds
+    /// nothing.
     ///
-    /// Because the provider did not turn its ratchet, we undo ours: the next
-    /// purchase has to be built on the last total the provider actually
-    /// accepted, or it would be refused for exactly the same reason.
-    /// `refused` identifies which purchase was refused, so a stale rejection
-    /// for one we have already moved past only records the cap and does not
-    /// rewind anything.
+    /// By reason: for capacity we keep to the rate named for `hold_ms`. Too
+    /// soon needs nothing more, since the next purchase already waits a gap
+    /// from the one refused; nor does a window or reserved rate out of range,
+    /// since every purchase is fitted to the Offer as it now stands.
     pub fn record_reject(
         &mut self,
         refused: &[(ChannelId, u64)],
-        max_rate: u64,
+        reason: ReasonCode,
+        max_reserved_rate: u64,
         now: Millis,
         hold_ms: u64,
     ) {
-        self.capped_at = Some((max_rate, now + hold_ms));
+        if reason == ReasonCode::RateExceedsCapacity {
+            self.capped_at = Some((max_reserved_rate, now + hold_ms));
+        }
 
         // A purchase is refused in full, so it is enough that any of the totals
         // named is one we currently hold — they were all sent together.
@@ -719,8 +802,9 @@ impl Buyer {
         if let Some(prior) = self.prior.take() {
             self.active = prior.active;
             self.next = prior.next;
-            self.rate = prior.rate;
+            self.remaining = self.remaining.saturating_sub(prior.grant);
             self.deadline = prior.deadline;
+            self.reserved = prior.reserved;
             self.started = prior.started;
         }
     }

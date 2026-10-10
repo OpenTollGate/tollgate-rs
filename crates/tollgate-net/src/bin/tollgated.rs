@@ -345,7 +345,7 @@ async fn main() -> Result<()> {
                 for peer in enforcer.peers() {
                     let now = enforcer.counters(peer);
                     let (was_delivered, was_received) = last
-                        .insert(peer, (now.delivered, now.received))
+                        .insert(peer, (now.to_payer, now.from_payer))
                         .unwrap_or((0, 0));
 
                     let secs = period.as_secs().max(1);
@@ -353,8 +353,8 @@ async fn main() -> Result<()> {
                         peer = %peer,
                         shaped = enforcer.shaping_rate(peer),
                         demand = enforcer.demand(peer),
-                        down = (now.received - was_received) / secs,
-                        up = (now.delivered - was_delivered) / secs,
+                        down = (now.from_payer - was_received) / secs,
+                        up = (now.to_payer - was_delivered) / secs,
                         "link"
                     );
                 }

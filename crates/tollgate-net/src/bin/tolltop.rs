@@ -278,7 +278,7 @@ fn compact_peer_row(peer: &PeerSnapshot) -> Row<'_> {
         )),
         Cell::from(rate(peer.shaped_rate)),
         Cell::from(grant_left(peer)),
-        Cell::from(rate(peer.bought_rate)),
+        Cell::from(rate(peer.bought_reserved_rate)),
     ])
 }
 
@@ -287,10 +287,10 @@ fn compact_peer_row(peer: &PeerSnapshot) -> Row<'_> {
 /// A grant that has lapsed leaves the peer on the allowance, which is a normal
 /// resting state rather than a fault — so it is dimmed, not red.
 fn grant_left(peer: &PeerSnapshot) -> Span<'static> {
-    if peer.grant_expires_in_ms == 0 {
+    if peer.budget_expires_in_ms == 0 {
         Span::styled("lapsed", Style::default().fg(Color::DarkGray))
     } else {
-        Span::raw(format!("{:.1}s", peer.grant_expires_in_ms as f64 / 1000.0))
+        Span::raw(format!("{:.1}s", peer.budget_expires_in_ms as f64 / 1000.0))
     }
 }
 
@@ -307,9 +307,9 @@ fn peer_row(peer: &PeerSnapshot) -> Row<'_> {
         Cell::from(grant_left(peer)),
         Cell::from(channels(&peer.incoming_channels)),
         Cell::from(rate(peer.upload_rate)),
-        Cell::from(rate(peer.bought_rate)),
+        Cell::from(rate(peer.bought_reserved_rate)),
         Cell::from(rate(peer.demand)),
-        Cell::from(peer.received_multiplier.to_string()),
+        Cell::from(peer.their_from_payer_weight.to_string()),
         Cell::from(
             peer.outgoing_channel
                 .as_ref()
@@ -329,7 +329,7 @@ fn peer_row(peer: &PeerSnapshot) -> Row<'_> {
         // `upload_rate` measures the sending one, and formatting a cumulative
         // counter with a `/s` on the end made it read as one — a peering that
         // had taken 178 KiB looked like it was taking 178 KiB every second.
-        Cell::from(units(peer.received)),
+        Cell::from(units(peer.from_payer)),
     ])
 }
 
@@ -375,15 +375,15 @@ fn peer_detail(app: &App) -> Paragraph<'_> {
         field("shaped rate", rate(peer.shaped_rate)),
         field(
             "grant expires in",
-            if peer.grant_expires_in_ms == 0 {
+            if peer.budget_expires_in_ms == 0 {
                 "lapsed — on the allowance".into()
             } else {
-                format!("{:.1}s", peer.grant_expires_in_ms as f64 / 1000.0)
+                format!("{:.1}s", peer.budget_expires_in_ms as f64 / 1000.0)
             },
         ),
         field("authorized", units(peer.authorized)),
         field("consumed", units(peer.consumed)),
-        field("delivered to them", units(peer.delivered)),
+        field("delivered to them", units(peer.to_payer)),
         field("they are pushing", rate(peer.upload_rate)),
     ];
 
@@ -405,12 +405,12 @@ fn peer_detail(app: &App) -> Paragraph<'_> {
         "what we bought from this peer",
         Style::default().fg(Color::Cyan),
     )));
-    lines.push(field("bought rate", rate(peer.bought_rate)));
+    lines.push(field("bought rate", rate(peer.bought_reserved_rate)));
     lines.push(field("demand we observe", rate(peer.demand)));
-    lines.push(field("received from them", units(peer.received)));
+    lines.push(field("received from them", units(peer.from_payer)));
     lines.push(field(
         "their surcharge",
-        format!("{}x on what we push", peer.received_multiplier),
+        format!("{}x on what we push", peer.their_from_payer_weight),
     ));
     lines.push(field(
         "channel we pay on",
@@ -562,18 +562,25 @@ mod render_tests {
             phase: "established".into(),
             access: "active".into(),
             shaped_rate: 125_000,
+            budget: 1 << 19,
+            budget_expires_in_ms: 4_000,
+            reserved_rate: 125_000,
+            from_payer_weight: 1,
             authorized: 1 << 20,
             consumed: 1 << 19,
-            grant_expires_in_ms: 4_000,
             incoming_channels: Vec::new(),
-            bought_rate: 0,
+            bought_budget: 0,
+            bought_expires_in_ms: 0,
+            bought_reserved_rate: 0,
+            their_from_payer_weight: 1,
+            reported_balance: None,
             demand: 0,
             upload_rate: 0,
-            received_multiplier: 1,
+            refused_terms: false,
             outgoing_channel: None,
             rollover_ready: false,
-            delivered: 0,
-            received: 0,
+            to_payer: 0,
+            from_payer: 0,
         }
     }
 

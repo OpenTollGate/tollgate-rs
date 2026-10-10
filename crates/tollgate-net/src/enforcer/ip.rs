@@ -19,9 +19,9 @@
 //! # What is shaped, and what is not
 //!
 //! Only the peer's **download** — bytes we forward toward it. Its upload is
-//! charged through the `received_multiplier`, which drains that peer's own
-//! grant faster rather than capping its ingress, so a peer that pushes harder
-//! exhausts its grant sooner and falls to the allowance. No ingress policer is
+//! charged through the from-payer weight, which drains that peer's own budget
+//! faster rather than capping its ingress, so a peer that pushes harder runs
+//! its budget out sooner and falls to the allowance. No ingress policer is
 //! involved, and that is a design choice rather than an omission.
 //!
 //! And only traffic we **forward**, never traffic that terminates here. The
@@ -1137,8 +1137,8 @@ impl Enforcer for Ip {
         // per peer per tick would be the expensive part of metering.
         let all = read_counters();
         Counters {
-            delivered: all.get(delivered.as_str()).copied().unwrap_or(0),
-            received: all.get(received.as_str()).copied().unwrap_or(0),
+            to_payer: all.get(delivered.as_str()).copied().unwrap_or(0),
+            from_payer: all.get(received.as_str()).copied().unwrap_or(0),
         }
     }
 

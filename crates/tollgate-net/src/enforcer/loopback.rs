@@ -171,14 +171,14 @@ impl Loopback {
     pub fn record_delivered(&self, peer: PubKey, units: u64) {
         let mut links = self.links.lock().expect("not poisoned");
         let link = links.entry(peer).or_default();
-        link.counters.delivered = link.counters.delivered.saturating_add(units);
+        link.counters.to_payer = link.counters.to_payer.saturating_add(units);
     }
 
     /// Record units actually read from a peer — its upload.
     pub fn record_received(&self, peer: PubKey, units: u64) {
         let mut links = self.links.lock().expect("not poisoned");
         let link = links.entry(peer).or_default();
-        link.counters.received = link.counters.received.saturating_add(units);
+        link.counters.from_payer = link.counters.from_payer.saturating_add(units);
     }
 }
 
@@ -267,8 +267,8 @@ mod tests {
         assert_eq!(
             enforcer.counters(peer()),
             Counters {
-                delivered: 1_500,
-                received: 200
+                to_payer: 1_500,
+                from_payer: 200
             }
         );
     }

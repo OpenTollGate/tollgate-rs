@@ -228,10 +228,10 @@ impl Fips {
             // A peer FIPS has not reported keeps the reading it had. Zeroing it
             // would look like a settled channel rather than a missing answer,
             // and core draws grants down from these.
-            if let Some(&(delivered, received)) = by_addr.get(peer.node_addr.as_str()) {
+            if let Some(&(to_payer, from_payer)) = by_addr.get(peer.node_addr.as_str()) {
                 peer.counters = Counters {
-                    delivered,
-                    received,
+                    to_payer,
+                    from_payer,
                 };
             }
         }

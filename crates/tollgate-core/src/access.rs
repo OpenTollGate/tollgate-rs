@@ -22,8 +22,9 @@ pub enum AccessLevel {
     /// session without reconnecting.
     #[default]
     None,
-    /// Channels funded. Delivery allowed, metered, shaped to what was bought —
-    /// never below the allowance, including between grants.
+    /// Channels funded, or a budget to spend. Delivery allowed, metered, and
+    /// shaped to the payer's speed — never below the allowance, including
+    /// when the budget has run out.
     Active,
     /// Neither side charges the other. Delivery allowed and unmetered — a
     /// decision about the relationship, not a price set to zero.
@@ -101,8 +102,9 @@ mod tests {
 
     #[test]
     fn a_lapsed_grant_with_no_allowance_closes_the_gate_too() {
-        // Active with nothing live is a peer between grants — a channel still
-        // funded but its grant run out — and core shapes it to the allowance;
+        // Active with nothing live is a payer between purchases — a channel
+        // still funded but its budget run out — and core shapes it to the
+        // allowance;
         // zero allowance leaves it nothing.
         assert!(AccessLevel::Active.carried(1_250_000));
         assert!(AccessLevel::Active.advertise(1_250_000));

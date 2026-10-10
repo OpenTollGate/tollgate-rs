@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tollgate_core::buyer::BuyerPolicy;
-use tollgate_core::config::{GrantPolicy, NodePolicy, PeerPolicy};
+use tollgate_core::config::{BurstPolicy, GrantPolicy, NodePolicy, PeerPolicy};
 use tollgate_core::meter::Counters as MeterCounters;
 use tollgate_net::channel::LocalChannels;
 use tollgate_net::enforcer::{DelegateError, Enforcer, Expected, External, Loopback};
@@ -285,8 +285,8 @@ async fn counters_reach_the_enforcer_and_are_rebased_across_reconnects() {
     wait_for("the first counters", move || {
         probe.counters(payer)
             == MeterCounters {
-                delivered: 100,
-                received: 10,
+                to_payer: 100,
+                from_payer: 10,
             }
     })
     .await;
@@ -295,7 +295,7 @@ async fn counters_reach_the_enforcer_and_are_rebased_across_reconnects() {
     drop(conn);
     let probe = enforcer.clone();
     wait_for("the enforcer to notice", move || !probe.selling(payer)).await;
-    assert_eq!(enforcer.counters(payer).delivered, 100);
+    assert_eq!(enforcer.counters(payer).to_payer, 100);
 
     // It comes back from closed, so it is told everything again.
     let mut conn = stub.accept().await;
@@ -318,8 +318,8 @@ async fn counters_reach_the_enforcer_and_are_rebased_across_reconnects() {
     wait_for("the rebased counters", move || {
         probe.counters(payer)
             == MeterCounters {
-                delivered: 130,
-                received: 13,
+                to_payer: 130,
+                from_payer: 13,
             }
     })
     .await;
@@ -338,7 +338,7 @@ async fn counters_reach_the_enforcer_and_are_rebased_across_reconnects() {
     }))
     .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(enforcer.counters(payer).delivered, 130);
+    assert_eq!(enforcer.counters(payer).to_payer, 130);
 }
 
 #[tokio::test]
@@ -687,19 +687,24 @@ fn policy(mint: &str) -> NodePolicy {
     NodePolicy {
         unit: "byte".into(),
         accepted_mints: vec![mint.into()],
-        received_multiplier: 0,
+        // What the payer sends is free here, so the numbers are downloads.
+        from_payer_weight: 0,
         // No allowance: an unpaid payer is closed, not trickled.
         minimum_flow: 0,
         grants: GrantPolicy {
             min_window_ms: 200,
             max_window_ms: 30_000,
+            min_reserved_rate: 0,
+            min_topup_gap_ms: 200,
             max_rate: None,
         },
+        burst: BurstPolicy::default(),
+        tick_ms: 100,
         initial_channel_capacity: 10_000_000_000,
         min_channel_capacity: 1,
         max_channel_capacity: 1 << 34,
         capacity_growth_pct: 200,
-        safety_margin_floor_ms: 60_000,
+        safety_margin_ms: 60_000,
         stale_timeout_ms: 0,
         rollover_threshold_pct: 80,
     }
@@ -846,7 +851,7 @@ async fn access_follows_payment_and_counters_reach_the_ledger() {
     .await;
     wait_for("the counters to reach the ledger", || {
         p.session()
-            .is_some_and(|s| s.delivered == 1_000_000 && s.received == 50_000 && s.consumed > 0)
+            .is_some_and(|s| s.to_payer == 1_000_000 && s.from_payer == 50_000 && s.consumed > 0)
     })
     .await;
 

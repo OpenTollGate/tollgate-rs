@@ -201,8 +201,8 @@ struct Peer {
 impl Peer {
     fn total(&self) -> Counters {
         Counters {
-            delivered: self.base.delivered.saturating_add(self.current.delivered),
-            received: self.base.received.saturating_add(self.current.received),
+            to_payer: self.base.to_payer.saturating_add(self.current.to_payer),
+            from_payer: self.base.from_payer.saturating_add(self.current.from_payer),
         }
     }
 }
@@ -634,19 +634,19 @@ async fn read_loop(
                         continue;
                     };
                     let reported = Counters {
-                        delivered: c.to_payer,
-                        received: c.from_payer,
+                        to_payer: c.to_payer,
+                        from_payer: c.from_payer,
                     };
                     // Cumulative on this connection. One that goes backwards
                     // is the enforcer's mistake, and core must never see it.
-                    if reported.delivered < entry.current.delivered
-                        || reported.received < entry.current.received
+                    if reported.to_payer < entry.current.to_payer
+                        || reported.from_payer < entry.current.from_payer
                     {
                         warn!(peer = %c.peer, "the enforcer's counters went backwards; keeping the higher reading");
                     }
                     entry.current = Counters {
-                        delivered: reported.delivered.max(entry.current.delivered),
-                        received: reported.received.max(entry.current.received),
+                        to_payer: reported.to_payer.max(entry.current.to_payer),
+                        from_payer: reported.from_payer.max(entry.current.from_payer),
                     };
                 }
                 EnforcerMessage::Conflict(c) => {

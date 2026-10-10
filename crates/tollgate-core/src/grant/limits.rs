@@ -1,24 +1,22 @@
 //! Rate arithmetic.
 //!
 //! A proof holds a quantity and nothing else, so a rate only exists as a
-//! quantity paired with a window: `rate = grant / window`. These two functions
-//! are that identity in both directions, and everything that converts between a
-//! rate and a number of units goes through them.
+//! quantity over a time. Everything that converts between a rate and a number
+//! of units goes through these.
 //!
 //! All of it is done in `u128` and saturated back to `u64`. The inputs are
-//! attacker-influenced — a peer chooses both the grant and the window — and
-//! wrapping arithmetic here would hand it free capacity.
+//! attacker-influenced — a payer chooses its grant, window and reserved rate —
+//! and wrapping arithmetic here would hand it free capacity.
 
-/// Units per second bought by `grant` units spendable over `window_ms`.
+/// Units per second that `units` over `ms` milliseconds comes to.
 ///
-/// A zero window would be an unbounded rate; it saturates rather than dividing
-/// by zero. Policy rejects it long before this is reached, since
-/// `min_window_ms` is what bounds signature verifications per second.
-pub fn rate_from(grant: u64, window_ms: u32) -> u64 {
-    if window_ms == 0 {
+/// Over no time at all it is an unbounded rate, and saturates rather than
+/// dividing by zero.
+pub fn rate_from(units: u64, ms: u64) -> u64 {
+    if ms == 0 {
         return u64::MAX;
     }
-    let rate = (grant as u128) * 1_000 / (window_ms as u128);
+    let rate = (units as u128) * 1_000 / (ms as u128);
     rate.min(u64::MAX as u128) as u64
 }
 
@@ -30,8 +28,24 @@ pub fn units_in(rate: u64, ms: u64) -> u64 {
     units.min(u64::MAX as u128) as u64
 }
 
-/// Grant size needed to buy `rate` for `window_ms` — what a payer puts in a
-/// TopUp once it has decided what rate it wants.
-pub fn grant_for(rate: u64, window_ms: u32) -> u64 {
-    units_in(rate, window_ms as u64)
+/// The budget that lasts `window_ms` at a reserved `rate`: what a payer buying
+/// time at a speed holds.
+pub fn budget_for(rate: u64, window_ms: u64) -> u64 {
+    units_in(rate, window_ms)
+}
+
+/// The fastest a payer with `remaining` units left can be carried so it cannot
+/// move more than that in one tick of `tick_ms`, rounded down to a power of
+/// two.
+///
+/// Rounded so the shaper is told something new only when the budget halves,
+/// rather than on every tick as it drains — which, for a payer carried as fast
+/// as the link allows, would be every tick of its life. Rounding down only
+/// slows it, never lets it overrun.
+pub fn per_tick_ceiling(remaining: u64, tick_ms: u64) -> u64 {
+    let ceiling = rate_from(remaining, tick_ms.max(1));
+    match ceiling {
+        0 => 0,
+        c => 1u64 << (63 - c.leading_zeros()),
+    }
 }

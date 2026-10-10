@@ -33,7 +33,7 @@ use crate::wire::{self, Connection, PeerIdentity, Wire};
 /// The meter sample is what draws grants down, so this also bounds how far past
 /// its grant a peer can get before the shaper notices. It has to be well under
 /// the smallest grant window a payer can ask for.
-const TICK: Duration = Duration::from_millis(100);
+pub(crate) const TICK: Duration = Duration::from_millis(100);
 
 /// How long a shutdown keeps retrying settlements that fail.
 ///
@@ -305,7 +305,8 @@ impl Node {
         // deadline too — and so a retry waiting out a long backoff wakes for
         // one last try rather than holding the node open.
         self.settler.begin_shutdown(SHUTDOWN_SETTLE_GRACE);
-        for action in self.sessions.shutdown() {
+        let now = self.now();
+        for action in self.sessions.shutdown(now) {
             self.execute(action, done).await;
         }
 
@@ -348,7 +349,8 @@ impl Node {
                 // Tie the key the protocol knows to the address the kernel
                 // knows, before anything is gated or shaped for this peer.
                 self.enforcer.register(peer, addr.ip());
-                self.dispatch(Event::PeerConnected { peer }, done).await;
+                self.dispatch(Event::PeerConnected { peer, budget: None }, done)
+                    .await;
             }
             Wire::PeerDown { peer, conn } => {
                 // The end of a connection already replaced is not the peer's:
@@ -452,7 +454,17 @@ impl Node {
         self.release_deferred(done).await;
         for peer in self.enforcer.peers() {
             let counters = self.enforcer.counters(peer);
-            self.dispatch(Event::Metered { peer, counters }, done).await;
+            // A payer is drawn only while the enforcer is applying its rate.
+            let carried = self.enforcer.selling(peer);
+            self.dispatch(
+                Event::Metered {
+                    peer,
+                    counters,
+                    carried,
+                },
+                done,
+            )
+            .await;
 
             let rate = self.enforcer.demand(peer);
             self.dispatch(Event::DemandObserved { peer, rate }, done)
@@ -508,6 +520,7 @@ impl Node {
                 peer,
                 ratchets,
                 window_ms,
+                reserved_rate,
             } => {
                 // One signature per channel, one message for the purchase: the
                 // grant is their combined increase.
@@ -529,8 +542,8 @@ impl Node {
                     peer,
                     Message::TopUp(TopUp {
                         updates,
-                        window_ms: window_ms as u64,
-                        reserved_rate: 0,
+                        window_ms,
+                        reserved_rate,
                     }),
                 )
                 .await;
@@ -717,6 +730,10 @@ impl Node {
                      locked until its refund path opens, and this node does \
                      not reclaim them itself yet"
                 );
+            }
+
+            Action::SaveBudget { peer, budget } => {
+                debug!(%peer, remaining = budget.remaining, "budget to keep");
             }
 
             Action::DropPeer { peer } => {

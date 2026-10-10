@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 use tollgate_protocol::{ChannelId, ChannelUpdate, Message, PubKey};
 
 use crate::access::AccessLevel;
+use crate::grant::Budget;
 use crate::time::Millis;
 
 /// An effect for the host to execute.
@@ -38,8 +39,11 @@ pub enum Action {
         /// Each channel to ratchet, and its new cumulative total. Strictly
         /// greater than that channel's last.
         ratchets: Vec<(ChannelId, u64)>,
-        /// Window to spend it in, already clamped to the provider's range.
-        window_ms: u32,
+        /// How long the provider is to keep the budget, already clamped to its
+        /// range.
+        window_ms: u64,
+        /// The rate to reserve from now on, units per second; `0` for none.
+        reserved_rate: u64,
     },
 
     /// Keep a purchase's channel updates as each channel's latest signed state.
@@ -73,8 +77,9 @@ pub enum Action {
 
     /// Shape a peer to this many units per second.
     ///
-    /// Already includes the minimum flow allowance as its floor, so the enforcer
-    /// applies one number and needs to know nothing about grants.
+    /// Already includes the burst policy, the clip near the end of a budget and
+    /// the minimum flow allowance as its floor, so the enforcer applies one
+    /// number and needs to know nothing about budgets.
     SetShapingRate {
         /// The peer.
         peer: PubKey,
@@ -140,6 +145,22 @@ pub enum Action {
         /// When the refund path opens, on the same clock as `now`, or `None`
         /// for a channel that never expires.
         expires_at: Option<Millis>,
+    },
+
+    /// Keep a payer's budget, beside the channel backups, so it survives a
+    /// reconnect and a restart.
+    ///
+    /// Asked for at every TopUp core accepts, when a session ends, and when
+    /// the budget reaches zero or expires — with `remaining` zero, which means
+    /// the record can go. The host stores the deadline as a clock time, and
+    /// hands the budget back in [`Event::PeerConnected`](crate::Event::PeerConnected).
+    /// Under `enforcer.identity: address` it keys the record by the address
+    /// the peer is at as well as its key.
+    SaveBudget {
+        /// The payer.
+        peer: PubKey,
+        /// What is left, and until when.
+        budget: Budget,
     },
 
     /// Tear down the relationship with a peer.

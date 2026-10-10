@@ -1,32 +1,36 @@
-//! Cumulative delivered/received counters, per peer, link-local.
+//! Cumulative counters, per peer, link-local.
 //!
 //! Counts are **not exchanged, not signed, and not an input to any payment**.
-//! The payer bought its grant in advance; these are only how the provider knows
-//! when that grant is spent. Because no shared number decides how much money
-//! moves, there is nothing for the two sides to reconcile and no drift
-//! tolerance to configure.
+//! The payer bought its budget in advance; these are only how the provider
+//! knows how much of it to draw, and how the payer keeps its own count of the
+//! same budget.
 //!
-//! The counters stay **raw**. The received multiplier is applied when the grant
-//! is drawn down ([`crate::grant`]), not when counting, which keeps what the
+//! The directions are named by the roles in a sale, from the side of the peer
+//! as payer: `to_payer` is what this node sent it, `from_payer` what it sent
+//! this node. In peering each node is also the other's payer, and then the same
+//! two counts are read the other way round ([`Counters::swapped`]).
+//!
+//! The counters stay **raw**. The from-payer weight is applied when the budget
+//! is drawn ([`Counters::weighted`]), not when counting, which keeps what the
 //! meter reports separable from what the shaper charges.
 
 /// Cumulative units across a link with one peer, since session start.
 ///
-/// Cumulative rather than deltas because that is what compares directly against
-/// `authorized`, the cumulative total the peer has signed for.
+/// Cumulative rather than deltas because a running total survives a lost
+/// reading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Counters {
-    /// Units delivered **to** this peer — its download.
-    pub delivered: u64,
-    /// Units received **from** this peer — its upload.
-    pub received: u64,
+    /// `units_to_payer`: units this node sent to the peer — its download.
+    pub to_payer: u64,
+    /// `units_from_payer`: units this node got from the peer — its upload.
+    pub from_payer: u64,
 }
 
 impl Counters {
     /// Counters at session start.
     pub const ZERO: Self = Self {
-        delivered: 0,
-        received: 0,
+        to_payer: 0,
+        from_payer: 0,
     };
 
     /// What grew since `earlier`.
@@ -36,32 +40,40 @@ impl Counters {
     /// underflowing into an enormous one.
     pub fn delta_since(self, earlier: Self) -> Self {
         Self {
-            delivered: self.delivered.saturating_sub(earlier.delivered),
-            received: self.received.saturating_sub(earlier.received),
+            to_payer: self.to_payer.saturating_sub(earlier.to_payer),
+            from_payer: self.from_payer.saturating_sub(earlier.from_payer),
         }
     }
 
-    /// What this delta draws from a grant, given the received multiplier.
+    /// The same counts with this node as the payer: what it got from the peer
+    /// is then what went to the payer.
+    pub fn swapped(self) -> Self {
+        Self {
+            to_payer: self.from_payer,
+            from_payer: self.to_payer,
+        }
+    }
+
+    /// Units moved, as the budget is drawn by them:
     ///
     /// ```text
-    /// consumed += delivered + received × received_multiplier
+    /// moved = to_payer + from_payer × from_payer_weight
     /// ```
     ///
-    /// A unit the peer downloads draws one. A unit it uploads draws `m` — so at
-    /// the default `0` its uploads draw nothing and we pay for them out of our
-    /// own grant on the other channel, and at `2` an uploaded unit costs the
-    /// same as a downloaded one.
+    /// A unit to the payer draws one. A unit from it draws the weight — `1`
+    /// the same, `10` ten times as much, `0` nothing.
     ///
-    /// Computed in `u128` and saturated: `received` and `m` are both attacker-
-    /// influenced, and wrapping here would hand a peer free capacity.
-    pub fn weighted(self, received_multiplier: u16) -> u64 {
-        let weighted = self.delivered as u128
-            + (self.received as u128).saturating_mul(received_multiplier as u128);
-        weighted.min(u64::MAX as u128) as u64
+    /// Computed in `u128` and saturated: the counts are what the payer moved,
+    /// and wrapping here would hand it free capacity.
+    pub fn weighted(self, from_payer_weight: u16) -> u64 {
+        let moved = self.to_payer as u128
+            + (self.from_payer as u128).saturating_mul(from_payer_weight as u128);
+        moved.min(u64::MAX as u128) as u64
     }
 }
 
-/// Tracks a peer's counters and turns each reading into a draw-down.
+/// Tracks a peer's counters and turns each reading into what grew since the
+/// last.
 ///
 /// The host reports cumulative totals whenever it likes; this holds the last
 /// reading so core can work in deltas without the host having to.
@@ -76,12 +88,11 @@ impl Meter {
         Self::default()
     }
 
-    /// Record a new cumulative reading and return the weighted draw-down it
-    /// implies.
-    pub fn observe(&mut self, now: Counters, received_multiplier: u16) -> u64 {
+    /// Record a new cumulative reading and return what grew since the last.
+    pub fn observe(&mut self, now: Counters) -> Counters {
         let delta = now.delta_since(self.last);
         self.last = now;
-        delta.weighted(received_multiplier)
+        delta
     }
 
     /// The most recent reading.

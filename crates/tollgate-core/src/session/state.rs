@@ -8,10 +8,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tollgate_protocol::{Offer, PubKey};
+use tollgate_protocol::{Balance, Offer, PubKey};
 
 use crate::access::AccessLevel;
-use crate::buyer::{Buyer, WindowBounds};
+use crate::buyer::{Buyer, Terms};
 use crate::config::PeerPolicy;
 use crate::grant::GrantState;
 use crate::meter::Meter;
@@ -40,12 +40,11 @@ pub struct PeerOffer {
     pub accepted_mints: Vec<String>,
     /// Its quantity unit.
     pub unit: String,
-    /// Window bounds it will accept from us.
-    pub bounds: WindowBounds,
-    /// Its surcharge on what we push at it. We do not enforce this — the peer
-    /// does, against our grant — but it is worth holding for the operator to
-    /// see why a link is costing what it costs.
-    pub received_multiplier: u16,
+    /// What it accepts from us: windows, the smallest reserved rate, the gap
+    /// between purchases, and the from-payer weight our budget with it is
+    /// drawn at. The weight is the one its opening Offer carried; it is fixed
+    /// for the session, so a revised Offer does not change it.
+    pub terms: Terms,
     /// It will not charge us, so we fund no channel toward it and buy nothing
     /// from it. Its decision alone — it says nothing about whether we charge.
     pub no_charge: bool,
@@ -72,14 +71,32 @@ pub struct PeerSession {
     pub offer_sent: Option<Offer>,
 
     // --- the stream where they pay us -------------------------------------
-    /// What they have bought and drawn, and the channels they pay us on. The
-    /// channels live here because a purchase may ratchet several at once and
-    /// the grant is their combined increase.
+    /// Their budget with us, and the channels they pay us on. The channels
+    /// live here because a purchase may ratchet several at once and the grant
+    /// is their combined increase.
     pub grant: GrantState,
-    /// Cumulative counters, raw. The multiplier is applied when drawing down.
+    /// The from-payer weight their budget is drawn at: what our Offer carried
+    /// when this session started. Fixed for the session, so an override made
+    /// since applies from their next one.
+    pub weight: u16,
+    /// Cumulative counters, raw. The weight is applied when drawing down.
     pub meter: Meter,
+    /// When their budget was last drawn while we carried them, so a reserved
+    /// rate is drawn for the time between. `None` while we are not carrying
+    /// them.
+    pub drawn_at: Option<Millis>,
+    /// Whether their budget had something left at the last check, so the
+    /// moment it runs out or expires is noticed once: they are told with a
+    /// Balance, and the host lets the record go.
+    pub budget_live: bool,
 
     // --- the stream where we pay them --------------------------------------
+    /// The last Balance they sent us about our budget with them, and when it
+    /// came. Information only: what we buy is decided from our own count.
+    pub balance: Option<(Balance, Millis)>,
+    /// We refused their Offer — its from-payer weight is above what we buy at —
+    /// so we fund nothing toward them and buy nothing from them this session.
+    pub refused_terms: bool,
     /// Our side of the stream where we pay them.
     ///
     /// The channels for this direction live here rather than beside `incoming`,
@@ -90,14 +107,14 @@ pub struct PeerSession {
     /// Units per second we last observed ourselves wanting over this link.
     ///
     /// Our *download*. What we have to buy is more than that whenever the peer
-    /// surcharges what we push at it — see [`Self::upload_rate`].
+    /// charges for what we push at it — see [`Self::upload_rate`].
     pub demand: u64,
     /// Units per second we have recently been pushing at this peer.
     ///
-    /// A peer's `received_multiplier` is applied to this, and it draws down the
-    /// grant we bought. A node that uploads heavily to a peer with `m > 0` and
-    /// sized its purchases on download alone would be shaped for the
-    /// difference.
+    /// The peer's from-payer weight is applied to this, and it draws down the
+    /// budget we bought. A node that uploads heavily to a peer with a weight
+    /// above `0` and sized its purchases on download alone would run out
+    /// early.
     pub upload_rate: u64,
     /// When the meter was last sampled, so a delta can become a rate.
     pub last_meter_at: Millis,
@@ -131,7 +148,12 @@ impl PeerSession {
             offer: None,
             offer_sent: None,
             grant: GrantState::new(),
+            weight: policy.from_payer_weight.unwrap_or(1),
             meter: Meter::new(),
+            drawn_at: None,
+            budget_live: false,
+            balance: None,
+            refused_terms: false,
             buyer: Buyer::new(),
             demand: 0,
             upload_rate: 0,
@@ -148,8 +170,8 @@ impl PeerSession {
     /// Everything about the connection starts again — the opening sequence,
     /// what the enforcer was told, the meter and the demand, which were
     /// readings of the old link. The channels in both directions are kept, and
-    /// nothing else: the grants are zeroed on both sides as they are for any
-    /// session that starts.
+    /// so are the budgets, as they are into any session; the reservations are
+    /// not.
     pub fn resume(&mut self, policy: PeerPolicy, now: Millis) {
         let grant = core::mem::take(&mut self.grant);
         let buyer = self.buyer;
@@ -158,11 +180,11 @@ impl PeerSession {
             buyer,
             ..Self::new(self.peer, policy, now)
         };
-        self.grant.restart();
+        self.grant.restart(now);
         self.buyer.restart();
     }
 
-    /// Whether the peer has a live grant with us right now.
+    /// Whether the peer has budget with us right now.
     pub fn paying(&self, now: Millis) -> bool {
         self.grant.is_live(now)
     }
