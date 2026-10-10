@@ -21,8 +21,9 @@ use core::fmt;
 use minicbor::{Decoder, Encoder};
 
 use crate::message::{
-    Accept, Announce, ChannelClose, ChannelReady, ChannelUpdate, CloseAck, CloseReason, Disconnect,
-    Message, Offer, RefusedUpdate, Reject, RolloverInit, RolloverReady, TopUp, TopUpReject,
+    Accept, Announce, Balance, ChannelClose, ChannelReady, ChannelUpdate, CloseAck, CloseReason,
+    Disconnect, Message, Offer, RefusedUpdate, Reject, RolloverInit, RolloverReady, TopUp,
+    TopUpReject,
 };
 use crate::types::{ChannelId, MsgType, PubKey, ReasonCode, Signature};
 
@@ -60,7 +61,7 @@ pub enum Error {
     NoChannelUpdates,
     /// A TopUp carried more updates than [`crate::MAX_CHANNEL_UPDATES`].
     ///
-    /// Each one is a signature verification, and `min_window_ms` bounds how
+    /// Each one is a signature verification, and `min_topup_gap_ms` bounds how
     /// often a payer may send a TopUp — an unbounded array would multiply
     /// straight through that budget.
     TooManyChannelUpdates(usize),
@@ -128,7 +129,7 @@ pub fn encode(msg: &Message, out: &mut Vec<u8>) -> Result<(), Error> {
         Message::Offer(m) => {
             // Key 5 is left out rather than written as `false`: absent is the
             // default, and a peer that predates it skips nothing it never saw.
-            e.map(if m.no_charge { 6 } else { 5 })?;
+            e.map(if m.no_charge { 8 } else { 7 })?;
             e.u8(0)?.u8(tag)?;
             e.u8(1)?.array(m.accepted_mints.len() as u64)?;
             for mint in &m.accepted_mints {
@@ -137,12 +138,14 @@ pub fn encode(msg: &Message, out: &mut Vec<u8>) -> Result<(), Error> {
             e.u8(2)?.str(&m.unit)?;
             e.u8(3)?
                 .array(2)?
-                .u32(m.min_window_ms)?
-                .u32(m.max_window_ms)?;
-            e.u8(4)?.u16(m.received_multiplier)?;
+                .u64(m.min_window_ms)?
+                .u64(m.max_window_ms)?;
+            e.u8(4)?.u16(m.from_payer_weight)?;
             if m.no_charge {
                 e.u8(5)?.bool(true)?;
             }
+            e.u8(6)?.u64(m.min_reserved_rate)?;
+            e.u8(7)?.u64(m.min_topup_gap_ms)?;
         }
         Message::Accept(m) => {
             e.map(2)?;
@@ -155,7 +158,7 @@ pub fn encode(msg: &Message, out: &mut Vec<u8>) -> Result<(), Error> {
             e.u8(1)?.bytes(&m.channel_id.0)?;
         }
         Message::TopUp(m) => {
-            e.map(3)?;
+            e.map(4)?;
             e.u8(0)?.u8(tag)?;
             e.u8(1)?.array(m.updates.len() as u64)?;
             for u in &m.updates {
@@ -164,7 +167,8 @@ pub fn encode(msg: &Message, out: &mut Vec<u8>) -> Result<(), Error> {
                     .u64(u.cumulative)?
                     .bytes(&u.signature.0)?;
             }
-            e.u8(2)?.u32(m.window_ms)?;
+            e.u8(2)?.u64(m.window_ms)?;
+            e.u8(3)?.u64(m.reserved_rate)?;
         }
         Message::TopUpReject(m) => {
             e.map(4)?;
@@ -173,7 +177,7 @@ pub fn encode(msg: &Message, out: &mut Vec<u8>) -> Result<(), Error> {
             for r in &m.refused {
                 e.array(2)?.bytes(&r.channel_id.0)?.u64(r.cumulative)?;
             }
-            e.u8(2)?.u64(m.max_rate_available)?;
+            e.u8(2)?.u64(m.max_reserved_rate)?;
             e.u8(3)?.u8(m.reason as u8)?;
         }
         Message::RolloverInit(m) => {
@@ -221,6 +225,13 @@ pub fn encode(msg: &Message, out: &mut Vec<u8>) -> Result<(), Error> {
             e.u8(0)?.u8(tag)?;
             e.u8(1)?.u8(m.reason as u8)?;
         }
+        Message::Balance(m) => {
+            e.map(4)?;
+            e.u8(0)?.u8(tag)?;
+            e.u8(1)?.u64(m.remaining)?;
+            e.u8(2)?.u64(m.expires_in_ms)?;
+            e.u8(3)?.u64(m.reserved_rate)?;
+        }
     }
 
     Ok(())
@@ -251,6 +262,7 @@ pub fn decode(input: &[u8]) -> Result<Message, Error> {
         MsgType::CloseAck => decode_close_ack(&mut d, pairs).map(Message::CloseAck),
         MsgType::Reject => decode_reject(&mut d, pairs).map(Message::Reject),
         MsgType::Disconnect => decode_disconnect(&mut d, pairs).map(Message::Disconnect),
+        MsgType::Balance => decode_balance(&mut d, pairs).map(Message::Balance),
     }
 }
 
@@ -329,7 +341,8 @@ fn decode_announce(d: &mut Decoder<'_>, pairs: u64) -> Result<Announce, Error> {
 
 fn decode_offer(d: &mut Decoder<'_>, pairs: u64) -> Result<Offer, Error> {
     let mut mints: Option<Vec<String>> = None;
-    let (mut unit, mut windows, mut multiplier, mut no_charge) = (None, None, None, None);
+    let (mut unit, mut windows, mut weight, mut no_charge) = (None, None, None, None);
+    let (mut min_reserved_rate, mut min_topup_gap_ms) = (None, None);
     for _ in 0..pairs {
         match d.u8()? {
             0 => {
@@ -353,10 +366,12 @@ fn decode_offer(d: &mut Decoder<'_>, pairs: u64) -> Result<Offer, Error> {
                         got: n as usize,
                     });
                 }
-                windows = Some((d.u32()?, d.u32()?));
+                windows = Some((d.u64()?, d.u64()?));
             }
-            4 => multiplier = Some(d.u16()?),
+            4 => weight = Some(d.u16()?),
             5 => no_charge = Some(d.bool()?),
+            6 => min_reserved_rate = Some(d.u64()?),
+            7 => min_topup_gap_ms = Some(d.u64()?),
             _ => d.skip()?,
         }
     }
@@ -379,10 +394,12 @@ fn decode_offer(d: &mut Decoder<'_>, pairs: u64) -> Result<Offer, Error> {
         },
         min_window_ms,
         max_window_ms,
-        // The multiplier defaults to 0 — no surcharge, the base rule stands.
-        received_multiplier: multiplier.unwrap_or(0),
+        // Both directions cost the same unless the provider says otherwise.
+        from_payer_weight: weight.unwrap_or(1),
         // Absent means the sender charges, which is the ordinary case.
         no_charge: no_charge.unwrap_or(false),
+        min_reserved_rate: min_reserved_rate.unwrap_or(0),
+        min_topup_gap_ms: min_topup_gap_ms.unwrap_or(0),
     })
 }
 
@@ -424,7 +441,7 @@ fn decode_channel_ready(d: &mut Decoder<'_>, pairs: u64) -> Result<ChannelReady,
 
 fn decode_topup(d: &mut Decoder<'_>, pairs: u64) -> Result<TopUp, Error> {
     let mut updates: Option<Vec<ChannelUpdate>> = None;
-    let mut window_ms = None;
+    let (mut window_ms, mut reserved_rate) = (None, None);
 
     for _ in 0..pairs {
         match d.u8()? {
@@ -457,7 +474,8 @@ fn decode_topup(d: &mut Decoder<'_>, pairs: u64) -> Result<TopUp, Error> {
                 }
                 updates = Some(list);
             }
-            2 => window_ms = Some(d.u32()?),
+            2 => window_ms = Some(d.u64()?),
+            3 => reserved_rate = Some(d.u64()?),
             _ => d.skip()?,
         }
     }
@@ -477,6 +495,8 @@ fn decode_topup(d: &mut Decoder<'_>, pairs: u64) -> Result<TopUp, Error> {
             Some(v) => v,
             None => return missing(MsgType::TopUp, 2),
         },
+        // Absent reserves nothing: the payer pays for what it moves.
+        reserved_rate: reserved_rate.unwrap_or(0),
     })
 }
 
@@ -522,7 +542,7 @@ fn decode_topup_reject(d: &mut Decoder<'_>, pairs: u64) -> Result<TopUpReject, E
             Some(v) => v,
             None => return missing(MsgType::TopUpReject, 1),
         },
-        max_rate_available: match max_rate {
+        max_reserved_rate: match max_rate {
             Some(v) => v,
             None => return missing(MsgType::TopUpReject, 2),
         },
@@ -675,5 +695,34 @@ fn decode_disconnect(d: &mut Decoder<'_>, pairs: u64) -> Result<Disconnect, Erro
     }
     Ok(Disconnect {
         reason: reason.unwrap_or(ReasonCode::Other),
+    })
+}
+
+fn decode_balance(d: &mut Decoder<'_>, pairs: u64) -> Result<Balance, Error> {
+    let (mut remaining, mut expires_in_ms, mut reserved_rate) = (None, None, None);
+    for _ in 0..pairs {
+        match d.u8()? {
+            0 => {
+                d.skip()?;
+            }
+            1 => remaining = Some(d.u64()?),
+            2 => expires_in_ms = Some(d.u64()?),
+            3 => reserved_rate = Some(d.u64()?),
+            _ => d.skip()?,
+        }
+    }
+    Ok(Balance {
+        remaining: match remaining {
+            Some(v) => v,
+            None => return missing(MsgType::Balance, 1),
+        },
+        expires_in_ms: match expires_in_ms {
+            Some(v) => v,
+            None => return missing(MsgType::Balance, 2),
+        },
+        reserved_rate: match reserved_rate {
+            Some(v) => v,
+            None => return missing(MsgType::Balance, 3),
+        },
     })
 }

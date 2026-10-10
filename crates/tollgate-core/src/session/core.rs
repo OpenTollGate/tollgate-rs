@@ -573,10 +573,12 @@ impl Sessions {
         Offer {
             accepted_mints: self.node.accepted_mints.clone(),
             unit: self.node.unit.clone(),
-            min_window_ms: self.node.grants.min_window_ms,
-            max_window_ms: self.node.grants.max_window_ms,
-            received_multiplier: policy.multiplier(&self.node),
+            min_window_ms: self.node.grants.min_window_ms as u64,
+            max_window_ms: self.node.grants.max_window_ms as u64,
+            from_payer_weight: policy.multiplier(&self.node),
             no_charge: policy.no_charge,
+            min_reserved_rate: 0,
+            min_topup_gap_ms: 0,
         }
     }
 
@@ -617,7 +619,7 @@ impl Sessions {
                     let hold = self.buyer_policy.cap_hold_ms;
                     session
                         .buyer
-                        .record_reject(&refused, m.max_rate_available, now, hold);
+                        .record_reject(&refused, m.max_reserved_rate, now, hold);
                 }
                 self.poll_buyer(peer, now, out);
             }
@@ -664,6 +666,7 @@ impl Sessions {
                 // Nothing to unwind: we never advanced state on a proposal that
                 // had not been confirmed.
             }
+            Message::Balance(_) => {}
             Message::Disconnect(_) => {
                 // Orderly: the session ends here, and is not held for a return.
                 if let Some(session) = self.peers.get_mut(&peer) {
@@ -711,10 +714,10 @@ impl Sessions {
             accepted_mints: m.accepted_mints.clone(),
             unit: m.unit,
             bounds: WindowBounds {
-                min_ms: m.min_window_ms,
-                max_ms: m.max_window_ms,
+                min_ms: m.min_window_ms.min(u32::MAX as u64) as u32,
+                max_ms: m.max_window_ms.min(u32::MAX as u64) as u32,
             },
-            received_multiplier: m.received_multiplier,
+            received_multiplier: m.from_payer_weight,
             no_charge: m.no_charge,
         });
         if session.phase == Phase::Opening {
@@ -904,12 +907,13 @@ impl Sessions {
             &m.updates,
             m.window_ms,
         );
+        let window_ms = m.window_ms.min(u32::MAX as u64) as u32;
 
         match verdict {
             Verdict::Accept {
                 ratchets, grant, ..
             } => {
-                session.grant.apply(&ratchets, grant, m.window_ms, now);
+                session.grant.apply(&ratchets, grant, window_ms, now);
 
                 // Only now does the backend keep them: before this, the
                 // purchase could still have been refused, and a backend that
@@ -964,7 +968,7 @@ impl Sessions {
                                 cumulative: u.cumulative,
                             })
                             .collect(),
-                        max_rate_available,
+                        max_reserved_rate: max_rate_available,
                         reason,
                     }),
                 });

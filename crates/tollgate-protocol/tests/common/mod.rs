@@ -57,19 +57,24 @@ pub fn vectors(ty: MsgType) -> [Message; 2] {
                     "https://hub.example/mint".into(),
                 ],
                 unit: "byte".into(),
-                min_window_ms: 200,
-                max_window_ms: 30_000,
-                received_multiplier: u16::MAX,
+                min_window_ms: 1_000,
+                // A year, which is why both ends are u64.
+                max_window_ms: 31_536_000_000,
+                from_payer_weight: u16::MAX,
                 // Free peering: the one case key 5 is written.
                 no_charge: true,
+                min_reserved_rate: u64::MAX,
+                min_topup_gap_ms: u64::MAX,
             }),
             Message::Offer(Offer {
                 accepted_mints: vec!["https://hub.example/mint".into()],
                 unit: "byte".into(),
                 min_window_ms: 0,
                 max_window_ms: 0,
-                received_multiplier: 0,
+                from_payer_weight: 0,
                 no_charge: false,
+                min_reserved_rate: 0,
+                min_topup_gap_ms: 0,
             }),
         ],
         MsgType::Accept => [
@@ -97,7 +102,8 @@ pub fn vectors(ty: MsgType) -> [Message; 2] {
                         signature: signature(i),
                     })
                     .collect(),
-                window_ms: u32::MAX,
+                window_ms: u64::MAX,
+                reserved_rate: u64::MAX,
             }),
             Message::TopUp(TopUp {
                 updates: vec![ChannelUpdate {
@@ -106,6 +112,7 @@ pub fn vectors(ty: MsgType) -> [Message; 2] {
                     signature: signature(4),
                 }],
                 window_ms: 0,
+                reserved_rate: 0,
             }),
         ],
         MsgType::TopUpReject => [
@@ -120,12 +127,12 @@ pub fn vectors(ty: MsgType) -> [Message; 2] {
                         cumulative: 1_500_000,
                     },
                 ],
-                max_rate_available: 1_000_000,
+                max_reserved_rate: 1_000_000,
                 reason: ReasonCode::RateExceedsCapacity,
             }),
             Message::TopUpReject(TopUpReject {
                 refused: vec![],
-                max_rate_available: 0,
+                max_reserved_rate: 0,
                 reason: ReasonCode::Other,
             }),
         ],
@@ -192,6 +199,19 @@ pub fn vectors(ty: MsgType) -> [Message; 2] {
             }),
             Message::Disconnect(Disconnect {
                 reason: ReasonCode::Other,
+            }),
+        ],
+        MsgType::Balance => [
+            Message::Balance(Balance {
+                remaining: u64::MAX,
+                expires_in_ms: u64::MAX,
+                reserved_rate: u64::MAX,
+            }),
+            // No budget.
+            Message::Balance(Balance {
+                remaining: 0,
+                expires_in_ms: 0,
+                reserved_rate: 0,
             }),
         ],
     }

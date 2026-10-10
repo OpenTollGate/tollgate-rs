@@ -99,13 +99,13 @@ fn vectors(ty: EnforcerMsgType) -> Vec<EnforcerMessage> {
         EnforcerMsgType::Counters => vec![
             EnforcerMessage::Counters(Counters {
                 peer: payer(1),
-                delivered: u64::MAX,
-                received: u64::MAX,
+                to_payer: u64::MAX,
+                from_payer: u64::MAX,
             }),
             EnforcerMessage::Counters(Counters {
                 peer: payer(2),
-                delivered: 0,
-                received: 0,
+                to_payer: 0,
+                from_payer: 0,
             }),
         ],
         EnforcerMsgType::Conflict => every_subject()

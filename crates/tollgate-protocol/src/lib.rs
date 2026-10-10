@@ -33,8 +33,9 @@ mod types;
 pub use codec::{Error, decode, encode};
 pub use frame::{FrameReader, MAX_FRAME_LEN, encode_frame};
 pub use message::{
-    Accept, Announce, ChannelClose, ChannelReady, ChannelUpdate, CloseAck, CloseReason, Disconnect,
-    Message, Offer, RefusedUpdate, Reject, RolloverInit, RolloverReady, TopUp, TopUpReject,
+    Accept, Announce, Balance, ChannelClose, ChannelReady, ChannelUpdate, CloseAck, CloseReason,
+    Disconnect, Message, Offer, RefusedUpdate, Reject, RolloverInit, RolloverReady, TopUp,
+    TopUpReject,
 };
 pub use types::{ChannelId, MsgType, PubKey, ReasonCode, Signature};
 
@@ -49,7 +50,7 @@ pub const DEFAULT_PORT: u16 = 4747;
 /// A purchase draws from as many channels as the payer likes — a channel that
 /// is filling up and its replacement, or several accepted mints at once — but
 /// each update costs the provider a signature verification, and
-/// `min_window_ms` bounds only how *often* a TopUp may arrive. Without a cap
+/// `min_topup_gap_ms` bounds only how *often* a TopUp may arrive. Without a cap
 /// the array would multiply straight through that budget, which on a
 /// constrained provider is the binding limit rather than bandwidth.
 pub const MAX_CHANNEL_UPDATES: usize = 8;

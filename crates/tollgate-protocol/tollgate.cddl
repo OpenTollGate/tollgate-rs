@@ -57,6 +57,7 @@ tollgate-message = announce
                  / close-ack
                  / reject
                  / disconnect
+                 / balance
 
 ; ---------------------------------------------------------------------------
 ; Scalars
@@ -85,15 +86,16 @@ funding = bstr
 ; any other value in 0..255 as `reason-other` rather than failing, so a
 ; peer on a later version can add reasons.
 reason-code = &(
-  reason-multiplier-unacceptable: 0x01,
+  reason-weight-unacceptable:     0x01,  ; from-payer weight above the payer's limit
   reason-mint-not-accepted:       0x02,
   reason-unit-not-accepted:       0x03,
-  reason-window-out-of-range:     0x04,
+  reason-out-of-range:            0x04,  ; window or reserved rate outside the Offer
   reason-funding-invalid:         0x05,
   reason-grant-invalid:           0x06,
   reason-rate-exceeds-capacity:   0x07,
   reason-grant-exceeds-channel:   0x08,
   reason-version-unsupported:     0x09,
+  reason-too-soon:                0x0A,  ; inside the Offer's min-topup-gap
   reason-other:                   0xFF,
 )
 
@@ -106,7 +108,7 @@ close-reason = &(
 )
 
 ; ---------------------------------------------------------------------------
-; Messages. Key 0 is the type tag, 0x00..0x0B.
+; Messages. Key 0 is the type tag, 0x00..0x0C.
 ; ---------------------------------------------------------------------------
 
 ; 0x00 -- "I am a TollGate node". First message each peer sends.
@@ -120,21 +122,27 @@ announce = {
   * uint => any,
 }
 
-; 0x01 -- what this node takes payment in, and how welcome uploads are.
+; 0x01 -- what this node takes payment in, what purchases it accepts, and
+; how much a unit from the payer counts.
 offer = {
   0: 0x01,
   1: [+ tstr],            ; accepted mint URLs, most preferred first.
                           ;   Mandatory and never empty, even with key 5
   2: unit,
   3: [
-    min-window-ms: u32,    ; smallest grant window accepted
-    max-window-ms: u32,    ; largest grant window accepted
+    min-window-ms: u64,    ; shortest TopUp window accepted; never below key 7
+    max-window-ms: u64,    ; longest; how long a budget can be kept unrenewed
   ],
-  ? 4: u16,               ; received multiplier; 0 = no surcharge.
-                          ;   Always written; absent means 0
+  ? 4: u16,               ; from-payer weight: what one unit from the payer
+                          ;   draws from its budget, where one unit to it
+                          ;   draws one. Always written; absent means 1
   ? 5: bool,              ; no-charge: this node will not charge the peer.
                           ;   Senders write it only as `true` and omit it
                           ;   otherwise; absent or `false` means charging
+  ? 6: u64,               ; min-reserved-rate, units/second; 0 = a payer may
+                          ;   reserve nothing. Always written; absent means 0
+  ? 7: u64,               ; min-topup-gap-ms: shortest time between two
+                          ;   TopUps. Always written; absent means 0
   * uint => any,
 }
 
@@ -153,12 +161,15 @@ channel-ready = {
   * uint => any,
 }
 
-; 0x04 -- ratchet one or more channels and buy a rate for a window. The
-; grant is the combined increase across every update, applied atomically.
+; 0x04 -- ratchet one or more channels and add the combined increase to the
+; payer's budget, applied atomically.
 topup = {
   0: 0x04,
   1: [1*8 channel-update],; at most MAX_CHANNEL_UPDATES = 8
-  2: u32,                 ; window-ms, measured from receipt
+  2: u64,                 ; window-ms, measured from receipt: the deadline
+                          ;   becomes the later of the old one and now + this
+  ? 3: u64,               ; reserved-rate, units/second, replacing the one
+                          ;   before; 0 = none. Always written; absent means 0
   * uint => any,
 }
 
@@ -169,11 +180,12 @@ channel-update = [
   signature,
 ]
 
-; 0x05 -- the provider will not honor a grant.
+; 0x05 -- the provider will not honor a purchase that verified.
 topup-reject = {
   0: 0x05,
   1: [0*8 refused-update],; the states declined, echoed without signatures
-  2: u64,                 ; max-rate-available, units per second
+  2: u64,                 ; max-reserved-rate: the highest reserved rate the
+                          ;   provider would accept from this payer now
   ? 3: reason-code,       ; always written; absent means reason-other
   * uint => any,
 }
@@ -231,5 +243,16 @@ reject = {
 disconnect = {
   0: 0x0B,
   ? 1: reason-code,       ; always written; absent means reason-other
+  * uint => any,
+}
+
+; 0x0C -- provider to payer: what is left of the payer's budget. Information
+; only; the payer decides what to buy from its own count.
+balance = {
+  0: 0x0C,
+  1: u64,                 ; remaining: authorized - consumed, in units
+  2: u64,                 ; expires-in-ms: time left until the deadline;
+                          ;   0 when there is no budget
+  3: u64,                 ; reserved-rate now, units/second; 0 = none
   * uint => any,
 }

@@ -106,15 +106,16 @@ fn the_schema_covers_every_message_type() {
 #[test]
 fn every_reason_code_validates() {
     for code in [
-        ReasonCode::MultiplierUnacceptable,
+        ReasonCode::FromPayerWeightUnacceptable,
         ReasonCode::MintNotAccepted,
         ReasonCode::UnitNotAccepted,
-        ReasonCode::WindowOutOfRange,
+        ReasonCode::OutOfRange,
         ReasonCode::FundingInvalid,
         ReasonCode::GrantInvalid,
         ReasonCode::RateExceedsCapacity,
         ReasonCode::GrantExceedsChannel,
         ReasonCode::VersionUnsupported,
+        ReasonCode::TooSoon,
         ReasonCode::Other,
     ] {
         let msg = Message::Disconnect(Disconnect { reason: code });
@@ -152,7 +153,7 @@ fn optional_keys_may_be_left_out() {
             }),
         ),
         (
-            "Offer without multiplier or no-charge",
+            "Offer without weight, no-charge, smallest reserved rate or gap",
             map(4, |e| {
                 e.u8(0).unwrap().u8(MsgType::Offer as u8).unwrap();
                 e.u8(1).unwrap().array(1).unwrap().str("https://m").unwrap();
@@ -165,6 +166,25 @@ fn optional_keys_may_be_left_out() {
                     .unwrap()
                     .u32(2)
                     .unwrap();
+            }),
+        ),
+        (
+            "TopUp without a reserved rate",
+            map(3, |e| {
+                e.u8(0).unwrap().u8(MsgType::TopUp as u8).unwrap();
+                e.u8(1)
+                    .unwrap()
+                    .array(1)
+                    .unwrap()
+                    .array(3)
+                    .unwrap()
+                    .bytes(&channel(1).0)
+                    .unwrap()
+                    .u64(1)
+                    .unwrap()
+                    .bytes(&signature(1).0)
+                    .unwrap();
+                e.u8(2).unwrap().u64(1_000).unwrap();
             }),
         ),
         (
@@ -323,6 +343,7 @@ fn array_bounds_are_enforced() {
     let empty_topup = Message::TopUp(TopUp {
         updates: vec![],
         window_ms: 1_000,
+        reserved_rate: 0,
     });
     assert_invalid(&encoded(&empty_topup), "TopUp with no updates");
 
@@ -335,6 +356,7 @@ fn array_bounds_are_enforced() {
             })
             .collect(),
         window_ms: 1_000,
+        reserved_rate: 0,
     });
     assert_invalid(&encoded(&long_topup), "TopUp with too many updates");
 }

@@ -634,8 +634,8 @@ async fn read_loop(
                         continue;
                     };
                     let reported = Counters {
-                        delivered: c.delivered,
-                        received: c.received,
+                        delivered: c.to_payer,
+                        received: c.from_payer,
                     };
                     // Cumulative on this connection. One that goes backwards
                     // is the enforcer's mistake, and core must never see it.

@@ -121,8 +121,8 @@ remove = {
 counters = {
   0: 0x24,
   1: payer,
-  2: u64,                         ; delivered: units to the payer's subjects
-  3: u64,                         ; received: units from them
+  2: u64,                         ; units_to_payer: to the payer's subjects
+  3: u64,                         ; units_from_payer: from them
   * uint => any,
 }
 

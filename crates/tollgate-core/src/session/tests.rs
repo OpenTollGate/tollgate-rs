@@ -231,7 +231,8 @@ fn carry_out(
                                 signature: Signature([0; 64]),
                             })
                             .collect(),
-                        window_ms,
+                        window_ms: window_ms as u64,
+                        reserved_rate: 0,
                     }),
                 },
             )),
@@ -602,6 +603,7 @@ fn a_lapsed_payment_ends_the_session_and_leaves_the_allowance() {
                     signature: Signature([0; 64]),
                 }],
                 window_ms: 1_000,
+                reserved_rate: 0,
             }),
         },
     );
@@ -632,7 +634,8 @@ fn topup(channel_id: ChannelId, cumulative: u64, window_ms: u32) -> Event {
                 cumulative,
                 signature: Signature([7; 64]),
             }],
-            window_ms,
+            window_ms: window_ms as u64,
+            reserved_rate: 0,
         }),
     }
 }
@@ -703,7 +706,7 @@ fn a_refused_purchase_records_nothing() {
             Action::Send {
                 msg: Message::TopUpReject(r),
                 ..
-            } if r.reason == ReasonCode::WindowOutOfRange
+            } if r.reason == ReasonCode::OutOfRange
         )),
         "refused for its window: {actions:?}"
     );
@@ -737,6 +740,7 @@ fn a_purchase_refused_for_one_of_its_updates_records_none_of_them() {
                     },
                 ],
                 window_ms: 1_000,
+                reserved_rate: 0,
             }),
         },
         link.now,
@@ -1278,7 +1282,9 @@ fn a_peer_that_has_merely_stopped_paying_is_kept() {
                     unit: "byte".into(),
                     min_window_ms: 200,
                     max_window_ms: 30_000,
-                    received_multiplier: 0,
+                    from_payer_weight: 0,
+                    min_reserved_rate: 0,
+                    min_topup_gap_ms: 0,
                     no_charge: false,
                 }),
             },
@@ -1718,6 +1724,7 @@ fn topup_from_a(link: &Link, channel_id: ChannelId, cumulative: u64) -> Event {
                 signature: Signature([0; 64]),
             }],
             window_ms: 2_000,
+            reserved_rate: 0,
         }),
     }
 }
@@ -1901,6 +1908,7 @@ fn a_channel_named_twice_fails_verification_once() {
         msg: Message::TopUp(TopUp {
             updates: vec![update(10_000), update(20_000)],
             window_ms: 2_000,
+            reserved_rate: 0,
         }),
     };
     let actions = link.b.sessions.handle(twice, link.now);
@@ -1929,6 +1937,7 @@ fn a_declined_grant_is_not_counted_against_the_channel() {
                     signature: Signature([0; 64]),
                 }],
                 window_ms: 60_000,
+                reserved_rate: 0,
             }),
         },
         link.now,
@@ -1939,7 +1948,7 @@ fn a_declined_grant_is_not_counted_against_the_channel() {
         x,
         Action::Send {
             msg: Message::TopUpReject(TopUpReject {
-                reason: ReasonCode::WindowOutOfRange,
+                reason: ReasonCode::OutOfRange,
                 ..
             }),
             ..

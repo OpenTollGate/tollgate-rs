@@ -384,7 +384,7 @@ impl Node {
                                 cumulative: u.cumulative,
                             })
                             .collect(),
-                        max_rate_available: 0,
+                        max_reserved_rate: 0,
                         reason: ReasonCode::RateExceedsCapacity,
                     };
                     log_refusal(peer, &reject, Side::Sent);
@@ -525,8 +525,15 @@ impl Node {
                         }
                     }
                 }
-                self.send(peer, Message::TopUp(TopUp { updates, window_ms }))
-                    .await;
+                self.send(
+                    peer,
+                    Message::TopUp(TopUp {
+                        updates,
+                        window_ms: window_ms as u64,
+                        reserved_rate: 0,
+                    }),
+                )
+                .await;
             }
 
             Action::RecordUpdates { peer, updates } => {
@@ -782,7 +789,7 @@ fn log_refusal(peer: PubKey, reject: &TopUpReject, side: Side) {
         info!(
             %peer,
             channels,
-            max_rate_available = reject.max_rate_available,
+            max_reserved_rate = reject.max_reserved_rate,
             "{direction}: rate above what is uncommitted"
         );
     }

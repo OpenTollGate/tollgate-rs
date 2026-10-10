@@ -19,8 +19,9 @@ pub struct Announce {
     pub capabilities: u32,
 }
 
-/// `0x01` — what this node will take payment in, and how welcome the peer's
-/// uploads are. Carries no price: delivery is one voucher per unit.
+/// `0x01` — what this node will take payment in, what purchases it accepts,
+/// and how much a unit from the payer counts. Carries no price: delivery is one
+/// voucher per unit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Offer {
     /// Mints whose vouchers this node accepts, most preferred first. Never
@@ -28,15 +29,18 @@ pub struct Offer {
     pub accepted_mints: Vec<String>,
     /// Quantity unit, matching [`Announce::unit`].
     pub unit: String,
-    /// Smallest grant window this node will accept, in milliseconds. Bounds how
-    /// many signature verifications a payer can impose per second.
-    pub min_window_ms: u32,
-    /// Largest grant window, in milliseconds. Bounds how far ahead capacity can
-    /// be bought.
-    pub max_window_ms: u32,
-    /// Unsigned surcharge on units received from the peer. `0` is no surcharge;
-    /// the net rate on the peer's upload is `m - 1`.
-    pub received_multiplier: u16,
+    /// Shortest window this node accepts on a TopUp, in milliseconds. Never
+    /// below [`Self::min_topup_gap_ms`], or a budget could expire before its
+    /// payer is allowed to renew it.
+    pub min_window_ms: u64,
+    /// Longest window, in milliseconds: the longest a budget can be kept
+    /// without buying again.
+    pub max_window_ms: u64,
+    /// What one unit from the payer draws from its budget, where one unit to
+    /// it draws one: `moved = to_payer + from_payer × weight`. `1` charges both
+    /// directions alike, `0` makes what the payer sends free. Unsigned, so a
+    /// provider can never pay a customer for sending. Fixed for the session.
+    pub from_payer_weight: u16,
     /// This node will not charge the peer, so the peer funds no channel toward
     /// it and sends it no TopUps.
     ///
@@ -44,11 +48,18 @@ pub struct Offer {
     /// does. Key `5` on the wire, written only when `true`, so an Offer from a
     /// node that charges is byte-for-byte what it was without this field.
     pub no_charge: bool,
+    /// Smallest reserved rate accepted on a TopUp, in units per second. `0`
+    /// lets a payer reserve nothing and pay only for what it moves.
+    pub min_reserved_rate: u64,
+    /// Shortest time this node accepts between two TopUps from one payer, in
+    /// milliseconds. Each TopUp costs it signature checks and a disk write.
+    pub min_topup_gap_ms: u64,
 }
 
 /// `0x02` — accept the offer and fund the outgoing channel. Nothing is echoed
 /// back: the payer picks a mint from the list the Offer already carried, and
-/// the window is chosen per grant rather than agreed once.
+/// the window and reserved rate are chosen per purchase rather than agreed
+/// once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Accept {
     /// Opaque channel-funding blob, interpreted by the channel backend. Empty
@@ -68,8 +79,8 @@ pub struct ChannelReady {
 /// One channel's ratchet turn.
 ///
 /// Signed on its own, over `(channel_id, cumulative)` and nothing else — the
-/// window is deliberately outside the signature, since it is measured from
-/// receipt and the two sides need no clock agreement.
+/// window and reserved rate are deliberately outside the signature: the window
+/// is measured from receipt, so the two sides need no clock agreement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelUpdate {
     /// The payer's channel this update ratchets.
@@ -80,15 +91,15 @@ pub struct ChannelUpdate {
     pub signature: Signature,
 }
 
-/// `0x04` — the balance updates and the purchase of a rate in one message, and
-/// the only payment message in the protocol.
+/// `0x04` — the balance updates and the purchase in one message, and the only
+/// payment message in the protocol.
 ///
-/// **The grant is the combined increase across every update.** One message
+/// **The grant is the combined increase across every update**, and it is added
+/// to the payer's budget: nothing already in the budget is lost. One message
 /// carries as many channels as the payer wants to draw from, which is what lets
 /// a purchase span a channel that is filling up and its replacement, and what
 /// lets a payer holding vouchers from several accepted mints spend from more
-/// than one at a time. The unit is the same whoever issued it; only the issuer
-/// differs.
+/// than one at a time.
 ///
 /// **Applied atomically.** If any update fails to increase, the whole message
 /// is refused — a partial application would leave the grant size ambiguous.
@@ -96,24 +107,27 @@ pub struct ChannelUpdate {
 /// Each `cumulative` is monotonic on its own channel, which makes this
 /// idempotent: a lost message costs nothing because the next one carries the
 /// correct totals, and a reordered one is discarded. So it needs no
-/// acknowledgment, and a payer may raise its rate and start using it without
-/// waiting a round trip.
+/// acknowledgment, and a payer may use what it bought without waiting a round
+/// trip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopUp {
     /// The channels being ratcheted. At least one, at most
     /// [`MAX_CHANNEL_UPDATES`](crate::MAX_CHANNEL_UPDATES).
     pub updates: Vec<ChannelUpdate>,
-    /// Spend the grant within this long, measured from receipt — so the two
-    /// sides need no clock agreement.
-    pub window_ms: u32,
+    /// Keep the budget at least this long, measured from receipt: the deadline
+    /// becomes the later of the old one and now plus this.
+    pub window_ms: u64,
+    /// Units per second to reserve from now on, replacing the rate reserved
+    /// before. `0` reserves nothing.
+    pub reserved_rate: u64,
 }
 
-/// `0x05` — the provider will not honor a grant, most often because the rate
-/// would oversubscribe capacity already committed elsewhere.
+/// `0x05` — the provider will not honor a purchase that verified: it came too
+/// soon, asks for terms outside the Offer, would oversubscribe what the
+/// provider has promised, or exceeds what is left in a channel.
 ///
 /// Declining to ratchet already leaves the payer's money untouched; this exists
-/// so the payer learns in one round trip instead of inferring it from
-/// throughput that never arrived.
+/// so the payer learns in one round trip, and acts on the reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopUpReject {
     /// The states we are declining to ratchet to, echoed back so the payer can
@@ -121,10 +135,9 @@ pub struct TopUpReject {
     /// one, since a purchase may span several. Signatures are not echoed —
     /// the payer already holds them and this message is rare.
     pub refused: Vec<RefusedUpdate>,
-    /// Units per second we would accept, so the payer can re-purchase at once:
-    /// the provider's node-wide ceiling less what its other peers' live grants
-    /// already hold.
-    pub max_rate_available: u64,
+    /// The highest reserved rate we would accept from this payer now, in units
+    /// per second: our capacity less the other payers' reserved rates.
+    pub max_reserved_rate: u64,
     /// Why it was refused.
     pub reason: ReasonCode,
 }
@@ -164,7 +177,7 @@ pub struct RolloverReady {
 pub enum CloseReason {
     /// Ordinary cooperative close.
     Normal = 0,
-    /// The peer's revised multiplier was not acceptable.
+    /// The peer's from-payer weight was not acceptable.
     PriceRejected = 1,
     /// The peer is going away.
     PeerLeaving = 2,
@@ -223,6 +236,22 @@ pub struct Disconnect {
     pub reason: ReasonCode,
 }
 
+/// `0x0C` — what is left of the payer's budget, until when, and the rate it
+/// has reserved. Sent by the provider.
+///
+/// Information, not an instruction: the payer keeps its own count and decides
+/// what to buy from that, never from this. The deadline is sent as time left,
+/// so the two sides need no clock agreement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Balance {
+    /// Units left in the budget: `authorized − consumed`.
+    pub remaining: u64,
+    /// Milliseconds until the deadline; `0` when there is no budget.
+    pub expires_in_ms: u64,
+    /// Units per second reserved now; `0` for none.
+    pub reserved_rate: u64,
+}
+
 /// Any TollGate message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
@@ -250,6 +279,8 @@ pub enum Message {
     Reject(Reject),
     /// See [`Disconnect`].
     Disconnect(Disconnect),
+    /// See [`Balance`].
+    Balance(Balance),
 }
 
 impl Message {
@@ -268,6 +299,7 @@ impl Message {
             Self::CloseAck(_) => MsgType::CloseAck,
             Self::Reject(_) => MsgType::Reject,
             Self::Disconnect(_) => MsgType::Disconnect,
+            Self::Balance(_) => MsgType::Balance,
         }
     }
 }

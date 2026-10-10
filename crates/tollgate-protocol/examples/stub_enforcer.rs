@@ -93,8 +93,8 @@ struct Payer {
     subjects: Vec<Binding>,
     /// `None` until a `set` arrives: closed. Inside, `None` is unshaped.
     rate: Option<Option<u64>>,
-    delivered: u64,
-    received: u64,
+    to_payer: u64,
+    from_payer: u64,
     /// The counts changed since they were last reported.
     dirty: bool,
 }
@@ -148,11 +148,11 @@ impl Enforcer {
                     })
                     .collect();
                 format!(
-                    "\"{}\":{{\"subjects\":[{}],\"rate\":{rate},\"delivered\":{},\"received\":{}}}",
+                    "\"{}\":{{\"subjects\":[{}],\"rate\":{rate},\"to_payer\":{},\"from_payer\":{}}}",
                     hex(key),
                     subjects.join(","),
-                    p.delivered,
-                    p.received
+                    p.to_payer,
+                    p.from_payer
                 )
             })
             .collect();
@@ -350,8 +350,8 @@ fn report(args: &Args, state: &Mutex<Enforcer>) -> Vec<EnforcerMessage> {
                 Some(None) => args.unshaped,
             };
             if moved > 0 {
-                payer.delivered = payer.delivered.saturating_add(moved);
-                payer.received = payer.received.saturating_add(moved / 20);
+                payer.to_payer = payer.to_payer.saturating_add(moved);
+                payer.from_payer = payer.from_payer.saturating_add(moved / 20);
                 payer.dirty = true;
             }
         }
@@ -359,8 +359,8 @@ fn report(args: &Args, state: &Mutex<Enforcer>) -> Vec<EnforcerMessage> {
             payer.dirty = false;
             reports.push(EnforcerMessage::Counters(Counters {
                 peer: *key,
-                delivered: payer.delivered,
-                received: payer.received,
+                to_payer: payer.to_payer,
+                from_payer: payer.from_payer,
             }));
         }
     }

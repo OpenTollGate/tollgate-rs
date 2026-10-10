@@ -87,7 +87,7 @@ pub fn evaluate_topup(
     state: &GrantState,
     admission: Admission<'_>,
     updates: &[ChannelUpdate],
-    window_ms: u32,
+    window_ms: u64,
 ) -> Verdict {
     let available = admission.rate_available();
     let refuse = |reason| Verdict::Reject {
@@ -128,10 +128,10 @@ pub fn evaluate_topup(
     }
 
     if !admission.policy.window_acceptable(window_ms) {
-        return refuse(ReasonCode::WindowOutOfRange);
+        return refuse(ReasonCode::OutOfRange);
     }
 
-    let rate = limits::rate_from(grant, window_ms);
+    let rate = limits::rate_from(grant, window_ms.min(u32::MAX as u64) as u32);
     if rate > available {
         return refuse(ReasonCode::RateExceedsCapacity);
     }

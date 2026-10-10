@@ -80,21 +80,21 @@ impl fmt::Display for PubKey {
     }
 }
 
-/// Message type tags, contiguous `0x00..=0x0B` as specified.
+/// Message type tags, contiguous `0x00..=0x0C` as specified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MsgType {
     /// "I am a TollGate node" — protocol version, pubkey.
     Announce = 0x00,
-    /// Accepted mints, unit, window range, received multiplier.
+    /// Accepted mints, unit, and the terms a payer may buy on.
     Offer = 0x01,
     /// Accept the offer and fund the outgoing channel.
     Accept = 0x02,
     /// Funding verified; the channel is active.
     ChannelReady = 0x03,
-    /// Signed channel update buying a rate for a bounded window.
+    /// Signed channel update adding to the payer's budget.
     TopUp = 0x04,
-    /// Refuse a grant, with the rate that would be accepted.
+    /// Refuse a purchase, with its reason and the reserved rate still free.
     TopUpReject = 0x05,
     /// Open a new channel alongside an exhausting one.
     RolloverInit = 0x06,
@@ -108,6 +108,8 @@ pub enum MsgType {
     Reject = 0x0A,
     /// Orderly teardown.
     Disconnect = 0x0B,
+    /// What is left of the payer's budget.
+    Balance = 0x0C,
 }
 
 impl MsgType {
@@ -126,6 +128,7 @@ impl MsgType {
             0x09 => Self::CloseAck,
             0x0A => Self::Reject,
             0x0B => Self::Disconnect,
+            0x0C => Self::Balance,
             _ => return None,
         })
     }
@@ -136,24 +139,26 @@ impl MsgType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ReasonCode {
-    /// The received multiplier is not acceptable.
-    MultiplierUnacceptable = 0x01,
+    /// The from-payer weight is above what the payer will buy at.
+    FromPayerWeightUnacceptable = 0x01,
     /// The funding mint is not in our accepted set.
     MintNotAccepted = 0x02,
     /// The unit is not one we sell.
     UnitNotAccepted = 0x03,
-    /// The requested grant window falls outside our advertised range.
-    WindowOutOfRange = 0x04,
+    /// The window or reserved rate falls outside the Offer's range.
+    OutOfRange = 0x04,
     /// The channel funding did not verify.
     FundingInvalid = 0x05,
     /// The grant signature is invalid, or `cumulative` did not increase.
     GrantInvalid = 0x06,
-    /// The requested rate exceeds capacity we have left to commit.
+    /// The reserved rate exceeds the capacity we have left to promise.
     RateExceedsCapacity = 0x07,
     /// The grant exceeds what remains in the channel.
     GrantExceedsChannel = 0x08,
     /// The peer's protocol version is not supported.
     VersionUnsupported = 0x09,
+    /// A TopUp came sooner after the last than the Offer's gap allows.
+    TooSoon = 0x0A,
     /// Anything else; see the accompanying text.
     Other = 0xFF,
 }
@@ -166,16 +171,18 @@ impl ReasonCode {
     /// that a revised Offer crossed its message in flight — either way it is
     /// worth an operator's attention.
     ///
-    /// [`Self::RateExceedsCapacity`] is the exception, and it is not a
-    /// borderline one. **The Offer carries no rate ceiling**, deliberately:
-    /// what a node can commit to one peer depends on what it has already
-    /// committed to every other, and changes continuously. There is no static
-    /// number it could honestly advertise. A payer discovers the limit by being
-    /// refused and told what would be taken instead, which is the mechanism
-    /// working rather than failing — so logging it as a fault would train an
+    /// Two are exceptions. [`Self::RateExceedsCapacity`] is not a borderline
+    /// one: **the Offer carries no rate ceiling**, deliberately. What a node
+    /// can promise one payer depends on what it has already promised every
+    /// other, and changes continuously, so there is no static number it could
+    /// honestly advertise. A payer discovers the limit by being refused and
+    /// told what would be taken instead, which is the mechanism working rather
+    /// than failing. [`Self::TooSoon`] is the other: a payer that keeps to the
+    /// gap can still have two TopUps arrive closer together than it sent them,
+    /// and it simply sends again. Logging either as a fault would train an
     /// operator to ignore the ones that are.
     pub fn avoidable_from_offer(self) -> bool {
-        !matches!(self, Self::RateExceedsCapacity)
+        !matches!(self, Self::RateExceedsCapacity | Self::TooSoon)
     }
 
     /// Map a wire code onto a reason. Unknown codes decode as [`Self::Other`]
@@ -183,15 +190,16 @@ impl ReasonCode {
     /// have never heard of, and the message is still actionable without them.
     pub fn from_u8(v: u8) -> Self {
         match v {
-            0x01 => Self::MultiplierUnacceptable,
+            0x01 => Self::FromPayerWeightUnacceptable,
             0x02 => Self::MintNotAccepted,
             0x03 => Self::UnitNotAccepted,
-            0x04 => Self::WindowOutOfRange,
+            0x04 => Self::OutOfRange,
             0x05 => Self::FundingInvalid,
             0x06 => Self::GrantInvalid,
             0x07 => Self::RateExceedsCapacity,
             0x08 => Self::GrantExceedsChannel,
             0x09 => Self::VersionUnsupported,
+            0x0A => Self::TooSoon,
             _ => Self::Other,
         }
     }

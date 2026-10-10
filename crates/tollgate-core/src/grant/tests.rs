@@ -54,7 +54,7 @@ fn update(ch: u8, cumulative: u64) -> ChannelUpdate {
 /// that expects a refusal calls [`evaluate_topup`] directly.
 fn buy(state: &mut GrantState, updates: &[ChannelUpdate], window_ms: u32, now: Millis) -> u64 {
     let policy = policy();
-    match evaluate_topup(state, admission(&policy), updates, window_ms) {
+    match evaluate_topup(state, admission(&policy), updates, window_ms as u64) {
         Verdict::Accept {
             ratchets, grant, ..
         } => {
@@ -446,9 +446,14 @@ fn a_window_outside_the_advertised_range_is_refused() {
     for window in [0, 1, policy.min_window_ms - 1, policy.max_window_ms + 1] {
         assert!(
             matches!(
-                evaluate_topup(&state, admission(&policy), &[update(1, 1_000)], window),
+                evaluate_topup(
+                    &state,
+                    admission(&policy),
+                    &[update(1, 1_000)],
+                    window as u64
+                ),
                 Verdict::Reject {
-                    reason: ReasonCode::WindowOutOfRange,
+                    reason: ReasonCode::OutOfRange,
                     ..
                 }
             ),
@@ -459,7 +464,12 @@ fn a_window_outside_the_advertised_range_is_refused() {
     for window in [policy.min_window_ms, 5_000, policy.max_window_ms] {
         assert!(
             matches!(
-                evaluate_topup(&state, admission(&policy), &[update(1, 1_000)], window),
+                evaluate_topup(
+                    &state,
+                    admission(&policy),
+                    &[update(1, 1_000)],
+                    window as u64
+                ),
                 Verdict::Accept { .. }
             ),
             "window {window} ms should be accepted"

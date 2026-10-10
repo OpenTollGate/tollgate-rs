@@ -50,10 +50,56 @@ fn messages_stay_within_their_size_estimates() {
             signature: signature(4),
         }],
         window_ms: 5_000,
+        reserved_rate: 625_000,
     });
     buf.clear();
     encode(&topup, &mut buf).expect("encode");
     assert!(buf.len() <= 140, "topup grew to {} bytes", buf.len());
+
+    // ~25 bytes; a month to go and a large budget is the long end.
+    let balance = Message::Balance(Balance {
+        remaining: 1_000_000_000,
+        expires_in_ms: 2_592_000_000,
+        reserved_rate: 625_000,
+    });
+    buf.clear();
+    encode(&balance, &mut buf).expect("encode");
+    assert!(buf.len() <= 30, "balance grew to {} bytes", buf.len());
+}
+
+#[test]
+fn an_offer_without_a_weight_charges_both_directions_alike() {
+    // Key 4 is always written, but a peer that leaves it out means 1, not 0:
+    // what the payer sends is never free unless the provider says so.
+    let mut buf = Vec::new();
+    let mut e = minicbor::Encoder::new(&mut buf);
+    e.map(4).unwrap();
+    e.u8(0).unwrap().u8(MsgType::Offer as u8).unwrap();
+    e.u8(1).unwrap().array(1).unwrap();
+    e.str("https://hub.example/mint").unwrap();
+    e.u8(2).unwrap().str("byte").unwrap();
+    e.u8(3)
+        .unwrap()
+        .array(2)
+        .unwrap()
+        .u64(200)
+        .unwrap()
+        .u64(30_000)
+        .unwrap();
+    let Message::Offer(offer) = decode(&buf).expect("decode") else {
+        panic!("not an offer");
+    };
+    assert_eq!(offer.from_payer_weight, 1);
+}
+
+#[test]
+fn a_window_of_a_year_fits() {
+    let year = 31_536_000_000;
+    let mut o = offer(false);
+    o.max_window_ms = year;
+    let mut buf = Vec::new();
+    encode(&Message::Offer(o.clone()), &mut buf).expect("encode");
+    assert_eq!(decode(&buf).expect("decode"), Message::Offer(o));
 }
 
 #[test]
@@ -128,8 +174,10 @@ fn an_offer_with_no_mints_is_malformed() {
         unit: "byte".into(),
         min_window_ms: 200,
         max_window_ms: 30_000,
-        received_multiplier: 0,
+        from_payer_weight: 1,
         no_charge: false,
+        min_reserved_rate: 0,
+        min_topup_gap_ms: 200,
     });
     let mut buf = Vec::new();
     encode(&msg, &mut buf).expect("encode");
@@ -142,24 +190,27 @@ fn offer(no_charge: bool) -> Offer {
         unit: "byte".into(),
         min_window_ms: 200,
         max_window_ms: 30_000,
-        received_multiplier: 0,
+        from_payer_weight: 0,
         no_charge,
+        // What a peer that writes neither key 6 nor 7 is read as.
+        min_reserved_rate: 0,
+        min_topup_gap_ms: 0,
     }
 }
 
 #[test]
 fn an_offer_that_charges_does_not_carry_the_no_charge_key() {
     // Absent is the default, so an ordinary Offer encodes exactly as it did
-    // before key 5 existed — five pairs, and no `5` among them.
+    // without key 5 — seven pairs, and no `5` among them.
     let mut buf = Vec::new();
     encode(&Message::Offer(offer(false)), &mut buf).expect("encode");
     let mut d = minicbor::Decoder::new(&buf);
-    assert_eq!(d.map().unwrap(), Some(5));
+    assert_eq!(d.map().unwrap(), Some(7));
 
     buf.clear();
     encode(&Message::Offer(offer(true)), &mut buf).expect("encode");
     let mut d = minicbor::Decoder::new(&buf);
-    assert_eq!(d.map().unwrap(), Some(6));
+    assert_eq!(d.map().unwrap(), Some(8));
 }
 
 #[test]
@@ -282,19 +333,21 @@ fn a_wrong_length_channel_id_is_rejected() {
 }
 
 #[test]
-fn only_a_rate_refusal_is_unavoidable_from_the_offer() {
-    // The Offer advertises mints, unit and window bounds, so a peer that read it
-    // has no excuse for tripping any of those. It carries no rate ceiling —
-    // there is no honest static number, since what is available depends on what
-    // is committed to every other peer — so being refused on rate is how a payer
-    // discovers the limit rather than a fault.
+fn only_capacity_and_timing_refusals_are_unavoidable_from_the_offer() {
+    // The Offer advertises mints, unit, window range and the smallest reserved
+    // rate, so a peer that read it has no excuse for tripping any of those. It
+    // carries no rate ceiling — there is no honest static number, since what is
+    // free depends on what is promised to every other payer — so being refused
+    // on capacity is how a payer discovers the limit rather than a fault. And
+    // two TopUps sent a gap apart can still arrive closer than that.
     assert!(!ReasonCode::RateExceedsCapacity.avoidable_from_offer());
+    assert!(!ReasonCode::TooSoon.avoidable_from_offer());
 
     for reason in [
-        ReasonCode::MultiplierUnacceptable,
+        ReasonCode::FromPayerWeightUnacceptable,
         ReasonCode::MintNotAccepted,
         ReasonCode::UnitNotAccepted,
-        ReasonCode::WindowOutOfRange,
+        ReasonCode::OutOfRange,
         ReasonCode::FundingInvalid,
         ReasonCode::GrantInvalid,
         ReasonCode::GrantExceedsChannel,
@@ -314,6 +367,7 @@ fn a_topup_with_no_updates_is_malformed() {
     let msg = Message::TopUp(TopUp {
         updates: vec![],
         window_ms: 1_000,
+        reserved_rate: 0,
     });
     let mut buf = Vec::new();
     encode(&msg, &mut buf).expect("encode");
@@ -322,7 +376,7 @@ fn a_topup_with_no_updates_is_malformed() {
 
 #[test]
 fn a_topup_with_too_many_updates_is_refused_before_allocating() {
-    // Each update is a signature verification and `min_window_ms` only bounds
+    // Each update is a signature verification and `min_topup_gap_ms` only bounds
     // how often a TopUp arrives, so an unbounded array would multiply straight
     // through that budget.
     let over = MAX_CHANNEL_UPDATES + 1;
@@ -335,6 +389,7 @@ fn a_topup_with_too_many_updates_is_refused_before_allocating() {
             })
             .collect(),
         window_ms: 1_000,
+        reserved_rate: 0,
     });
     let mut buf = Vec::new();
     encode(&msg, &mut buf).expect("encode");
@@ -353,6 +408,7 @@ fn a_full_length_topup_still_fits_a_frame_comfortably() {
             })
             .collect(),
         window_ms: 30_000,
+        reserved_rate: u64::MAX,
     });
     let mut buf = Vec::new();
     encode_frame(&msg, &mut buf).expect("encode");

@@ -275,10 +275,10 @@ pub struct Remove {
 pub struct Counters {
     /// The payer.
     pub peer: PubKey,
-    /// What went to its subjects.
-    pub delivered: u64,
-    /// What came from them.
-    pub received: u64,
+    /// `units_to_payer`: what went to its subjects.
+    pub to_payer: u64,
+    /// `units_from_payer`: what came from them.
+    pub from_payer: u64,
 }
 
 /// `0x25` — enforcer to `tollgated`. The enforcer refused to bind `subject` to
@@ -483,8 +483,8 @@ pub fn encode(msg: &EnforcerMessage, out: &mut Vec<u8>) -> Result<(), Error> {
             e.map(4)?;
             e.u8(0)?.u8(tag)?;
             e.u8(1)?.bytes(&m.peer.0)?;
-            e.u8(2)?.u64(m.delivered)?;
-            e.u8(3)?.u64(m.received)?;
+            e.u8(2)?.u64(m.to_payer)?;
+            e.u8(3)?.u64(m.from_payer)?;
         }
         EnforcerMessage::Conflict(m) => {
             e.map(3)?;
@@ -682,20 +682,20 @@ fn decode_remove(d: &mut Decoder<'_>, pairs: u64) -> Result<Remove, Error> {
 }
 
 fn decode_counters(d: &mut Decoder<'_>, pairs: u64) -> Result<Counters, Error> {
-    let (mut who, mut delivered, mut received) = (None, None, None);
+    let (mut who, mut to_payer, mut from_payer) = (None, None, None);
     for _ in 0..pairs {
         match d.u8()? {
             0 => d.skip()?,
             1 => who = Some(peer(d)?),
-            2 => delivered = Some(d.u64()?),
-            3 => received = Some(d.u64()?),
+            2 => to_payer = Some(d.u64()?),
+            3 => from_payer = Some(d.u64()?),
             _ => d.skip()?,
         }
     }
     Ok(Counters {
         peer: required(who, EnforcerMsgType::Counters, 1)?,
-        delivered: required(delivered, EnforcerMsgType::Counters, 2)?,
-        received: required(received, EnforcerMsgType::Counters, 3)?,
+        to_payer: required(to_payer, EnforcerMsgType::Counters, 2)?,
+        from_payer: required(from_payer, EnforcerMsgType::Counters, 3)?,
     })
 }
 

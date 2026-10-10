@@ -47,8 +47,8 @@ impl Default for GrantPolicy {
 
 impl GrantPolicy {
     /// Whether a payer-chosen window falls inside what we advertise.
-    pub fn window_acceptable(&self, window_ms: u32) -> bool {
-        (self.min_window_ms..=self.max_window_ms).contains(&window_ms)
+    pub fn window_acceptable(&self, window_ms: u64) -> bool {
+        (self.min_window_ms as u64..=self.max_window_ms as u64).contains(&window_ms)
     }
 }
 

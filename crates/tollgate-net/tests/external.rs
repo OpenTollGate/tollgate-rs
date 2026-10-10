@@ -277,8 +277,8 @@ async fn counters_reach_the_enforcer_and_are_rebased_across_reconnects() {
 
     conn.send(EnforcerMessage::Counters(Counters {
         peer: payer,
-        delivered: 100,
-        received: 10,
+        to_payer: 100,
+        from_payer: 10,
     }))
     .await;
     let probe = enforcer.clone();
@@ -310,8 +310,8 @@ async fn counters_reach_the_enforcer_and_are_rebased_across_reconnects() {
     // Its counts start again from zero; the totals do not.
     conn.send(EnforcerMessage::Counters(Counters {
         peer: payer,
-        delivered: 30,
-        received: 3,
+        to_payer: 30,
+        from_payer: 3,
     }))
     .await;
     let probe = enforcer.clone();
@@ -327,14 +327,14 @@ async fn counters_reach_the_enforcer_and_are_rebased_across_reconnects() {
     // A reading that goes backwards on one connection is ignored.
     conn.send(EnforcerMessage::Counters(Counters {
         peer: payer,
-        delivered: 1,
-        received: 1,
+        to_payer: 1,
+        from_payer: 1,
     }))
     .await;
     conn.send(EnforcerMessage::Counters(Counters {
         peer: key(99),
-        delivered: 1,
-        received: 1,
+        to_payer: 1,
+        from_payer: 1,
     }))
     .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -668,8 +668,8 @@ async fn anything_before_hello_is_a_protocol_error() {
     let mut conn = stub.accept().await;
     conn.send(EnforcerMessage::Counters(Counters {
         peer: key(1),
-        delivered: 1,
-        received: 1,
+        to_payer: 1,
+        from_payer: 1,
     }))
     .await;
     assert!(conn.closed_by_tollgated().await);
@@ -840,8 +840,8 @@ async fn access_follows_payment_and_counters_reach_the_ledger() {
     // What the enforcer carried is what the grant is drawn down by.
     conn.send(EnforcerMessage::Counters(Counters {
         peer: p.payer,
-        delivered: 1_000_000,
-        received: 50_000,
+        to_payer: 1_000_000,
+        from_payer: 50_000,
     }))
     .await;
     wait_for("the counters to reach the ledger", || {
