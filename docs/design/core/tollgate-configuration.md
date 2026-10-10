@@ -61,6 +61,7 @@ On OpenWrt, the primary config path is `/etc/tollgate/tollgate.yaml`. UCI integr
 instance:        # This instance's name: logs, service, runtime directory
 control_socket:  # Where tolltop and local clients reach this instance
 identity:    # Node identity (keypair)
+selling:     # Whether this node sells at all; false: it only buys
 network:     # Where the TollGate protocol listens
 enforcer:    # What enforces delivery: loopback, ip, fips or external
 mint:        # Where this node's mint (mintd) is, and what it issues
@@ -207,6 +208,29 @@ The name `pubkey` is not tied to FIPS on purpose. Another network that proves ke
 `external` has no default because `tollgated` cannot tell what the external enforcer matches, or which network its peers arrive over. The enforcer states the identity it was built for when it connects. That is only a check: if it differs from this setting, `tollgated` refuses to start and names both ([tollgate-enforcer-protocol.md](tollgate-enforcer-protocol.md#identity)). It also names the unit it counts in, which must be this node's [`mint.unit`](#mint), checked the same way ([Units](tollgate-enforcer-protocol.md#units)).
 
 This is not the top-level [`identity`](#identity) block, which holds this node's own key.
+
+---
+
+## Selling
+
+Most nodes sell. A node that only buys, such as a customer's own `tollgated` on a phone, a laptop or a car, says so once:
+
+```yaml
+selling: false
+```
+
+With `selling: false` the node:
+
+- tells every peer `no_charge` in its Offer, so no provider funds a channel toward it;
+- takes no payment: a peer that sends a TopUp anyway is refused;
+- needs no `mint` block and runs no `mintd`. It still needs [`merchant`](#merchant), which funds the channels it buys over;
+- ignores `grants`, `burst` and per-peer `no_charge`, and logs at startup that it does.
+
+### Defaults
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `selling` | `true` | `false` makes this node a buyer only, toward every peer |
 
 ---
 
@@ -770,7 +794,7 @@ peers:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `no_charge` | `false` | Do not charge this peer, and tell it so in the Offer, so it funds no channel toward this node. One-sided — whether the peer charges back is its own decision |
+| `no_charge` | `false` | (`selling: false` sets this for every peer.) Do not charge this peer, and tell it so in the Offer, so it funds no channel toward this node. One-sided — whether the peer charges back is its own decision |
 | `from_payer_weight` | *(from `grants.from_payer_weight`)* | What a unit this peer sends us draws from its budget, against one for a unit we send it. Usually `0` for a peering partner |
 | `blocked` | `false` | Refuse all service to this peer |
 | `prefetch` | *(from `merchant.prefetch`)* | Channel fundings held ahead for this upstream |
@@ -846,6 +870,7 @@ Some parameters can be changed at runtime without restarting `tollgated`:
 | Buying | Yes | Applies from the next purchase; `max_from_payer_weight` from the next Offer a peer sends |
 | Peer overrides | Yes | Add/remove/modify peer policies |
 | Prefetch | Yes | Applies from the next funding |
+| Selling | No | Restart; it decides what every Offer says |
 | Accepted mints | No | A channel is funded in a specific mint, so dropping one would strand it. New sessions only |
 | Channel parameters | No | Applies to new channels only |
 | Own mint URL and unit | No | Requires restart; changing them invalidates outstanding vouchers |
@@ -897,5 +922,6 @@ Each daemon watches its own config file for changes and applies runtime-changeab
 | Selling price | Per Mbit, in `usd`, `eur` or `sat`; a default `price`, overridable per `accepts` entry | One quantity to reason about, in the operator's unit, and priced per issuer because that is how issuer risk is priced. A rate is fetched only when price and payment units differ; zero answers are skipped, and with every source down the last good rate is used |
 | mintd privilege | A second listener serving the same NUT API, where mint quotes are paid on creation | No custom endpoints: the privilege is the address, not the call |
 | Per-peer favoritism | Sell that peer vouchers cheaper, outside the protocol | Same capability, no price machinery |
+| Buying-only nodes | A node-wide `selling: false` | The common case for a customer's own node. One switch replaces a `no_charge` entry per peer, cannot be half set by a missing override, and makes clear the node needs no mint |
 | Free peering | Per-peer `no_charge` flag, one-sided, not transitive | It is a decision about a relationship rather than a price; transitivity would launder free transit for others |
 | Capacity growth | Applies to every channel | Every channel is funded by the party that owes, so growth always tracks a paying relationship |
