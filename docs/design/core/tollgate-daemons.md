@@ -120,9 +120,9 @@ call is a request, and `merchantd` may refuse one it judges not worth paying
 for. `tollgated` then opens or rolls over no channel to that peer, and the
 peer's traffic falls back to whatever it gets unpaid.
 "Upstream" here means any peer this node pays, not only the one towards the
-internet: under the default rule each side pays for what it receives
-([tollgate-vouchers.md](tollgate-vouchers.md)), so a node funds channels to
-downstream peers too, whenever they charge it.
+internet: in a peering each node sells to the other
+([tollgate-vouchers.md](tollgate-vouchers.md#customers-and-peers)), so a node
+funds channels to peers on any side of it, whenever they charge it.
 **Whether it also keeps a buffer** — upstream vouchers fetched ahead in the
 background — is decided by measurement, not in advance: if a round trip to
 `merchantd` is short next to the rollover safety margin, it fetches on

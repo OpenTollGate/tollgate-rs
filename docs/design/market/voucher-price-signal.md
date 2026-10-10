@@ -29,11 +29,12 @@ A voucher's price is what someone will give for it, and the floor is zero —
 worthless, not a liability. Nothing in the design pays a party to take a
 voucher off someone's hands.
 
-Where an unwanted flow does need pricing, it is the **received multiplier**
-([tollgate-vouchers.md](../core/tollgate-vouchers.md)): a node charges more
-for carrying a peer's outgoing traffic when that traffic is unwelcome or its
-uplink is scarce. The number is unsigned, so no arrangement anywhere in the
-design pays a peer to accept something.
+Where one direction does need pricing apart from the other, it is the
+**upstream weight**
+([tollgate-vouchers.md](../core/tollgate-vouchers.md#upstream-weight)): a
+provider counts what a customer sends at more than what it receives when its
+uplink is scarce, or at nothing. The number is unsigned, so no arrangement
+anywhere in the design pays a customer for sending.
 
 That keeps the signal simple to read: a voucher trading below face value means
 the market doubts the issuer, and nothing else.

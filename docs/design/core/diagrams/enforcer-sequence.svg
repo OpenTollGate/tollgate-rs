@@ -105,7 +105,7 @@
   <text x="380" y="406" text-anchor="middle" class="annot">0 closed · n bytes/s shaped · null unshaped</text>
 
   <line x1="230" y1="440" x2="528" y2="440" stroke="#40a060" stroke-width="1.5" marker-end="url(#gsG)"/>
-  <text x="380" y="433" text-anchor="middle" class="alabel" fill="#40a060">counters(peer, delivered, received)</text>
+  <text x="380" y="433" text-anchor="middle" class="alabel" fill="#40a060">counters(peer, downstream, upstream)</text>
   <text x="550" y="444" class="annot">every tick</text>
 
   <line x1="530" y1="480" x2="232" y2="480" stroke="#5080c0" stroke-width="1.5" marker-end="url(#gsB)"/>

@@ -6,7 +6,7 @@ What peers pay each other with is documented in [tollgate-vouchers.md](tollgate-
 
 ## Overview
 
-Each pair of TollGate peers maintains **two unidirectional Spilman channels** — one per direction. Each is funded by the party that owes, and by default both sides owe: each pays for what it received from the other. A channel is absent only where a node has decided not to charge that peer at all.
+A Spilman channel is **unidirectional**, and there is one for each sale: the buyer funds it, and pays the seller on it. A customer — one node selling, the other buying — has one channel. A peering, where each node sells to the other, has two, one in each direction. There is none where a node has decided not to charge that peer at all.
 
 ![Channel Pair Structure](diagrams/channel-pair.svg)
 <details><summary>Text version</summary>
@@ -14,17 +14,16 @@ Each pair of TollGate peers maintains **two unidirectional Spilman channels** �
 ```
   Peer A                                          Peer B
   ┌──────────┐                              ┌──────────┐
-  │ receiver │←────── B delivers to A ──────│ sender   │
+  │ receiver │←──────── B sells to A ───────│ sender   │
   │ on A→B   │╌╌ Channel A→B: A pays B ────→│ on A→B   │
   │          │                              │          │
-  │ sender   │────── A delivers to B ──────→│ receiver │
+  │ sender   │──────── A sells to B ───────→│ receiver │
   │ on B→A   │←╌╌ Channel B→A: B pays A ╌╌╌│ on B→A   │
   └──────────┘                              └──────────┘
 
   ── resource   ╌╌ payment (Spilman channel)
-  Each side pays for what it received. Both channels, by default.
-  A received_multiplier adds a surcharge on top, where a node
-  would rather not carry what a peer pushes at it.
+  Peering: each node sells to the other, one channel per sale.
+  A customer has only the top half: one channel, A → B.
 ```
 </details>
 
@@ -83,9 +82,11 @@ The Spilman channel lifecycle begins after peers have exchanged Announce and Off
 
 ### Funding
 
-Both peers can reach a mint. They exchange Accept messages containing Spilman funding proofs. Each side creates a channel where they are the sender (funder):
-- A creates and funds the A→B channel (A pays B for what B delivered to A)
-- B creates and funds the B→A channel (B pays A for what A delivered to B)
+Both peers can reach a mint. They exchange Accept messages, and each one that buys puts Spilman funding proofs in its Accept. A buyer creates the channel where it is the sender (funder):
+- A creates and funds the A→B channel when it buys from B
+- B creates and funds the B→A channel when it buys from A, in a peering
+
+A customer that only buys sends an Offer saying it will not charge, so its provider's Accept carries no funding.
 
 The sender's `tollgated` holds no vouchers, so it first gets them from its `merchantd`: `fund(mint, unit, amount)` returns vouchers of the chosen mint, paid from what `merchantd` holds or acquired on the spot ([tollgate-daemons.md](tollgate-daemons.md#funding-upstream)). They are locked into the channel as they arrive.
 
@@ -540,7 +541,7 @@ A payer that receives less than it bought has no protocol recourse: the budget w
 
 | Decision | Resolution | Rationale |
 |----------|-----------|-----------|
-| Channels per peer pair | Two unidirectional, one per direction | Each side pays for what it received, so both owe by default. Absent only where a node declines to charge a peer |
+| Channels per peer pair | One unidirectional channel per sale: one for a customer, two for a peering | The buyer funds what it buys. A customer's provider buys nothing back, so a customer needs no mint |
 | Channel ownership | Sender manages own channel lifecycle | Rollover initiated by the funder alone — only the party putting up new funds decides when |
 | Rollover threshold | 80% capacity (configurable, default 20% overlap) | New channel ready before old exhausts |
 | Rollover drain | Old channel drains to 100%, then new channel continues | No wasted capacity |

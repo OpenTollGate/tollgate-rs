@@ -34,7 +34,7 @@ This document consolidates all FIPS modifications required for tollgate-rs integ
 
 Shaping outside FIPS only reaches part of the traffic. Each node is a distinct `fd00::/8` address on the TUN interface, so `tc` against that interface can shape traffic **terminating at or originating from** this node. **Transit never traverses the TUN** — it is forwarded inside FIPS — and transit is exactly what a gateway sells. So the enforcement point has to be the forwarding path itself.
 
-**Note on the direction that is not shaped**: a peer's *upload* is not rate-limited by this. TollGate charges uploads through the `received_multiplier`, which draws down that peer's own grant faster rather than capping its ingress. A peer that pushes more simply exhausts its grant sooner and falls to the allowance.
+**Note on the direction that is not shaped**: a peer's *upload* is not rate-limited by this. TollGate charges uploads through the provider's `upstream_weight`, which draws down that peer's own budget faster rather than capping its ingress. A peer that pushes more simply exhausts its budget sooner and falls to the allowance.
 
 **Complexity**: Medium — the forwarding path exists; this adds a per-peer bucket check before the forward and a control-socket setter.
 

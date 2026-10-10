@@ -8,24 +8,24 @@ This document specifies how TollGate counts units delivered between peers, what 
 
 ## What is Metered
 
-Each node meters two things per peer, link-local: **units delivered to it** and **units received from it**.
+Each node meters two things per peer, link-local: **downstream**, the units it sent to the peer, and **upstream**, the units it got from the peer. Both are named from the peer's side, as the customer whose budget they draw ([Upstream Weight](tollgate-vouchers.md#upstream-weight)).
 
 ```
 For peer B:
-  delivered_to_B  += 1,000,000     (B's download)
-  received_from_B +=    50,000     (B's upload)
+  downstream += 1,000,000     (B's download)
+  upstream   +=    50,000     (B's upload)
 ```
 
-Both counters feed the shaper. Each tick the peer's budget is drawn down by the sum, with its uploads weighted by the received multiplier — or by its reserved rate over the tick, if that is more:
+Both counters feed the shaper. Each tick the peer's budget is drawn down by downstream plus upstream weighted by this node's `upstream_weight` — or by its reserved rate over the tick, if that is more:
 
 ```
-moved     = delivered + received × received_multiplier   // this tick
+moved     = downstream + upstream × upstream_weight   // this tick
 consumed += max(moved, reserved_rate × tick)
 ```
 
 That is the one rule of [tollgate-vouchers.md](tollgate-vouchers.md#the-one-rule): a payer that reserved a rate pays for it whether it uses it or not, and one that reserved nothing pays for what it moved. A tick in which the node did not carry the peer — the session was down, or the enforcer was not connected — draws nothing.
 
-The counters themselves stay raw. The weighting and the reserved rate are applied when drawing down the budget, so what the meter reports and what the shaper charges stay separable.
+The counters themselves stay raw. The weight and the reserved rate are applied when drawing down the budget, so what the meter reports and what the shaper charges stay separable.
 
 What is metered is what the node delivers **for or through** the peer. Traffic addressed to or sent by the node itself — TollGate protocol messages, `mintd`, `merchantd`'s market endpoints — is not metered, and is **never blocked or shaped**, whatever the peer's access level: blocking it would cut off the payment that restores delivery. Where the delivery path already separates the two, as a kernel does between forwarded and locally-delivered packets, the exemption costs nothing. Where it does not, an implementation may count that traffic, but must still never block it.
 
@@ -41,7 +41,7 @@ Grant state and the TopUp message are in [tollgate-protocol.md](tollgate-protoco
 
 ## What The Payer Measures
 
-The payer runs the same two counters, and they answer a different question: **is this provider worth buying from again?**
+The payer counts the same link from its own side, and its counts answer a different question: **is this provider worth buying from again?**
 
 ```
 A reserved  102,400 units/s for 5 s     512,000 drawn
@@ -69,7 +69,7 @@ The `Enforcer` trait (`ResourceAdapter` in the code today) spans both access con
 
 ```rust
 pub trait Enforcer: Send + Sync {
-    /// Cumulative units delivered to and received from a peer. The host reads
+    /// Cumulative units sent to and got from a peer. The host reads
     /// these every tick and core draws the peer's budget down against them.
     fn counters(&self, peer: PubKey) -> Counters;
 
@@ -93,10 +93,10 @@ pub trait Enforcer: Send + Sync {
 
 /// Defined in tollgate-core, which draws budgets down against it.
 pub struct Counters {
-    /// Units delivered TO this peer — its download.
-    pub delivered: u64,
-    /// Units received FROM this peer — its upload.
-    pub received: u64,
+    /// Units sent TO this peer — its download.
+    pub downstream: u64,
+    /// Units got FROM this peer — its upload.
+    pub upstream: u64,
 }
 ```
 
@@ -127,9 +127,9 @@ pub type PeerMetrics = HashMap<String, MetricValue>;
 | Draw rule | `max(moved, reserved_rate × tick)` per tick, and nothing for a tick the peer was not carried | One rule for time at a speed and pay per use. The reserved rate is the capacity set aside, so it is paid for whether used or not — but only while the node could deliver it |
 | Counter model | Cumulative since session start, not deltas | Compares directly against the cumulative total the peer has signed for |
 | Counter delivery | Read, not pushed: the host reads cumulative counters once per tick | Enough to draw a budget down, and needs nothing from the delivery path beyond a cumulative count |
-| Counter names | `delivered` and `received`, unchanged | The payment model changed, the measurement did not. Both already mean the peer's download and upload |
+| Counter names | `downstream` and `upstream`, named from the peer's side as the customer | The same names work for whatever is sold: a download, energy into a car, beer poured, and what comes back the other way |
 | Reporting | Counters stay local; the provider reports only the resulting Balance, as information | Payment happens before delivery, so no shared number decides how much money moves and there is nothing to reconcile. A payer that reconnects needs to know what it left behind, but decides purchases from its own count |
-| Multiplier | Applied when drawing down the budget, not when counting; fixed for a session | Keeps what the meter reports separable from what the shaper charges |
+| Upstream weight | Applied when drawing down the budget, not when counting; fixed for a session | Keeps what the meter reports separable from what the shaper charges |
 | Transit loss | The payer's cost | A budget is drawn whether or not packets arrive. The payer measures its own throughput and stops buying; no tolerance, no threshold, no message |
 | Under-delivery detection | One-sided, from the payer's own counters | Delivered rate against purchased rate needs nothing from the provider. Feeds connection choice: which peer to buy from, how large a budget to risk |
 | Under-delivery evidence | None — a payer can act but cannot prove | Accepted for now. Same visibility gap the market layer has for refused redemption, and revisitable as a reporting path if skimming proves common |

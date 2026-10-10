@@ -41,7 +41,7 @@
 
   <!-- Title -->
   <text x="360" y="28" text-anchor="middle" class="title">Payment Direction</text>
-  <text x="360" y="46" text-anchor="middle" class="subtitle">The provider is paid in its own vouchers — each direction settled independently</text>
+  <text x="360" y="46" text-anchor="middle" class="subtitle">Peering: each node sells to the other, and is paid in its own vouchers</text>
 
   <!-- Node A -->
   <rect x="80" y="90" width="140" height="70" rx="8" class="node" stroke-width="2"/>
@@ -55,12 +55,12 @@
 
   <!-- A delivers to B (top arrow) -->
   <line x1="220" y1="108" x2="493" y2="108" stroke="#5080c0" stroke-width="2" marker-end="url(#pR)"/>
-  <text x="360" y="100" text-anchor="middle" class="alabel" fill="#5080c0">A delivers to B</text>
+  <text x="360" y="100" text-anchor="middle" class="alabel" fill="#5080c0">A sells to B</text>
   <text x="360" y="85" text-anchor="middle" class="annot">B pays A in A-vouchers: 1 per unit</text>
 
   <!-- B delivers to A (bottom arrow) -->
   <line x1="500" y1="145" x2="227" y2="145" stroke="#d0a040" stroke-width="2" marker-end="url(#pL)"/>
-  <text x="360" y="140" text-anchor="middle" class="alabel" fill="#d0a040">B delivers to A</text>
+  <text x="360" y="140" text-anchor="middle" class="alabel" fill="#d0a040">B sells to A</text>
   <text x="360" y="170" text-anchor="middle" class="annot">A pays B in B-vouchers: 1 per unit</text>
 
   <!-- Spilman channel labels below -->
@@ -75,6 +75,6 @@
   <line x1="500" y1="195" x2="500" y2="100" stroke="#5080c0" stroke-width="0.5" stroke-dasharray="3,3"/>
 
   <!-- Caption -->
-  <text x="360" y="255" text-anchor="middle" class="caption">Delivery is 1 voucher per unit both ways. B pays A for A's delivery service.</text>
-  <text x="360" y="272" text-anchor="middle" class="caption">A pays B for B's delivery service. Two independent channels.</text>
+  <text x="360" y="255" text-anchor="middle" class="caption">1 voucher per unit, each sale on its own channel. Two sales, two channels.</text>
+  <text x="360" y="272" text-anchor="middle" class="caption">A customer only buys: one sale, one channel, and no mint of its own.</text>
 </svg>

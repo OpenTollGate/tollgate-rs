@@ -11,20 +11,20 @@ Read this before adding anything that prices, routes, or gives capacity away.
 ## Never Pay A Peer A Bonus To Send Or Accept Traffic
 
 The design makes a **bonus** for sending traffic unrepresentable rather than
-merely forbidden: the `received_multiplier` is unsigned, so a node can charge
-more for carrying a peer's traffic, or charge nothing, but can never pay a peer
-on top of what it owes for delivery
-([tollgate-vouchers.md](tollgate-vouchers.md)). The section stays because the
-temptation recurs, and because anything added later must preserve the
-property.
+merely forbidden: the `upstream_weight` is unsigned, so a provider can count
+what a customer sends at more than what it receives, or at nothing, but can
+never pay a customer for sending
+([tollgate-vouchers.md](tollgate-vouchers.md#upstream-weight)). The section
+stays because the temptation recurs, and because anything added later must
+preserve the property.
 
-What remains is the base rule itself. Each side pays for what it receives, so
-with the default multiplier of `0` a node pays a peer 1× for the traffic that
-peer uploads to it. A peer can therefore push traffic nobody asked for and have
-it drawn against a budget the receiver bought. That exposure is bounded by the
-receiver alone: it is never more than the budget the receiver chose to hold
-with that peer, and a node that does not want to pay for a peer's uploads sets the
-multiplier to `1` (free) or higher (charged).
+A customer never earns anything by sending: it only buys. What remains is
+peering, where each node buys from the other and usually at weight `0`, so
+each pays for what flows towards it. A peer can therefore push traffic nobody
+asked for and have it drawn against the budget the receiver holds with it.
+That exposure is bounded by the receiver alone: it is never more than the
+budget the receiver chose to hold with that peer, within its own buying limits
+([tollgate-configuration.md](tollgate-configuration.md#buying)).
 Accepting traffic can be faked — the peer takes it, bills for it, and discards
 it, having done no work. Under such a price, discarding becomes the most
 profitable thing it can do, and metering cannot tell the difference because it
@@ -131,9 +131,10 @@ What remains, which the rule limits but does not remove:
   a departed payer's key from its address can draw its whole budget — not
   only the seconds of one purchase. Under `pubkey` the network proves the key
   and this does not arise.
-- **A carried budget is drawn at the session's multiplier.** A provider that
-  raises its received multiplier between sessions reprices units already sold,
-  from the payer's next session on.
+- **A carried budget is drawn at the session's upstream weight.** A provider
+  that raises its `upstream_weight` between sessions reprices units already
+  sold, from the payer's next session on. The payer can refuse the new weight,
+  but the budget it holds stays with that provider.
 
 The same reasoning is why the minimum flow allowance is a rate rather than a
 per-interval quantity. A quantity accumulates; a rate cannot.

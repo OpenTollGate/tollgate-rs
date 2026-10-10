@@ -212,7 +212,7 @@ This is not the top-level [`identity`](#identity) block, which holds this node's
 
 ## Mint
 
-A node that sells its own capacity runs its own mint and issues vouchers against it ([tollgate-vouchers.md](tollgate-vouchers.md)). **The block is optional**: a node without one issues nothing, runs no `mintd`, and takes payment only in other mints' vouchers — a pass-through relay, or a leaf that only buys. The mint is `mintd`, a separate daemon; this block tells `tollgated` where it is. `tollgated` uses it like any Cashu client — to settle channels and to burn what it was paid — and has no privilege there.
+A node that sells its own capacity runs its own mint and issues vouchers against it ([tollgate-vouchers.md](tollgate-vouchers.md)). **The block is optional**: a node without one issues nothing, runs no `mintd`, and takes payment only in other mints' vouchers — a pass-through relay, or a customer that only buys. The mint is `mintd`, a separate daemon; this block tells `tollgated` where it is. `tollgated` uses it like any Cashu client — to settle channels and to burn what it was paid — and has no privilege there.
 
 ```yaml
 mint:
@@ -231,14 +231,13 @@ mint:
 
 How the mint issues — auto-accept, its limits, its database — is `mintd`'s configuration, in [`mint.yaml`](#mintd).
 
-The unit is fixed by the resource and must match across every node selling it. There is no per-direction unit: what a peer pays to have its outgoing traffic carried is the received multiplier, not a second keyset ([tollgate-vouchers.md](tollgate-vouchers.md)).
+The unit is fixed by the resource and must match across every node selling it. There is no per-direction unit: what a customer sends counts against its budget through the provider's [`upstream_weight`](#grants), not a second keyset ([tollgate-vouchers.md](tollgate-vouchers.md)).
 
 ---
 
 ## Vouchers
 
-Which mints this node will take payment in, and how welcome each peer's
-outgoing traffic is.
+Which mints this node will take payment in.
 
 ```yaml
 vouchers:
@@ -248,8 +247,6 @@ vouchers:
       settle: keep              # worth something: deposit with merchantd
     - url: "https://neighbor.example.com/mint"
       settle: burn              # a courtesy: destroy after settling
-
-  received_multiplier: 0        # surcharge default; 0 = none
 ```
 
 There are **no prices here.** Delivery is one voucher per unit, and a mint is
@@ -278,26 +275,12 @@ anyway — `merchantd` may simply start after it. A deposit that finds nobody
 there fails, and is retried with the settlement it came from, so what would
 have been kept is held back rather than silently destroyed.
 
-`received_multiplier` is an unsigned surcharge on what a peer pushes at us, on
-top of that peer already being paid for delivering it. Netted out:
-
-| Value | Net effect per unit that peer uploads |
-|---|---|
-| `0` (default) | We pay them 1× — we want the traffic |
-| `1` | Nets to zero — their upload is free |
-| `2` | They pay 1× — upload costs the same as download |
-| `11` | They pay 10× — matches a 10:1 backhaul |
-
-The net rate is `m − 1`, so to charge uploads at `k` times the download rate,
-set `received_multiplier = k + 1`. Setting `10` gives 9×, not 10×.
-
 ### Defaults
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `accepted_mints` | *(required)* | Mints this node will take payment in, best first; at least one. Each one taken on is that issuer's credit risk |
 | `accepted_mints[].settle` | `keep` | `keep` or `burn`, for mints other than this node's own. Ignored for its own, which is always burned. `keep` with no `merchantd` at `merchant.socket` is a startup warning; the deposit is retried with its settlement |
-| `received_multiplier` | `0` | No surcharge; each side simply pays for what it received. Per-peer overrides in the `peers` section |
 
 ---
 
@@ -577,14 +560,26 @@ every second the node draws `max(units moved, reserved rate × 1 s)` from it
 
 ```yaml
 grants:
+  upstream_weight: 1                    # what a unit from the payer draws, against 1 for a unit to it
   window_range_ms: [1000, 2592000000]   # payer picks any window in this range, per purchase (1 s to 30 days)
   min_reserved_rate: 0                  # every payer reserves at least this, units/s; 0 = it may reserve nothing
   min_topup_gap_ms: 1000                # a TopUp sooner than this after the last is refused as too soon
   max_rate: null                        # units/s this node will reserve across all payers; null = link capacity
 ```
 
-`window_range_ms`, `min_reserved_rate` and `min_topup_gap_ms` are advertised
-in the Offer ([tollgate-protocol.md](tollgate-protocol.md#0x01-offer)).
+`upstream_weight`, `window_range_ms`, `min_reserved_rate` and
+`min_topup_gap_ms` are advertised in the Offer
+([tollgate-protocol.md](tollgate-protocol.md#0x01-offer)).
+
+- **`upstream_weight`** is how much one unit from the payer counts against
+  its budget, where one unit to it counts one
+  ([tollgate-vouchers.md](tollgate-vouchers.md#upstream-weight)): `moved =
+  downstream + upstream × upstream_weight`. `1` charges both directions the
+  same. On a lopsided link, down ÷ up is the usual guide: `10` on a 100/10
+  Mbit/s line. `0` makes upstream free, which is what peering routers usually
+  set for each other, per peer ([Peer Overrides](#peer-overrides)). It is a
+  whole number and cannot go below `0`. A resource that only flows one way,
+  such as electricity or water, never uses it.
 
 - **`window_range_ms`** bounds how long a budget can be kept without buying
   again. Its upper end is a month by default, so a phone can buy 1 GB and use
@@ -622,6 +617,7 @@ session is down, or the enforcer is not connected.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
+| `upstream_weight` | `1` | Unsigned whole number. `0` = upstream is free; `10` = ten times dearer than downstream. Fixed for a session. Per-peer overrides in the `peers` section |
 | `window_range_ms` | `[1000, 2592000000]` | Payer chooses per purchase, in milliseconds: 1 s to 30 days. The lower end must be at least `min_topup_gap_ms` |
 | `min_reserved_rate` | `0` | Units per second. `0` allows paying only for what is used |
 | `min_topup_gap_ms` | `1000` | One TopUp a second per peer, worst case |
@@ -682,6 +678,7 @@ buying:
   headroom_pct: 125      # reserve this share of observed demand
   min_rate: 0            # never reserve below this; raised to the peer's smallest reserved rate
   # max_rate:            # never reserve above this; unset = no ceiling
+  # max_upstream_weight: # refuse a peer whose upstream_weight is above this; unset = any
   window_ms: 10000       # window to ask for, clamped to the peer's range
   budget: 0              # pay per use: units to hold with each peer
   renew_lead_ms: 1200    # buy again this long before the budget or the deadline would run out
@@ -707,6 +704,12 @@ first. Nothing is forfeit, so buying early costs only money held a little
 longer, and there is no reason to hold a purchase back. It buys only while
 something wants the link: observed demand, or `demand`.
 
+**`max_upstream_weight`** is the buyer's own limit on a provider's terms. A
+peer whose Offer carries an `upstream_weight` above it is answered with
+Reject, reason 0x01
+([tollgate-protocol.md](tollgate-protocol.md#0x0a-reject)): this node funds no
+channel to it, buys nothing from it and pays nothing.
+
 A refused purchase is handled by its reason: **too soon**, it waits out the
 peer's `min_topup_gap_ms` and sends it again; **capacity**, it lowers its
 reserved rate to the one the peer named and keeps to it for `cap_hold_ms`;
@@ -724,6 +727,7 @@ because a Balance says less is left than its own count does.
 | `reserve` | `true` | Reserve a rate that follows demand. `false` reserves nothing and pays per use |
 | `headroom_pct` | `125` | Reserve this percentage of observed demand, so a rising flow is not held back before the next purchase lands |
 | `min_rate`, `max_rate` | `0`, unset (no ceiling) | Bounds on the reserved rate. Equal values pin it. `max_rate` is the operator's spending ceiling |
+| `max_upstream_weight` | unset (any) | The highest `upstream_weight` this node buys at. A peer offering more is refused before any money moves |
 | `window_ms` | `10000` | Window to ask for, clamped to the peer's `window_range_ms`. With `reserve: true` it also sets the budget, the reserved rate times the window |
 | `budget` | `0` | With `reserve: false`, the units to hold with each peer. Must be set for a buyer that pays per use |
 | `renew_lead_ms` | `1200` | Buy again this long before the budget or the deadline would run out. Below 1000 a purchase under load lands late and the flow stalls |
@@ -739,9 +743,9 @@ peers:
   "02abc...":
     no_charge: true
 
-  # Charge this peer 10× for what it pushes at us (net rate is m − 1)
+  # Peering router: it sells to us too, so let its upstream be free
   "03def...":
-    received_multiplier: 11
+    upstream_weight: 0
 
   # Block a peer entirely
   "04ghi...":
@@ -766,7 +770,7 @@ peers:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `no_charge` | `false` | Do not charge this peer, and tell it so in the Offer, so it funds no channel toward this node. One-sided — whether the peer charges back is its own decision |
-| `received_multiplier` | *(from `vouchers.received_multiplier`)* | Unsigned surcharge on what this peer pushes at us, on top of it being paid for delivering it |
+| `upstream_weight` | *(from `grants.upstream_weight`)* | What a unit this peer sends us draws from its budget, against one for a unit we send it. Usually `0` for a peering partner |
 | `blocked` | `false` | Refuse all service to this peer |
 | `prefetch` | *(from `merchant.prefetch`)* | Channel fundings held ahead for this upstream |
 | `burst.rate`, `burst.unreserved_rate` | *(from the `burst` block)* | How fast this peer is carried above its reserved rate, or when it reserved nothing |
@@ -794,7 +798,6 @@ vouchers:
     - "https://gateway.example.com/mint"                # our own: burned
     - url: "https://upstream.example.com/mint"          # spend these onward
       settle: keep
-  received_multiplier: 2                                # uploads cost the same as downloads
 
 access:
   minimum_flow:
@@ -808,6 +811,7 @@ channels:
   rollover_threshold_pct: 80
 
 grants:
+  upstream_weight: 10           # a 100/10 line: upstream is a tenth as plentiful
   window_range_ms: [1000, 2592000000]
   min_reserved_rate: 0
   min_topup_gap_ms: 1000
@@ -833,12 +837,12 @@ Some parameters can be changed at runtime without restarting `tollgated`:
 
 | Parameter | Runtime changeable? | Notes |
 |-----------|-------------------|-------|
-| Received multiplier | Next session | Fixed for a session; sent in the peer's next Offer, and a budget carried into that session is drawn at it |
+| Upstream weight | Next session | Fixed for a session; sent in the peer's next Offer, and a budget carried into that session is drawn at it |
 | Minimum flow allowance | Yes | Applies immediately — it is a shaping rate, not a budget |
 | Window range, smallest reserved rate, gap | Yes | Sent as a revised Offer; applies to the peer's next TopUp. A reservation already made stands until then |
 | Max rate | Yes | Lowering it does not revoke a reservation already made; it refuses the next one that would not fit |
 | Burst | Yes | Applies immediately — it is a shaping rate, and nothing above a reservation was promised |
-| Buying | Yes | Applies from the next purchase |
+| Buying | Yes | Applies from the next purchase; `max_upstream_weight` from the next Offer a peer sends |
 | Peer overrides | Yes | Add/remove/modify peer policies |
 | Prefetch | Yes | Applies from the next funding |
 | Accepted mints | No | A channel is funded in a specific mint, so dropping one would strand it. New sessions only |
@@ -873,9 +877,9 @@ Each daemon watches its own config file for changes and applies runtime-changeab
 | Instances | One `tollgated` for every task, run once per task; each instance is named by `instance` or `--instance` | The name ties together what belongs to one instance: its service, its logs and its runtime directory |
 | Runtime directory | One per instance, `/run/tollgate-<instance>/`, created by the init script and owned by the instance's user. The control and enforcer sockets sit in it under fixed names, and their keys are set only to deviate | Ownership: only the instance's user can create a socket there, so no other program can take the place of the enforcer or of `tollgated`. Discovery: a client finds an instance from its name alone, and `tolltop` finds them all with one listing. One place per instance: two instances never share a path, and everything of one instance is in one directory |
 | Unset instance | Named `default`, with the same layout | One rule for every node. Keeping the old plain paths for an unnamed node would give clients a second place to look, and `tolltop`'s listing would miss it |
-| Mint block | Optional. Where `mintd` is, and its unit; no privilege there | Issuing sits in its own daemon. A node that issues nothing — a pass-through relay, a buying leaf — needs no `mintd` at all |
+| Mint block | Optional. Where `mintd` is, and its unit; no privilege there | Issuing sits in its own daemon. A node that issues nothing — a pass-through relay, a customer that only buys — needs no `mintd` at all |
 | Merchant block | A socket to `merchantd`, and `prefetch` counted in fundings per upstream | `tollgated` holds nothing of value, so it asks for upstream vouchers when it needs them; upstreams differ in mint and capacity, so no single amount fits |
-| Grants block | Replaces the metering block | There is no interval to negotiate and no drift tolerance to set. What is left is what a payer may buy: windows, reserved rates, and how often |
+| Grants block | Replaces the metering block | There is no interval to negotiate and no drift tolerance to set. What is left is the provider's terms: the upstream weight, windows, reserved rates, and how often |
 | Window range | Advertised in the Offer; payer picks per purchase; 1 s to 30 days by default | It bounds how long a budget is kept without buying again. A month lets a payer use a data pack over weeks; a reserved budget drains at its rate whatever the window, so a long window does not let a reserved payer bank capacity |
 | Smallest reserved rate | `min_reserved_rate`, advertised; `0` by default | One setting decides whether a node also sells pay per use |
 | Gap between purchases | `min_topup_gap_ms`, advertised, 1 s by default, checked before signatures | Nothing is forfeit by buying often, so this is what bounds the signature checks and disk writes a payer can cause |
@@ -884,13 +888,13 @@ Each daemon watches its own config file for changes and applies runtime-changeab
 | Minimum flow allowance | A rate, not a per-interval quantity | It is the floor of the shaper and what a peer falls back to when its budget runs out or expires. A rate cannot be accumulated |
 | Transit-loss settings | Removed | Counters are no longer exchanged, so there is no second number to disagree with |
 | Accepted mints | One ordered list, at least one entry, no prices | Accept or refuse is binary; what an issuer's paper is worth belongs on the market |
-| Received multiplier | Unsigned, per peer | Prices scarce uplink and signals how welcome a peer's traffic is, without any signed number in the protocol |
+| Upstream weight | `grants.upstream_weight`, unsigned, default `1`, per peer; the buyer's `max_upstream_weight` bounds what it accepts | The provider prices a lopsided link with one number, and a peering router makes upstream free. The buyer sees it in the Offer and can refuse before any money moves |
 | Market services | Own daemon (`merchantd`), own file, own endpoints, own protocol, disabled by default | Buying and swapping is not part of paying for delivery. `path` may point at a third party, so a node can offer swaps without running a market |
 | One file per executable | `tollgate.yaml`, `mint.yaml`, `merchant.yaml` | Each daemon can be restarted, replaced or run by someone else without touching the others' settings. Prices never reach the protocol daemon |
 | Other mints after settlement | Per-mint `settle: keep \| burn` in `tollgate.yaml`; `keep` without `merchantd` warns at startup and retries the deposit | Whether another issuer's paper is worth anything depends on the relationship; value is never destroyed silently |
 | Quote step | None: swap at the price in force | A moved rate costs a retry. Quotes can be added later |
 | Selling price | Per Mbit, in `usd`, `eur` or `sat`; a default `price`, overridable per `accepts` entry | One quantity to reason about, in the operator's unit, and priced per issuer because that is how issuer risk is priced. A rate is fetched only when price and payment units differ; zero answers are skipped, and with every source down the last good rate is used |
 | mintd privilege | A second listener serving the same NUT API, where mint quotes are paid on creation | No custom endpoints: the privilege is the address, not the call |
-| Per-peer favoritism | Sell that peer vouchers cheaper, outside the protocol | Same capability, no multiplier machinery |
+| Per-peer favoritism | Sell that peer vouchers cheaper, outside the protocol | Same capability, no price machinery |
 | Free peering | Per-peer `no_charge` flag, one-sided, not transitive | It is a decision about a relationship rather than a price; transitivity would launder free transit for others |
 | Capacity growth | Applies to every channel | Every channel is funded by the party that owes, so growth always tracks a paying relationship |

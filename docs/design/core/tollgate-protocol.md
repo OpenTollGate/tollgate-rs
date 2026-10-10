@@ -79,8 +79,8 @@ separation is structural rather than a convention:
   the public, and peers arrive holding what they need.
 
 The Offer carries no price at all. It names which mints this node will take
-payment in, and one unsigned multiplier saying how much a unit carried
-*outward* on the peer's behalf counts. Neither is denominated in money.
+payment in, and one unsigned weight saying how much a unit from the customer
+counts against a unit to it. Neither is denominated in money.
 
 ---
 
@@ -163,10 +163,10 @@ counts it as hearing from us. The caveats:
   byte for byte, so a keepalive never changes the peer's terms. An operator
   override made mid-session is sent as a revised Offer when it is made, if it
   changes what that peer is offered — the window range, the smallest reserved
-  rate, the gap between purchases, or field 5. A changed multiplier is not: it
-  waits for the peer's next session (see [Offer](#0x01-offer)). A payer told
-  in a revision that it is now charged, with no channel toward that peer,
-  funds one and sends Accept, as it would have at the opening.
+  rate, the gap between purchases, or field 5. A changed upstream weight is
+  not: it waits for the peer's next session (see [Offer](#0x01-offer)). A
+  payer told in a revision that it is now charged, with no channel toward that
+  peer, funds one and sends Accept, as it would have at the opening.
 
 **Orderly teardown:** send Disconnect, then close. The session is over: each
 side settles the channels the other paid it on and holds nothing for a return.
@@ -228,7 +228,7 @@ TollGate peer; human-facing UI is currently a non-goal
 | Type | Name | Direction | Purpose |
 |------|------|-----------|---------|
 | 0x00 | Announce | Bidirectional | "I am a TollGate node" — protocol version, pubkey |
-| 0x01 | Offer | Bidirectional | Accepted mints, unit, window range, received multiplier, smallest reserved rate, gap between purchases |
+| 0x01 | Offer | Bidirectional | Accepted mints, unit, window range, upstream weight, smallest reserved rate, gap between purchases |
 | 0x02 | Accept | Bidirectional | Accept the offer, provide Spilman funding |
 | 0x03 | ChannelReady | Bidirectional | Confirm Spilman channel funded and active |
 | 0x04 | TopUp | Payer → provider | Signed Spilman update adding to the payer's budget, with a window and a reserved rate |
@@ -272,8 +272,8 @@ Spilman support is universal in v1 — there is no per-token payment mode to sig
 ### 0x01 Offer
 
 Sent by each peer after Announce. Declares which mints the sender will take
-payment in, what purchases it accepts, and how welcome the peer's outgoing
-traffic is.
+payment in, what purchases it accepts, and how much the peer's upstream
+counts.
 
 ```cbor
 {
@@ -282,9 +282,9 @@ traffic is.
                                    //   first; at least one entry
   2: <unit>,                       // text — "byte", "wh", "ml"
   3: [<min_window_ms>, <max_window_ms>],  // [u64, u64] — windows accepted
-  4: <received_multiplier>,        // u16 — surcharge on units I receive from you,
-                                   //   on top of you paying for what I deliver.
-                                   //   Default 0 = no surcharge
+  4: <upstream_weight>,            // u16 — what one unit from you draws from
+                                   //   your budget, where one unit to you draws
+                                   //   one. Default 1; 0 = upstream is free
   5: true,                         // bool, optional — I will not charge you.
                                    //   Written only when true; absent = I charge
   6: <min_reserved_rate>,          // u64 — smallest reserved rate accepted,
@@ -294,11 +294,12 @@ traffic is.
 ```
 
 Field 5 is one-sided: it says only whether the sender charges the receiver,
-never whether the receiver charges back. A receiver that sees it funds no
-channel toward the sender, sends it no TopUp, and answers with an Accept whose
-funding is empty. It is omitted rather than written as `false`, so the Offer of
-a node that charges is byte-for-byte what it was before the field existed, and
-a peer that predates it decodes it as charging. It does not relax field 1: the
+never whether the receiver charges back. A customer that only buys sends it
+to its provider. A receiver that sees it funds no channel toward the sender,
+sends it no TopUp, and answers with an Accept whose funding is empty. It is
+omitted rather than written as `false`, so the Offer of a node that charges is
+byte-for-byte what it was before the field existed, and a peer that predates
+it decodes it as charging. It does not relax field 1: the
 mint list stays mandatory.
 
 Field 5 changes mid-session only when an operator override for that peer
@@ -346,29 +347,34 @@ The provider never advertises a `min_window_ms` shorter than its
 `min_topup_gap_ms`: a window that short would let a budget expire before the
 payer is allowed to renew it.
 
-The base rule is symmetric and needs no field: **each side pays for what it
-received**, which is what the other delivered. Both owe, both fund a channel,
-and each keeps a budget with the other.
+**Field 4 is the upstream weight.** The provider counts what flows each way
+between it and the payer, named from the payer's side: **downstream** is what
+goes to the payer, **upstream** what comes from it. A unit downstream draws
+one unit from the payer's budget; a unit upstream draws `upstream_weight`
+([tollgate-vouchers.md](tollgate-vouchers.md#upstream-weight)):
 
-`received_multiplier` is a surcharge on top of that, for the case where a node
-would rather not carry what a peer pushes at it. It defaults to `0`. It is
-applied as a **consumption weight**: a unit the peer uploads draws `m` units
-from that peer's budget, where a unit it downloads draws one. Because the peer
-is still paid for delivering, the **net** rate on its upload is `m − 1`: `1`
-makes the upload free, `2` charges it at the same rate as a download, `k + 1`
-charges it at `k` times ([tollgate-vouchers.md](tollgate-vouchers.md)).
+```
+moved = downstream + upstream × upstream_weight
+```
 
-It is **unsigned**. A negative surcharge would mean paying a peer on top of
-already paying for its delivery, compounding into the sink hazard
-([tollgate-hazards.md](tollgate-hazards.md)) — so it is unrepresentable rather
-than merely forbidden.
+`1`, the default, charges both directions the same. `10` makes upstream ten
+times dearer, as a 100/10 line might. `0` makes it free, which is what a
+peering router usually offers. The field is always written.
+
+It is **unsigned**. A negative weight would pay a customer for sending,
+compounding into the sink hazard ([tollgate-hazards.md](tollgate-hazards.md))
+— so it is unrepresentable rather than merely forbidden.
+
+A payer that will not buy at the weight offered — one above its own limit
+([tollgate-configuration.md](tollgate-configuration.md#buying)) — answers
+the Offer with Reject, reason 0x01, and funds no channel. It pays nothing.
 
 Keysets are fetched from each mint by ordinary Cashu means (NUT-01/02). The
 protocol does not restate them.
 
-**The multiplier is fixed for the session.** Every purchase adds to one
-budget, so a multiplier that changed mid-session would reprice units already
-bought. A changed multiplier is sent in the Offer of the payer's **next**
+**The upstream weight is fixed for the session.** Every purchase adds to one
+budget, so a weight that changed mid-session would reprice units already
+bought. A changed weight is sent in the Offer of the payer's **next**
 session, and from then on the budget is drawn at it — including a budget
 carried into that session.
 
@@ -392,9 +398,9 @@ Sent by the peer to accept the offer and fund its outgoing channel.
 ```
 
 There is nothing to echo back. The payer picks a mint from the list the offer
-already carried; the unit and multiplier admit no choice; and the window and
-reserved rate are chosen per purchase rather than agreed once, so there is no
-range to reconcile.
+already carried; the unit and upstream weight admit no choice; and the window
+and reserved rate are chosen per purchase rather than agreed once, so there is
+no range to reconcile.
 
 Funding the channel buys nothing on its own. It opens the channel the
 purchases will be signed against.
@@ -464,7 +470,7 @@ in the budget, spent or not.
 **Every tick, the provider draws:**
 
 ```
-moved    = delivered + received × received_multiplier   // since the last tick
+moved    = downstream + upstream × upstream_weight   // since the last tick
 drawn    = max(moved, reserved_rate × tick)
 consumed = min(authorized, consumed + drawn)
 ```
@@ -612,12 +618,12 @@ sides need no clock agreement. Flight time makes the payer's deadline
 marginally earlier than the one it asked for, which errs in the provider's
 favor.
 
-**Consumption is weighted by the multiplier.** The provider draws down one
-budget for both directions of the link: at `m = 0` the peer's uploads draw
-nothing and the provider pays for them out of its own budget on the other
-channel; at `m = 2` an uploaded unit draws the same as a downloaded one. A peer
-that wants to upload heavily therefore has to buy more, which is enforced by
-the shaper as the traffic happens instead of appearing on a bill afterward.
+**Consumption is weighted by the upstream weight.** The provider draws down
+one budget for both directions of the link: at weight `1` a unit the payer
+sends draws the same as a unit it receives; at `0` what it sends draws
+nothing. A payer that wants to send heavily over a link whose upstream is
+dear therefore has to buy more, which is enforced by the shaper as the
+traffic happens instead of appearing on a bill afterward.
 
 ### 0x05 TopUpReject
 
@@ -732,7 +738,7 @@ General-purpose rejection for any proposal.
 
 | Code | Meaning |
 |------|---------|
-| 0x01 | Received multiplier unacceptable |
+| 0x01 | Upstream weight unacceptable |
 | 0x02 | Mint not in the accepted set |
 | 0x03 | Unit not accepted |
 | 0x04 | Window or reserved rate outside the Offer's range |
@@ -796,9 +802,14 @@ already measures.
 
 ## Message Sequences
 
-Both sides send Offer and Accept because each delivers independently. After
-that the two payment streams are unsynchronized — each side tops up on its own
-schedule, for its own windows, and neither waits for the other.
+Both sides always send Offer and Accept. The sequence below is a peering,
+where each side sells to the other, so both fund a channel. After that the two
+payment streams are unsynchronized — each side tops up on its own schedule,
+for its own windows, and neither waits for the other.
+
+With a customer, only one side sells. The customer's Offer carries field 5,
+so its provider's Accept carries no funding, and only the customer sends
+TopUps.
 
 ### Connection
 
@@ -811,7 +822,7 @@ schedule, for its own windows, and neither waits for the other.
      B → A: Announce (v1, pubkey_B, capabilities)
 
   2. Offer
-     A → B: Offer (accepted mints, unit, windows, multiplier,
+     A → B: Offer (accepted mints, unit, windows, upstream weight,
                    smallest reserved rate, gap)
      B → A: Offer (the same, B's terms)
 
@@ -911,28 +922,28 @@ service. There is no pre-channel phase.
   day 33 A has bought nothing since. What is left expires.
 ```
 
-### Multiplier Change
+### Upstream Weight Change
 
-![Multiplier Change](diagrams/price-change.svg)
+![Upstream Weight Change](diagrams/price-change.svg)
 <details><summary>Text version</summary>
 
 ```
-  A wants to change what it charges for traffic B pushes at it.
-  The multiplier is fixed for a session, so the change waits:
+  A wants to change what B's upstream counts.
+  The weight is fixed for a session, so the change waits:
 
   [B's next session with A starts]
-  A → B: Offer (new received multiplier, same mints and unit)
+  A → B: Offer (new upstream weight, same mints and unit)
 
   alt: ACCEPT (continue)
        B → A: TopUp (B's budget, carried in or new, is drawn
-                     at the new multiplier)
+                     at the new weight)
 
   alt: REJECT (close)
        B → A: ChannelClose (reason=price_rejected)
        A → B: CloseAck
        [channel settles, B may renegotiate or disconnect]
 
-  Within a session the multiplier never changes. Delivery is never
+  Within a session the weight never changes. Delivery is never
   repriced mid-session — B already holds A's vouchers.
 ```
 </details>
@@ -1034,7 +1045,7 @@ Plus 2 bytes of length prefix per message. Setup messages are one-time. TopUp is
 | Budget across sessions | Written to disk by the provider, restored at the payer's next session until its deadline; untouched by rollover and settlement | It is already paid for. A reconnect is not a reason to take it, and settlement only collects the money that bought it |
 | Draw during an outage | None while the provider is not carrying the payer; the deadline still runs | The payer does not pay for seconds it could not be served, and every budget still ends |
 | Overrun near zero | The shaping rate is clipped to what is left per tick; an overrun between readings is not carried as debt | The budget cannot be spent past zero by more than a tick's rounding, and nothing is owed afterward |
-| Multiplier | Fixed for a session; a change goes in the next session's Offer, and a carried budget is drawn at the new one | Every purchase adds to one budget, so a change mid-session would reprice units already bought |
+| Upstream weight per session | Fixed for a session; a change goes in the next session's Offer, and a carried budget is drawn at the new one | Every purchase adds to one budget, so a change mid-session would reprice units already bought |
 | Balance message | Provider → payer, with what is left, time to the deadline and the reserved rate: at session start, after each accepted TopUp, and at zero or expiry. Information only | A payer that reconnects cannot otherwise know what it left behind. The payer decides purchases from its own count, so a provider that understates the budget cannot make it buy more |
 | Grant state | Cumulative authorized, never decreasing | Satisfies the Spilman ratchet and makes TopUp idempotent, so lost and reordered messages are harmless and no acknowledgment is needed |
 | Reaction latency | One message, no round trip | Fire-and-forget is safe because the state is cumulative, so a payer can raise its reserved rate and use it immediately |
@@ -1042,9 +1053,9 @@ Plus 2 bytes of length prefix per message. Setup messages are one-time. TopUp is
 | Admission control | Sum of reserved rates against `max_rate`; TopUpReject carries the reserved rate still free and a reason | The payer states the rate it wants set aside up front, so the provider can refuse before taking the money instead of shaping afterward. The reason tells the payer whether to wait, lower its rate, or fix its terms |
 | Delivery pricing | None in the protocol — one voucher per unit, both directions | A voucher is a claim on one unit, so redemption is delivery |
 | Accepted mints | One ordered list, at least one entry, no prices | Accept or refuse is binary. What an issuer's paper is worth is expressed in what you pay for it on the market, not in a settlement discount |
-| Who pays | Each side pays for what it received, and keeps its own budget with the other | Both directions are funded independently, so there is no reverse payment anywhere |
-| Received multiplier | Unsigned u16 per peer, applied as a consumption weight | Prices scarce uplink and signals how welcome a peer's traffic is. As a weight it is enforced by the shaper as traffic happens rather than appearing on a bill. Unsigned makes paying a peer to send traffic unrepresentable rather than merely forbidden |
-| Metering counts | Unchanged: delivered and received, raw — but local | Measurement never changed. What changed is that it stopped being an input to payment, so the counters are no longer exchanged |
+| Who pays | The customer pays its provider and keeps one budget with it. Peering is both nodes selling, each with its own Offer, budget and channel | One sale, one channel. A customer that only buys sends field 5 and needs no mint; peering needs no mode of its own |
+| Upstream weight | Offer field 4, unsigned u16, set by the provider per peer, default 1: `moved = downstream + upstream × upstream_weight` | One number prices a lopsided link and lets a peering router make upstream free. As a weight it is enforced by the shaper as traffic happens rather than appearing on a bill. Unsigned makes paying a customer to send traffic unrepresentable rather than merely forbidden |
+| Metering counts | Downstream and upstream, named from the payer's side; raw and local | They are not an input to payment, so the counters are never exchanged |
 | Market operations | Separate endpoints and a separate protocol; never TollGate messages | Buying and swapping vouchers is not part of paying for delivery, and a node that offers neither is fully functional |
 | Money in the protocol | Never appears | Sats are a market concern; the payment protocol only ever counts units and vouchers |
 | Message numbering | Contiguous, 0x00–0x0C | No reserved gaps. v1 is unreleased, so the codes describe the protocol as designed rather than its history |
