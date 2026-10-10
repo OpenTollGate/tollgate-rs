@@ -28,8 +28,7 @@ means the external one.
 
 **A new use case is then a new enforcer, not a new `tollgated`.** The built-in
 enforcers stay. An external one sits behind the same `Enforcer` trait they
-implement (the code still calls it `ResourceAdapter`), reached over a local
-socket.
+implement, reached over a local socket.
 
 **An external enforcer sells a service this node delivers, to whoever pays for
 it.** That is a different thing from a paid peer link, where a direct neighbor
@@ -814,7 +813,7 @@ handed bytes that are neither.
 
 | Decision | Resolution | Rationale |
 |---|---|---|
-| Name | Whatever applies `tollgated`'s decisions is an **enforcer**: built into `tollgated` (`ip`, `fips`, `loopback`) or a separate program (`external`) speaking the **enforcer protocol**. The trait they share is `Enforcer` (`ResourceAdapter` in the code today) | It names the role. `tollgated` decides who has paid and at what rate; the enforcer applies that to its own traffic and reports the counts. One word for built-in and external alike, because they do the same job. The first name, "gate", clashed with the product name TollGate, and "resource adapter" said nothing about what it does |
+| Name | Whatever applies `tollgated`'s decisions is an **enforcer**: built into `tollgated` (`ip`, `fips`, `loopback`) or a separate program (`external`) speaking the **enforcer protocol**. The trait they share is `Enforcer` | It names the role. `tollgated` decides who has paid and at what rate; the enforcer applies that to its own traffic and reports the counts. One word for built-in and external alike, because they do the same job. The first name, "gate", clashed with the product name TollGate, and "resource adapter" said nothing about what it does |
 | Config section | `enforcer:`, with `kind: ip \| fips \| external \| loopback`, replacing `forwarding:` and its `mode` | The section configures what enforces, so it is named for that. `forwarding` named one resource. `nftables` became `ip`: named for what it enforces, not for the tool it uses |
 | Who is who | Payer, subject and binding kept apart; `peer` always means the payer | A proxy pays for a phone, and an allowlist has no payer. Treating payer and subject as one makes both impossible, and lets a key stand in for an address it never proved |
 | Subject from payer | Never guessed; every subject arrives in a binding | Payer and subject need not be the same party |

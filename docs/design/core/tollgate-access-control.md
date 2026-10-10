@@ -118,7 +118,7 @@ This requires a FIPS modification — the ability to selectively include/exclude
 
 ## Enforcer Trait (Access Control Members)
 
-`tollgate-core` never enforces anything itself: it decides, and the host applies the decision through an **enforcer**. Some enforcers are built into `tollgated` (`ip`, `fips`, `loopback`); an external one is a separate program, reached over the [enforcer protocol](tollgate-enforcer-protocol.md). All of them sit behind one trait, `Enforcer` (the code still calls it `ResourceAdapter`). The trait belongs to the host (`tollgate-net`), not to core, so core stays free of I/O. Its access-control members:
+`tollgate-core` never enforces anything itself: it decides, and the host applies the decision through an **enforcer**. Some enforcers are built into `tollgated` (`ip`, `fips`, `loopback`); an external one is a separate program, reached over the [enforcer protocol](tollgate-enforcer-protocol.md). All of them sit behind one trait, `Enforcer`. The trait belongs to the host (`tollgate-net`), not to core, so core stays free of I/O. Its access-control members:
 
 ```rust
 pub trait Enforcer: Send + Sync {

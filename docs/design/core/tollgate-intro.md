@@ -154,7 +154,7 @@ The three layers introduced in [What's in this repo](#whats-in-this-repo) — `t
 `tollgate-core` contains all payment logic, metering, and access control. It is network-agnostic — it does not know about FIPS, IP, or any specific transport — and **sans-IO**: it never does I/O, never reads the clock, and never verifies a signature. The host turns real events into `Event` values, supplies the time, and carries out the `Action`s core returns. To do that, the host implements two traits of its own:
 
 1. **ChannelBackend** — Spilman channel funding, balance-update signing and verification, settlement. Must support token locking (NUT-11 2-of-2 multisig). See [tollgate-payment-channels.md](tollgate-payment-channels.md).
-2. **Enforcer** (`ResourceAdapter` in the code today) — Peer identification, metering counters (units to and from the payer, per peer), access control and shaping enforcement, and optional metrics for operator visibility. See [tollgate-access-control.md](tollgate-access-control.md) and [tollgate-metering.md](tollgate-metering.md).
+2. **Enforcer** — Peer identification, metering counters (units to and from the payer, per peer), access control and shaping enforcement, and optional metrics for operator visibility. See [tollgate-access-control.md](tollgate-access-control.md) and [tollgate-metering.md](tollgate-metering.md).
 3. **Peer Identifiers** — Peers are always identified by their Nostr public key (npub). The consumer provides npubs for connected peers, similar to how FIPS transports provide identifiers to FMP.
 
 ### Separation Model

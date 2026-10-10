@@ -65,7 +65,7 @@ A Balance from the provider that says less is left than the payer's own count is
 
 ## Enforcer Trait (Metering Members)
 
-The `Enforcer` trait (`ResourceAdapter` in the code today) spans both access control and metering. It belongs to the host (`tollgate-net`), not to `tollgate-core`: core never does I/O, so the host reads the enforcer and hands core what it found. The metering-related members:
+The `Enforcer` trait spans both access control and metering. It belongs to the host (`tollgate-net`), not to `tollgate-core`: core never does I/O, so the host reads the enforcer and hands core what it found. The metering-related members:
 
 ```rust
 pub trait Enforcer: Send + Sync {
