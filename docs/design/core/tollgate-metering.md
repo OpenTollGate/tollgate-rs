@@ -8,18 +8,18 @@ This document specifies how TollGate counts units delivered between peers, what 
 
 ## What is Metered
 
-Each node meters two things per peer, link-local: **downstream**, the units it sent to the peer, and **upstream**, the units it got from the peer. Both are named from the peer's side, as the customer whose budget they draw ([Upstream Weight](tollgate-vouchers.md#upstream-weight)).
+Each node meters two things per peer, link-local: **`units_to_payer`**, the units it sent to the peer, and **`units_from_payer`**, the units it got from the peer. They are named by the roles in the sale: the peer is the payer whose budget they draw, and this node is its provider ([The From-Payer Weight](tollgate-vouchers.md#the-from-payer-weight)).
 
 ```
-For peer B:
-  downstream += 1,000,000     (B's download)
-  upstream   +=    50,000     (B's upload)
+For payer B:
+  units_to_payer   += 1,000,000     (B's download)
+  units_from_payer +=    50,000     (B's upload)
 ```
 
-Both counters feed the shaper. Each tick the peer's budget is drawn down by downstream plus upstream weighted by this node's `upstream_weight` — or by its reserved rate over the tick, if that is more:
+Both counters feed the shaper. Each tick the payer's budget is drawn down by `units_to_payer` plus `units_from_payer` weighted by this node's `from_payer_weight` — or by its reserved rate over the tick, if that is more:
 
 ```
-moved     = downstream + upstream × upstream_weight   // this tick
+moved     = units_to_payer + units_from_payer × from_payer_weight   // this tick
 consumed += max(moved, reserved_rate × tick)
 ```
 
@@ -93,12 +93,14 @@ pub trait Enforcer: Send + Sync {
 
 /// Defined in tollgate-core, which draws budgets down against it.
 pub struct Counters {
-    /// Units sent TO this peer — its download.
-    pub downstream: u64,
-    /// Units got FROM this peer — its upload.
-    pub upstream: u64,
+    /// units_to_payer: units sent TO this peer — its download.
+    pub to_payer: u64,
+    /// units_from_payer: units got FROM this peer — its upload.
+    pub from_payer: u64,
 }
 ```
+
+The struct's fields drop the `units_` prefix, since the `Counters` type already says they count units.
 
 Counters are read, not pushed: reading them once per tick is enough to draw a budget down, and it needs nothing from the delivery path beyond a cumulative count. A delivery path that can push changes as they happen may do so as an optimisation.
 
@@ -127,9 +129,9 @@ pub type PeerMetrics = HashMap<String, MetricValue>;
 | Draw rule | `max(moved, reserved_rate × tick)` per tick, and nothing for a tick the peer was not carried | One rule for time at a speed and pay per use. The reserved rate is the capacity set aside, so it is paid for whether used or not — but only while the node could deliver it |
 | Counter model | Cumulative since session start, not deltas | Compares directly against the cumulative total the peer has signed for |
 | Counter delivery | Read, not pushed: the host reads cumulative counters once per tick | Enough to draw a budget down, and needs nothing from the delivery path beyond a cumulative count |
-| Counter names | `downstream` and `upstream`, named from the peer's side as the customer | The same names work for whatever is sold: a download, energy into a car, beer poured, and what comes back the other way |
+| Counter names | `units_to_payer` and `units_from_payer`, named by the roles in a sale, not downstream and upstream | Every sale has exactly one payer and one provider, so the names mean one thing in every sale, including each of the two sales in peering. "Upstream" already means the node a relay buys from, and in peering each side is upstream of the other. The same names work for whatever is sold: a download, energy into a car, beer poured, and what comes back the other way |
 | Reporting | Counters stay local; the provider reports only the resulting Balance, as information | Payment happens before delivery, so no shared number decides how much money moves and there is nothing to reconcile. A payer that reconnects needs to know what it left behind, but decides purchases from its own count |
-| Upstream weight | Applied when drawing down the budget, not when counting; fixed for a session | Keeps what the meter reports separable from what the shaper charges |
+| From-payer weight | Applied when drawing down the budget, not when counting; fixed for a session | Keeps what the meter reports separable from what the shaper charges |
 | Transit loss | The payer's cost | A budget is drawn whether or not packets arrive. The payer measures its own throughput and stops buying; no tolerance, no threshold, no message |
 | Under-delivery detection | One-sided, from the payer's own counters | Delivered rate against purchased rate needs nothing from the provider. Feeds connection choice: which peer to buy from, how large a budget to risk |
 | Under-delivery evidence | None — a payer can act but cannot prove | Accepted for now. Same visibility gap the market layer has for refused redemption, and revisitable as a reporting path if skimming proves common |

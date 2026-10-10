@@ -110,9 +110,9 @@ it is refused as a [conflict](#conflicts). And if the socket drops, the outlet
 switches off and every valve closes, as any enforcer goes back to closed.
 
 **Mostly one direction flows here.** Power and beer go to the customer, so
-what the meter records is `downstream`, and `upstream` stays `0`. A charge
-point that can also take energy back from the car reports that as `upstream`;
-a tap never has any.
+what the meter records is `units_to_payer`, and `units_from_payer` stays `0`.
+A charge point that can also take energy back from the car reports that as
+`units_from_payer`; a tap never has any.
 
 **Each instance counts in its own unit.** The vouchers an instance sells are
 in its mint's unit, `mint.unit`
@@ -200,7 +200,7 @@ what that file will say.
 | `bind(peer, [subject, delegated])` | tollgated → enforcer | Every subject this payer holds. It replaces any earlier set; an empty list unbinds them all |
 | `set(peer, rate)` | tollgated → enforcer | The payer's state: `0` is closed; a number is open and shaped to that many units per second; `null` is open and unshaped |
 | `remove(peer)` | tollgated → enforcer | Forget the payer. Its subjects go back to closed |
-| `counters(peer, downstream, upstream)` | enforcer → tollgated | Units carried to and from the payer's subjects, counted from the start of this connection |
+| `counters(peer, units_to_payer, units_from_payer)` | enforcer → tollgated | Units carried to and from the payer's subjects, counted from the start of this connection |
 | `conflict(peer, subject)` | enforcer → tollgated | The enforcer refused to bind `subject` to `peer`. See [Conflicts](#conflicts) |
 
 A **unit** here is always the instance's own unit, the one its vouchers are
@@ -253,7 +253,7 @@ enforcer                               tollgated
   │◄──────── bind(peer, subjects) ─────────│  a payer connects
   │──────── conflict(peer, subject) ──────►│  only if refused
   │◄──────────── set(peer, rate) ──────────│  core changed its rate
-  │─────── counters(peer, dn, up) ────────►│  every tick
+  │─ counters(peer, to_payer, from_payer) ►│  every tick
   │◄──────────── remove(peer) ─────────────│  payer gone
 
   The socket drops: the enforcer forgets everything and is closed again.
@@ -276,8 +276,9 @@ example.
 **`counters` are sent every tick**, once a second by default, for every payer
 whose counts changed. Each count is a running total: it starts at zero when the
 payer is first bound on this connection, and adds up all the payer's subjects.
-`downstream` is what went to them; `upstream` is what came from them. Both
-are named from the payer's side, as the customer whose budget they draw.
+`units_to_payer` is what went to them; `units_from_payer` is what came from
+them. Both are named by the roles in the sale: the peer is the payer whose
+budget they draw.
 
 Because every connection starts from zero, `tollgated` carries the totals
 across a reconnect. It adds the last counts it had from the previous
@@ -598,8 +599,8 @@ remove = {
 counters = {
   0: 0x24,
   1: payer,
-  2: u64,                         ; downstream: units to the payer's subjects
-  3: u64,                         ; upstream: units from them
+  2: u64,                         ; units_to_payer: to the payer's subjects
+  3: u64,                         ; units_from_payer: from them
   * uint => any,
 }
 

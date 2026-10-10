@@ -48,7 +48,7 @@
   <rect width="720" height="540" rx="8" class="bg"/>
 
   <!-- Title -->
-  <text x="360" y="28" text-anchor="middle" class="title">Upstream Weight Change</text>
+  <text x="360" y="28" text-anchor="middle" class="title">From-Payer Weight Change</text>
   <text x="360" y="46" text-anchor="middle" class="subtitle">A new weight comes in the next session&#8217;s Offer — accept by buying, reject by closing</text>
 
   <!-- Node headers -->
@@ -69,8 +69,8 @@
   <text x="40" y="148" text-anchor="middle" class="annot">Update</text>
 
   <line x1="170" y1="140" x2="548" y2="140" stroke="#5080c0" stroke-width="1.5" marker-end="url(#aR)"/>
-  <text x="360" y="133" text-anchor="middle" class="alabel" fill="#5080c0">Offer, next session (new upstream weight)</text>
-  <text x="360" y="158" text-anchor="middle" class="annot">B inspects field 4: a new upstream weight is on offer</text>
+  <text x="360" y="133" text-anchor="middle" class="alabel" fill="#5080c0">Offer, next session (new from-payer weight)</text>
+  <text x="360" y="158" text-anchor="middle" class="annot">B inspects field 4: a new from-payer weight is on offer</text>
 
   <line x1="70" y1="178" x2="660" y2="178" class="sep"/>
 

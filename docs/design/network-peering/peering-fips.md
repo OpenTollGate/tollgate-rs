@@ -152,12 +152,13 @@ fn subscribe_meter(&self, peer: &Pubkey) -> Result<MeterStream, EnforcerError> {
 
     // Subscribe to FIPS's per-peer counter livestream over the control socket.
     // Each push updates the watch channel; tollgate-core draws the peer's budget down against it.
-    // downstream: bytes sent to the peer (FIPS tx); upstream: bytes from it (rx).
-    let (downstream_tx, downstream) = watch::channel(0);
-    let (upstream_tx, upstream) = watch::channel(0);
-    self.subscribe_peer_counters(node_addr, downstream_tx, upstream_tx);
+    // units_to_payer: bytes sent to the peer (FIPS tx);
+    // units_from_payer: bytes from it (rx).
+    let (to_payer_tx, to_payer) = watch::channel(0);
+    let (from_payer_tx, from_payer) = watch::channel(0);
+    self.subscribe_peer_counters(node_addr, to_payer_tx, from_payer_tx);
 
-    Ok(MeterStream { downstream, upstream })
+    Ok(MeterStream { to_payer, from_payer })
 }
 ```
 
@@ -307,7 +308,7 @@ admitted at the minimum flow allowance, or local-only if the allowance is zero
 Two mesh routers that carry each other's traffic are **peering**: each sells
 to the other, with its own Offer, and each funds one channel to the other
 ([tollgate-vouchers.md](../core/tollgate-vouchers.md#customers-and-peers)).
-They usually set `upstream_weight: 0` for each other, so each pays only for
+They usually set `from_payer_weight: 0` for each other, so each pays only for
 what flows towards it. A phone or a FIPS-only device that only buys is a
 customer: one channel, and no mint of its own.
 

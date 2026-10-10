@@ -61,7 +61,7 @@ One node sells and the other buys: **the customer pays its provider, in the prov
 
 A well-connected node sells its vouchers dearly because its delivery is valuable. A node that wants to favor a peer sells that peer vouchers cheaply. A pair of peers owned by the same operator skips payment entirely by deciding not to charge each other. Topology, scarcity and relationships all show up in what vouchers fetch, rather than in a price sheet.
 
-One number is quoted peer-to-peer: the **upstream weight**. The two directions are named from the customer's side — **downstream** is what goes to the customer, **upstream** what comes from it — and the customer's budget is drawn by `downstream + upstream × upstream_weight`. The provider sets it in its Offer: `1`, the default, charges both directions the same, `10` makes upstream ten times dearer, and `0` makes it free, as peering routers usually want. Unsigned, so a provider can never pay a customer a bonus for sending. See [tollgate-vouchers.md](tollgate-vouchers.md#upstream-weight).
+One number is quoted peer-to-peer: the **from-payer weight**. Every sale has one payer and one provider, and the two directions are named by those roles — **`units_to_payer`** is what the provider sends the payer, **`units_from_payer`** what the payer sends the provider. The payer's budget is drawn by `units_to_payer + units_from_payer × from_payer_weight`. The provider sets the weight in its Offer: `1`, the default, charges both directions the same, `10` makes a unit from the payer ten times dearer, and `0` makes it free, as peering routers usually want. Unsigned, so a provider can never pay a customer a bonus for sending. See [tollgate-vouchers.md](tollgate-vouchers.md#the-from-payer-weight).
 
 Payment flows through **Cashu Spilman channels** — unidirectional payment channels where the sender locks vouchers in a 2-of-2 multisig and signs successively larger balance updates. One channel carries one sale; a peering has two. Under vouchers their job is to keep the issuer's spent-proof set bounded rather than to prevent theft.
 
@@ -87,7 +87,7 @@ A peer arrives already holding vouchers for the node it wants service from, or i
 | Peering | yes | yes | two |
 | Free peering | `no_charge` | `no_charge` | none |
 
-A customer's upload is not something it sells. It is part of what it buys, drawn from its budget at its provider's upstream weight.
+A customer's upload is not something it sells. It is part of what it buys, drawn from its budget at its provider's from-payer weight.
 
 A node may also decide not to charge a particular peer at all. That decision is **one-sided**: it controls only whether *it* charges, never whether the peer charges back.
 
@@ -154,7 +154,7 @@ The three layers introduced in [What's in this repo](#whats-in-this-repo) — `t
 `tollgate-core` contains all payment logic, metering, and access control. It is network-agnostic — it does not know about FIPS, IP, or any specific transport — and **sans-IO**: it never does I/O, never reads the clock, and never verifies a signature. The host turns real events into `Event` values, supplies the time, and carries out the `Action`s core returns. To do that, the host implements two traits of its own:
 
 1. **ChannelBackend** — Spilman channel funding, balance-update signing and verification, settlement. Must support token locking (NUT-11 2-of-2 multisig). See [tollgate-payment-channels.md](tollgate-payment-channels.md).
-2. **Enforcer** (`ResourceAdapter` in the code today) — Peer identification, metering counters (units downstream and upstream per peer), access control and shaping enforcement, and optional metrics for operator visibility. See [tollgate-access-control.md](tollgate-access-control.md) and [tollgate-metering.md](tollgate-metering.md).
+2. **Enforcer** (`ResourceAdapter` in the code today) — Peer identification, metering counters (units to and from the payer, per peer), access control and shaping enforcement, and optional metrics for operator visibility. See [tollgate-access-control.md](tollgate-access-control.md) and [tollgate-metering.md](tollgate-metering.md).
 3. **Peer Identifiers** — Peers are always identified by their Nostr public key (npub). The consumer provides npubs for connected peers, similar to how FIPS transports provide identifiers to FMP.
 
 ### Separation Model
@@ -211,7 +211,7 @@ The three daemons normally run on one machine and talk over local sockets; why t
 
 - **Access Control**: Gates delivery per peer based on payment status. Unpaid peers can only send data addressed to the local node (for payment negotiation). Free peers bypass payment entirely.
 
-- **Metering**: Tracks units downstream and upstream per peer, link-local. Draws each peer's budget down as traffic passes, or at its reserved rate if that is more, and shapes when it is spent.
+- **Metering**: Tracks units to and from each payer, link-local. Draws each peer's budget down as traffic passes, or at its reserved rate if that is more, and shapes when it is spent.
 
 - **Protocol Messages**: Wire format for offers, channel negotiation, and grants. Designed for minimal back-and-forth between peers — a purchase needs no reply.
 
@@ -221,7 +221,7 @@ The three daemons normally run on one machine and talk over local sockets; why t
 
 ## What a Node Advertises
 
-A node's offer is short: the mints whose vouchers it will take, most preferred first; the unit it denominates in; the range of windows it will accept; the smallest rate a payer must reserve, `0` if it may pay per use; the shortest gap between two purchases; and one unsigned upstream weight saying how much a unit from the peer counts against a unit to it.
+A node's offer is short: the mints whose vouchers it will take, most preferred first; the unit it denominates in; the range of windows it will accept; the smallest rate a payer must reserve, `0` if it may pay per use; the shortest gap between two purchases; and one unsigned from-payer weight saying how much a unit from the payer counts against a unit to it.
 
 There are no products, no rate tables, and no price anywhere. Delivery costs one voucher per unit, and the peer already holds the vouchers.
 
@@ -299,7 +299,7 @@ TollGate uses the [Cashu Spilman channel](https://github.com/SatsAndSports/cashu
 
 | Document | Description |
 | -------- | ----------- |
-| [tollgate-vouchers.md](tollgate-vouchers.md) | What peers pay each other with: denomination, budgets, the one accounting rule, customers and peers, the upstream weight, channels as state compression |
+| [tollgate-vouchers.md](tollgate-vouchers.md) | What peers pay each other with: denomination, budgets, the one accounting rule, customers and peers, the from-payer weight, channels as state compression |
 | [tollgate-protocol.md](tollgate-protocol.md) | Wire protocol: messages, negotiation, codec |
 | [tollgate-payment-channels.md](tollgate-payment-channels.md) | Spilman channel lifecycle, rollover, offline resilience |
 | [tollgate-access-control.md](tollgate-access-control.md) | Delivery gates, access levels, unpaid peer restrictions |

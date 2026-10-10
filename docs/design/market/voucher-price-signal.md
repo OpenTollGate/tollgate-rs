@@ -30,8 +30,8 @@ worthless, not a liability. Nothing in the design pays a party to take a
 voucher off someone's hands.
 
 Where one direction does need pricing apart from the other, it is the
-**upstream weight**
-([tollgate-vouchers.md](../core/tollgate-vouchers.md#upstream-weight)): a
+**from-payer weight**
+([tollgate-vouchers.md](../core/tollgate-vouchers.md#the-from-payer-weight)): a
 provider counts what a customer sends at more than what it receives when its
 uplink is scarce, or at nothing. The number is unsigned, so no arrangement
 anywhere in the design pays a customer for sending.

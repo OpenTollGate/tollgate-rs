@@ -116,9 +116,9 @@ drawn each second = max(units moved, reserved rate × 1 s)
 ```
 
 `units moved` is what the payer moved in that second: what went to it, plus
-what came from it weighted by the provider's upstream weight
-([below](#upstream-weight)). Whatever is left when the deadline comes expires,
-and the provider keeps the payment.
+what came from it weighted by the provider's from-payer weight
+([below](#the-from-payer-weight)). Whatever is left when the deadline comes
+expires, and the provider keeps the payment.
 
 That one rule sells two things, and the only difference between them is the
 reserved rate the payer picks:
@@ -132,7 +132,7 @@ reserved rate the payer picks:
 
 Nothing is negotiated. A provider says what it will
 accept in its Offer — the windows, the smallest reserved rate, how often a
-peer may buy, and how much upstream counts
+peer may buy, and how much a unit from the payer counts
 ([tollgate-protocol.md](tollgate-protocol.md#0x01-offer)) — and each payer
 picks inside that, or buys nothing. A provider that sets a smallest reserved rate
 above zero sells only time at a speed.
@@ -330,32 +330,37 @@ Peering         A buys from B             two channels, A → B and B → A
                 B buys from A
 ```
 
-### Upstream Weight
+### The From-Payer Weight
 
 Most things that can be sold flow both ways, or could. The two directions are
-named from the customer's side, whatever is being sold:
+named by the roles in a sale. Every sale has one **payer**, the side whose
+budget is drawn, and one **provider**, the side that sells. Peering is two
+sales, and each has its own payer.
 
-| What is sold | Downstream: to the customer | Upstream: from the customer |
+- **`units_to_payer`** — what the provider sends to the payer
+- **`units_from_payer`** — what the payer sends to the provider
+
+| What is sold | `units_to_payer` | `units_from_payer` |
 |---|---|---|
 | Wi-Fi for a phone | the phone's download | the phone's upload |
 | A beer tap | beer poured | nothing, always `0` |
 | A charger | energy into the car | nothing, or energy fed back to the grid |
 
-The provider counts both, and draws the customer's budget by both:
+The provider counts both, and draws the payer's budget by both:
 
 ```
-moved = downstream + upstream × upstream_weight
+moved = units_to_payer + units_from_payer × from_payer_weight
 ```
 
 `moved` is what goes into the one rule, `max(moved, reserved rate × 1 s)`
 ([above](#the-one-rule)).
 
-> **`upstream_weight`** — how much one unit from the customer costs, compared
-> with one unit to the customer. Set by the provider in its Offer. Default `1`.
+> **`from_payer_weight`** — how much one unit from the payer costs, compared
+> with one unit to the payer. Set by the provider in its Offer. Default `1`.
 
 - `1` — both directions cost the same
-- `10` — upstream is ten times dearer
-- `0` — upstream is free
+- `10` — a unit from the payer is ten times dearer
+- `0` — what the payer sends is free
 
 A phone on Wi-Fi at weight `1` that downloads 300 MB and uploads 20 MB has
 moved 320 MB. A relay on a 100/10 Mbit/s line at weight `10`, whose customer
@@ -363,36 +368,40 @@ downloads 1,000 MB and uploads 50 MB, draws 1,000 + 50 × 10 = 1,500 MB. A tap
 that pours 500 ml draws 500 ml, since nothing flows back.
 
 **Choosing the weight is the provider's pricing,** like what it sells its
-vouchers for. A link's own shape is the usual guide: on a 100/10 line upstream
-is a tenth as plentiful, so a weight of `10` charges each direction the same
-share of its capacity. A symmetric link, such as fibre or a mesh link, is `1`.
-Something that only flows one way, like beer or charging, never uses it: its
-upstream is always `0`, so nothing needs to be set.
+vouchers for. A link's own shape is the usual guide: on a 100/10 line the
+payer's upload is a tenth as plentiful, so a weight of `10` charges each
+direction the same share of its capacity. A symmetric link, such as fibre or a
+mesh link, is `1`. Something that only flows one way, like beer or a charger
+that cannot feed back, never uses it: its `units_from_payer` is always `0`, so
+nothing needs to be set.
 
-**Peering routers usually set `0`.** With both sides selling, each then pays
-only for what flows towards it:
+**Peering routers usually set `0`.** Peering is two sales. In each, the payer
+pays only for what flows towards it:
 
 ```
 B sends A 1,000 MB, A sends B 200 MB, both weights 0
-  A's budget with B:   1,000 + 200 × 0    = 1,000
-  B's budget with A:     200 + 1,000 × 0  =   200
+  sale 1, B sells to A:  units_to_payer 1,000, units_from_payer 200
+    A's budget with B:   1,000 + 200 × 0    = 1,000
+  sale 2, A sells to B:  units_to_payer 200, units_from_payer 1,000
+    B's budget with A:     200 + 1,000 × 0  =   200
 ```
 
 ![Who Pays For What](diagrams/who-pays.svg)
 <details><summary>Text version</summary>
 
 ```
-A customer: phone A buys from relay B, B's upstream_weight = 10
-  A downloads 1,000 MB (downstream), uploads 50 MB (upstream)
+A customer: phone A buys from relay B, B's from_payer_weight = 10
+  units_to_payer:   1,000 MB (A's download)
+  units_from_payer:    50 MB (A's upload)
   A's budget is drawn 1,000 + 50 × 10 = 1,500
   one channel, A → B; A needs no mint
 
-Peering: A and B each sell to the other, both weights 0
+Peering: two sales, A and B each the payer in one, both weights 0
   A's budget with B is drawn by what flows to A
   B's budget with A is drawn by what flows to B
   two channels, one for each sale
 
-upstream_weight: unsigned, default 1; 0 = free, 1 = same, 10 = ten times
+from_payer_weight: unsigned, default 1; 0 = free, 1 = same, 10 = ten times
 ```
 </details>
 
@@ -408,16 +417,16 @@ moves, so a buyer that finds it above its own limit
 from that provider and pays nothing.
 
 **The weight is unsigned, and that is load-bearing.** It cannot go below `0`,
-so a provider can make upstream free but can never pay a customer a bonus for
-sending. A negative weight would let a customer earn back its budget by
-generating traffic nobody wants — the sink hazard
+so a provider can make what the payer sends free but can never pay a customer
+a bonus for sending. A negative weight would let a customer earn back its
+budget by generating traffic nobody wants — the sink hazard
 ([tollgate-hazards.md](tollgate-hazards.md)).
 
 ### Who Decides What
 
 | Who | Decides | Where |
 |---|---|---|
-| The provider | What its vouchers sell for; the upstream weight, the smallest reserved rate, the window range and the gap between purchases | The price where it sells vouchers, the rest in its Offer — all before any money moves. Fixed for the session, except as a revised Offer allows |
+| The provider | What its vouchers sell for; the from-payer weight, the smallest reserved rate, the window range and the gap between purchases | The price where it sells vouchers, the rest in its Offer — all before any money moves. Fixed for the session, except as a revised Offer allows |
 | The customer | How much to buy, its reserved rate, its window | Each TopUp. It can refuse terms it does not like, and then buys nothing |
 
 The reserved rate is a choice of speed, not of price. The provider honours it
@@ -845,14 +854,14 @@ here is protocol-side.
 | Speed above the reserved rate | Provider policy, not protocol; the enforcer still receives one rate | The provider promises the reserved rate and admits reservations against its capacity. What it gives beyond that is spare capacity, which it may give or withhold |
 | Budget lifetime | The payer's, kept across reconnects, rollovers, settlements and restarts, until its deadline. The reservation lasts only for the session | The budget is already paid for. A reservation sets capacity aside, which a payer that is not connected has no use for |
 | Outages | Nothing is drawn while the provider is not carrying the payer; the deadline still runs | The payer should not pay for seconds it could not be served. The deadline is kept so that a budget always ends |
-| Weight per session | The upstream weight is fixed for a session; a change applies from the next | Every grant adds to one budget, so a weight that changed mid-session would reprice units already bought |
+| Weight per session | The from-payer weight is fixed for a session; a change applies from the next | Every grant adds to one budget, so a weight that changed mid-session would reprice units already bought |
 | Payment timing | Prepaid — the budget is bought before the traffic it covers | Holding a voucher is already a claim on the issuer, so prepaying adds no new exposure. Postpaying would add provider credit risk on top of it. Non-payment then enforces itself: the budget runs out |
 | Reaction latency | One message, no acknowledgment | Cumulative signed state makes TopUp idempotent, so fire-and-forget is safe and a payer can use what it bought the moment it buys it |
 | Buyer | Adds back what has drained, renews before its budget or deadline runs out, and acts on a refusal by its reason | Nothing is forfeit, so there is nothing to time and no reason to hold a purchase back. Topping up only what drained keeps a budget the same size from one purchase to the next |
 | Balance | Reported by the provider, kept by the payer as information only | A payer that reconnects cannot otherwise know what it left behind. Treating the number as an instruction would let a provider that understates it make the payer buy more |
 | Who pays | The customer pays its provider, in the provider's vouchers. Peering is both nodes selling to each other, each with its own Offer | One sale, one channel, one budget. A customer that only buys needs no mint, and peering needs no mode of its own |
 | Acquiring vouchers | Not a protocol concern — see the market documents. Inside a node, `merchantd` acquires; `tollgated` asks it per funding | The direct route from the issuer is enough to operate, and checking a voucher takes one hop. The protocol daemon holds nothing of value |
-| Upstream weight | Set by the provider in its Offer, per peer; `moved = downstream + upstream × upstream_weight`; unsigned, default `1` | One number prices a lopsided link: `1` charges both directions alike, `10` suits a 100/10 line, `0` makes upstream free, as peering routers usually want. Unsigned, so a provider can never pay a customer a bonus for sending |
+| From-payer weight | Set by the provider in its Offer, per peer; `moved = units_to_payer + units_from_payer × from_payer_weight`; unsigned, default `1` | One number prices a lopsided link: `1` charges both directions alike, `10` suits a 100/10 line, `0` makes what the payer sends free, as peering routers usually want. Unsigned, so a provider can never pay a customer a bonus for sending |
 | Accepted mints | One ordered list, at least one entry, no prices | One unit of account network-wide makes any mint's vouchers usable. A relay accepting its upstream's mint can spend what it receives without converting |
 | Accepted-mint haircuts | None — accept or refuse | What an issuer's paper is worth belongs on the market, not in a settlement discount |
 | After settlement | Own vouchers burned at `mintd`; another mint's kept (deposited with `merchantd`) or burned, set per mint | The claim on this node has been honored. Whether another issuer's paper is worth anything depends on the relationship — see [tollgate-daemons.md](tollgate-daemons.md) |

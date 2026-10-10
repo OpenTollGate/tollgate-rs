@@ -11,12 +11,12 @@ Read this before adding anything that prices, routes, or gives capacity away.
 ## Never Pay A Peer A Bonus To Send Or Accept Traffic
 
 The design makes a **bonus** for sending traffic unrepresentable rather than
-merely forbidden: the `upstream_weight` is unsigned, so a provider can count
+merely forbidden: the `from_payer_weight` is unsigned, so a provider can count
 what a customer sends at more than what it receives, or at nothing, but can
 never pay a customer for sending
-([tollgate-vouchers.md](tollgate-vouchers.md#upstream-weight)). The section
-stays because the temptation recurs, and because anything added later must
-preserve the property.
+([tollgate-vouchers.md](tollgate-vouchers.md#the-from-payer-weight)). The
+section stays because the temptation recurs, and because anything added later
+must preserve the property.
 
 A customer never earns anything by sending: it only buys. What remains is
 peering, where each node buys from the other and usually at weight `0`, so
@@ -131,8 +131,8 @@ What remains, which the rule limits but does not remove:
   a departed payer's key from its address can draw its whole budget — not
   only the seconds of one purchase. Under `pubkey` the network proves the key
   and this does not arise.
-- **A carried budget is drawn at the session's upstream weight.** A provider
-  that raises its `upstream_weight` between sessions reprices units already
+- **A carried budget is drawn at the session's from-payer weight.** A
+  provider that raises its `from_payer_weight` between sessions reprices units already
   sold, from the payer's next session on. The payer can refuse the new weight,
   but the budget it holds stays with that provider.
 
