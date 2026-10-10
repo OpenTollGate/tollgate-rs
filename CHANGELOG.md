@@ -12,6 +12,30 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 ### Added
 
+- `tolltop` switches between running instances: with no flag it finds every
+  `tollgate-*/control.sock`, looks again every two seconds, and Tab (or `i`)
+  moves to the next; the frame names the instance shown and how many there
+  are. `--instance` starts on one, `--socket` pins one. Its table and detail
+  show each payer's budget, time to its deadline and reserved rate, our own
+  budget with each provider, and the last Balance it sent.
+
+- A payer's budget is kept on disk, in `budgets-<instance>.json` in the state
+  directory, at every accepted TopUp and when a session ends, with its deadline
+  as a clock time. It comes back when the payer reconnects or the node
+  restarts, until its deadline: by key, and under `enforcer.identity: address`
+  by key and address. `testing/purchase` restarts its gateway while the client
+  is away and checks the client gets its budget back.
+
+- Balance (0x0C): the provider tells the payer what is left of its budget, the
+  time to its deadline and its reserved rate — at the session start, after each
+  accepted TopUp, and when the budget runs out or expires. The payer keeps it
+  as information and buys from its own count.
+
+- `burst: {rate, unreserved_rate}`, per node and per peer: how fast a payer is
+  carried above what it reserved, or when it reserved nothing. By default a
+  reserved payer is carried at exactly its rate and an unreserved one as fast
+  as the link allows.
+
 - Named instances: one machine runs `tollgated` once per task, each under a
   name, `instance:` in the config or `--instance` on the command line, which
   wins (letters, digits and `-`; unset is `default`). Each instance keeps its
@@ -278,6 +302,42 @@ Nothing has been released yet. Everything below is on `master` and will ship as
 
 ### Changed
 
+- One accounting rule replaces grants that replaced each other
+  (`docs/design/core/tollgate-vouchers.md`, "The One Rule"). Each payer has a
+  budget, a deadline and a reserved rate. A TopUp adds its grant to the budget
+  — nothing is forfeit — moves the deadline to the later of the old one and now
+  plus its window, and replaces the reserved rate (TopUp field 3). Every tick
+  the provider draws `max(moved, reserved rate × tick)` while it carries the
+  payer, and nothing while its session is down or its enforcer is not
+  connected. A reserved rate sells time at a speed; none sells pay per use.
+  Admission control sums connected payers' reserved rates against
+  `grants.max_rate`, and lowering one is always accepted. Near the end of a
+  budget the payer is slowed so it cannot move more in a tick than is left.
+
+- The Offer carries the window range as u64 (a year fits), the smallest
+  reserved rate (field 6) and the shortest gap between TopUps (field 7). A
+  TopUp sooner than the gap is refused as too soon (reason 0x0A) before any
+  signature on it is checked. TopUpReject names the highest reserved rate the
+  provider would accept now, and its reason: the buyer waits out the gap,
+  keeps to the rate named for `cap_hold_ms`, or fits its terms to the Offer.
+
+- The buyer adds back what has drained, by its own count from what it signed
+  and measured, renews before its budget or deadline runs out, and raises its
+  reservation at once when demand outgrows it. `buying` gains `reserve`
+  (false pays per use and holds `budget` units), `budget`,
+  `max_from_payer_weight` and an optional `max_rate`; `window_ms` defaults to
+  10 s. `raise_threshold_pct` is gone, with the forfeit it guarded against.
+
+- `grants` defaults to windows of 1 s to 30 days, `min_reserved_rate: 0` and
+  `min_topup_gap_ms: 1000`; `tollgated` refuses to start with a shortest window
+  below the gap. The channel safety margin no longer depends on the window, so
+  `channels.ttl_seconds` need only be twice `safety_margin_seconds`.
+
+- Counters are named by the roles in a sale: `units_to_payer` and
+  `units_from_payer` in the enforcer protocol, `to_payer` and `from_payer` in
+  `Counters` and the control snapshot, which also reports budgets, deadlines
+  and reserved rates instead of grant expiry and bought rate.
+
 - What enforces delivery is an **enforcer**. The config section `forwarding:`
   is now `enforcer:`, its `mode` is `kind`, and `nftables` is `ip`, named for
   what it enforces: `kind: loopback | ip | fips | external`. The trait every
@@ -355,6 +415,14 @@ Nothing has been released yet. Everything below is on `master` and will ship as
   error.
 
 ### Removed
+
+- `vouchers.received_multiplier` and the Offer's received multiplier. The
+  provider's `grants.from_payer_weight` (Offer field 4, default 1, per peer in
+  `peers`) prices what the payer sends instead:
+  `moved = to_payer + from_payer × from_payer_weight`. It is unsigned, fixed
+  for a session (a change applies from the peer's next), and a buyer refuses an
+  Offer above its `buying.max_from_payer_weight` with Reject 0x01 and pays
+  nothing.
 
 - `tollgate-pricing.md`, replaced by `tollgate-hazards.md`.
 - `tollgate-bootstrap.md` and its diagrams, with bootstrap tokens.
