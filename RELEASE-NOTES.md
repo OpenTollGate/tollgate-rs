@@ -1,104 +1,112 @@
-# tollgate-rs v0.1.0
+# tollgate-rs v0.1.0-rc.1
 
-**Released**: not yet — this is the draft for the first release.
+**Tagged**: 2026-10-13, as `v0.1.0-rc.1`. This is a **release candidate** for
+v0.1.0, the first release. It is everything built so far, tested between
+real nodes, in the Docker topologies under `testing/` and on an OpenWrt
+router. If nothing serious turns up, v0.1.0 follows from it.
 
-v0.1.0 is the first release of tollgate-rs, and it is the first time two
-TollGate nodes buy and sell network capacity from each other with real ecash
-at stake. A node runs its own Cashu mint, sells vouchers against it for sats,
-and delivers exactly the rate a peer bought — enforced in the kernel's
-forwarding path, not only counted. A peer that has bought nothing still gets
-a trickle, so that it can reach a mint and buy.
+TollGate lets one device pay another for a metered resource, here network
+access. A payer prepays a budget with a provider in vouchers issued by the
+provider's own mint, one voucher per unit (one byte), over a Spilman payment
+channel. The provider carries the payer at what it paid for, and counts what
+it carried.
 
-There is no earlier release, so there is nothing to upgrade from and nothing
-to stay compatible with. The wire format is new, and it may still change
-before 1.0.
+**Before 1.0, everything may change**: the Rust APIs, the configuration keys
+and the wire format. A node on this release makes no promise to talk to one
+built from another commit. If you depend on the crates, pin the tag.
 
-## At a glance
+## What is in it
 
-### Who this is for
+The full list is under `[0.1.0-rc.1]` in [CHANGELOG.md](CHANGELOG.md). The
+main points:
 
-- **Operators with an OpenWrt router** who want to sell its uplink: install
-  the `.ipk`, name the mints you take payment in, and the router sells
-  transit to anyone who pays.
-- **Mac users** who want to buy from such a router: install the `.pkg`, name
-  the router and a `buying.demand`, top up the wallet from `tolltop` by paying
-  a Lightning invoice, and the node keeps a grant in force at that rate.
+- **One accounting rule.** Each payer has a budget, a deadline and a reserved
+  rate. A purchase adds to the budget, and nothing already paid for is lost.
+  Every second the provider draws the larger of what the payer moved and the
+  rate it reserved. Reserving a rate buys time at a speed; reserving nothing
+  is pay per use ([tollgate-vouchers.md](docs/design/core/tollgate-vouchers.md#the-one-rule)).
+- **The from-payer weight.** `grants.from_payer_weight` says what a unit the
+  payer sends costs, against one for a unit sent to it. `10` suits a line with
+  a tenth as much upload as download; `0` makes uploads free. A buyer can
+  refuse a provider whose weight is too high, before any money moves.
+- **Balance.** The provider tells the payer what is left of its budget, the
+  time to its deadline and its reserved rate.
+- **Budgets on disk.** A payer's budget is kept in
+  `budgets-<instance>.json` in the state directory. It comes back when the
+  payer reconnects or the node restarts, until its deadline.
+- **Buyer sessions choose how to pay.** `tollgate_net::client` sessions pay
+  for time at a speed or per use, and can move between the two while they
+  run.
+- **The enforcer protocol.** With `enforcer.kind: external`, a separate
+  program controls the traffic, and `tollgated` tells it who has paid for what
+  over a Unix socket
+  ([tollgate-enforcer-protocol.md](docs/design/core/tollgate-enforcer-protocol.md)).
+  The enforcer's `hello` states the identity and unit it was built for, and
+  `tollgated` refuses to start behind one that does not match. A stub
+  enforcer is included as an example.
+- **`enforcer.identity: pubkey | address`** says who a connecting peer is:
+  its key, proven by the network it came over (today only FIPS), or the
+  address it came from.
+- **Named instances.** One machine runs `tollgated` once per task, each
+  under a name (`instance:` or `--instance`), with its own runtime directory
+  and control socket, `/run/tollgate-<instance>/control.sock`. `tolltop`
+  finds every running instance and Tab moves between them.
+- **`burst`**: how fast a payer is carried above what it reserved, or when it
+  reserved nothing.
+- **A quiet link is kept alive**, and a failed first channel funding is asked
+  for again.
+- **IPv6** of a customer is gated, shaped and counted with its IPv4 on the
+  `ip` enforcer.
+- **`selling: false`** is specified for a node that only buys
+  ([tollgate-configuration.md](docs/design/core/tollgate-configuration.md#selling)),
+  but **not implemented**: `tollgated` does not accept the key yet. Use
+  `no_charge: true` per peer meanwhile.
 
-### Before you install
+## Known limits
 
-- **The money is real.** A node configured against a public mint holds bearer
-  ecash in its wallet. Treat the wallet file like cash.
-- **Every node needs a secret key**, and a buyer needs its seller's public
-  key in its config. `tollgated --show-identity` with no config prints a
-  fresh pair.
-- **Building from source needs `protoc`.**
+- **Channels are kept in memory only.** A `tollgated` that restarts loses its
+  open channels. Budgets survive; channel state does not. Settlement retries
+  are in memory too.
+- **The configuration is not reloaded while running.** The configuration
+  document lists settings that can change at runtime; today every change
+  needs a restart.
+- **A tiny reserved rate may draw nothing.** Draws are counted in whole
+  units, rounded down, so a reserved rate of a few units a second can come to
+  nothing over a short stretch.
+- **Binding conflicts are a placeholder.** When two payers claim the same
+  subject at an external enforcer, the second is refused and kept closed. The
+  full rule is still open
+  ([Conflicts](docs/design/core/tollgate-enforcer-protocol.md#conflicts)).
+- **Selling over FIPS needs a FIPS build with per-peer transit policy**
+  (`set_transit_policy`).
+- **The market is deferred.** Each mint gives its vouchers away while
+  `auto_accept` is on, the default, so service is free to any peer that can
+  reach the mint. A node that sells turns it off.
+- **Issuer trust is not zero.** A voucher is a claim on the node that issued
+  it; nothing cryptographic makes that node deliver. See
+  [issuer-risk.md](docs/design/market/issuer-risk.md).
 
-### What is in it
+## Getting it
 
-- A node, `tollgated`, that sells and buys capacity over TCP, with a Cashu
-  mint, a voucher market and a wallet built in.
-- Payment over Cashu Spilman channels, as prepaid grants: a quantity paired
-  with a window, which buys a rate.
-- Enforcement on the kernel forwarding path with nftables and `tc`, or over
-  a FIPS mesh.
-- `tolltop`, a dashboard for a running node.
-- Packages for OpenWrt and macOS.
+- **From GitHub:** `git clone https://github.com/OpenTollGate/tollgate-rs.git`
+  and `git checkout v0.1.0-rc.1`.
+- **Over Nostr, with ngit:**
+  `git clone nostr://npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr/relay.ngit.dev/tollgate-rs`.
+- **As a Rust dependency:**
+  `tollgate-net = { git = "https://github.com/OpenTollGate/tollgate-rs", tag = "v0.1.0-rc.1" }`,
+  and likewise `tollgate-core` and `tollgate-protocol`.
+- **Building** needs Rust 1.94.1 (pinned in `rust-toolchain.toml`) and
+  `protoc`. Packages for OpenWrt and macOS are built from the same source;
+  see [packaging/README.md](packaging/README.md).
 
-## How it works
+Guides for running and embedding TollGate were written after the tag and
+apply to it: [getting-tollgate.md](docs/guides/getting-tollgate.md) has the
+details above, [quickstart.md](docs/guides/quickstart.md) runs a node, and
+[embedding.md](docs/guides/embedding.md) uses the library.
 
-A grant is a quantity paired with a window, so what a buyer pays for is a
-rate. A purchase takes effect on arrival: the signed state is cumulative, so a
-`TopUp` is idempotent, a lost message costs nothing, and a buyer may draw a
-rate in the same breath as buying it. Nothing is delivered before it is paid
-for.
+## Upgrading
 
-Raising a rate mid-window forfeits what was left of the grant in force. That
-is what makes the product bandwidth rather than a stored quantity of bytes,
-and it is why the buyer only jumps early when demand rises by half again.
-
-A seller can cap the total rate it commits across all its buyers
-(`grants.max_rate`) — a node-wide ceiling, not a per-buyer one. Asked for more,
-it refuses before taking any money and names a rate it would take, and the
-buyer re-buys at that rate inside one round trip.
-
-The payment protocol never prices anything. A voucher is a claim on one byte
-of a node's capacity, redeemed one for one. What a byte costs in money is set
-in the node's market — `bytes_per_unit` per issuer it accepts — which the
-payment protocol never sees.
-
-## Known limitations
-
-**Selling over FIPS needs a FIPS build with per-peer transit policy.** The node
-sets each peer's admission and rate through FIPS's `set_transit_policy`
-control command; a FIPS daemon without it refuses the node at startup.
-
-**Issuer trust is not zero.** A voucher is a claim on the node that issued
-it. Nothing cryptographic makes a node deliver what its vouchers promise;
-what limits the exposure is policy and reputation. See
-[issuer-risk.md](docs/design/market/issuer-risk.md).
-
-**Public mints are somebody else's server.** A top-up is the one step that
-depends on a stranger's server being up. The packages default to minibits; if
-it refuses, point `wallet.mint` — and the seller's matching `market.accept`
-entry — at another.
-
-## Compatibility
-
-This is the first release. Nodes built from different commits before it make
-no promise to interoperate, and nodes on v0.1.0 make none with them.
-
-## Getting v0.1.0
-
-- **OpenWrt**: `.ipk` at the v0.1.0 release page.
-- **macOS**: `.pkg` at the v0.1.0 release page.
-- **From source**: `cargo build --release` from a checkout of the v0.1.0 tag
-  (Rust 1.94.1 per `rust-toolchain.toml`; `protoc` is a required build
-  prerequisite). See [packaging/README.md](packaging/README.md) to build the
-  packages yourself.
-
-The full changelog lives in [`CHANGELOG.md`](CHANGELOG.md). Issues and
-discussion at
-[github.com/OpenTollGate/tollgate-rs](https://github.com/OpenTollGate/tollgate-rs).
+Nothing to upgrade from: this is the first tagged release.
 
 ## Contributors
 
@@ -107,9 +115,11 @@ to this release.
 
 - [@Origami74](https://github.com/Origami74) (Arjen): the voucher design, the
   protocol, core and node, payment over Spilman channels, the market and
-  wallet, `tolltop`, and the packages.
+  wallet, the enforcer protocol, `tolltop`, and the packages.
 - [@c03rad0r](https://github.com/c03rad0r): design docs for internet exit
   over GRE and the Wi-Fi mesh architecture
   ([#6](https://github.com/OpenTollGate/tollgate-rs/pull/6)).
 - [@felixfelix-bot](https://github.com/felixfelix-bot) (Felix): Nostr CI with
   ngit-ci ([#11](https://github.com/OpenTollGate/tollgate-rs/pull/11)).
+- [@Amperstrand](https://github.com/Amperstrand): the idea of a normative CDDL schema for the protocol
+  ([#8](https://github.com/OpenTollGate/tollgate-rs/pull/8)).
