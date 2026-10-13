@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Guides for people who run or embed TollGate, in `docs/guides/`: getting it
+  (clone, build, a Cargo git dependency pinned to a tag), a quickstart (two
+  nodes on one machine, the `ip` and `fips` enforcers, an external enforcer,
+  named instances, `tolltop`) and embedding (a buyer session, an external
+  enforcer, a `Node`, the control socket). Two examples back them and are
+  built by CI: `cargo run -p tollgate-net --example buy_session` runs a buyer
+  session against a gateway in the same process, and `--example
+  read_snapshot` reads a running node's control socket. `llms.txt` at the
+  root indexes the guides and specifications for AI agents.
+
 ## [0.1.0-rc.1] - 2026-10-13
 
 The first tagged state: everything built so far, tested between real nodes,

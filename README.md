@@ -28,10 +28,18 @@ project and consumes the same `tollgate-core`.
 
 → **Start here:** [tollgate-intro.md](docs/design/core/tollgate-intro.md) — goals, architecture, payment model, security.
 
+→ **To run or embed it:** the [guides](docs/guides/) —
+[getting TollGate](docs/guides/getting-tollgate.md) (clone, build, depend on
+it from Rust), [quickstart](docs/guides/quickstart.md) (run nodes) and
+[embedding](docs/guides/embedding.md) (buy, enforce or run a node from your
+own program). AI agents: see [llms.txt](llms.txt).
+
 Two nodes buy and sell network capacity from each other end to end: each
 runs its own Cashu mint, sells vouchers against it for sats, and delivers
-exactly the rate a peer bought. Nothing has been released yet; see
-[CHANGELOG.md](CHANGELOG.md).
+exactly the rate a peer bought. The first release candidate is tagged
+`v0.1.0-rc.1`; see [RELEASE-NOTES.md](RELEASE-NOTES.md) and
+[CHANGELOG.md](CHANGELOG.md). Before 1.0, the APIs, the configuration and the
+wire format may change: pin a tag.
 
 ## Overview
 
@@ -101,6 +109,7 @@ tollgate-rs/
 │   ├── tollgate-core/         Pure logic: grants, buying, metering, access (no_std, sans-IO)
 │   └── tollgate-net/          The node (tollgated) and its dashboard (tolltop)
 ├── docs/
+│   ├── guides/                Getting, running and embedding TollGate
 │   └── design/
 │       ├── core/              Core protocol design documents (resource-agnostic)
 │       ├── market/            How vouchers are bought, sold and priced

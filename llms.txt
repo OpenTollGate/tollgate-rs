@@ -1,0 +1,43 @@
+# tollgate-rs
+
+> tollgate-rs is the Rust implementation of TollGate, a protocol for one device to pay another for a metered resource, such as network access, delivered to it. A payer prepays a budget with a provider in vouchers issued by the provider's own mint (one voucher buys one unit, such as one byte), over a Spilman payment channel; every second the provider draws from the budget the larger of what the payer moved and the rate it reserved, so reserving a rate buys time at a speed and reserving nothing is pay per use. The workspace has three crates: `tollgate-protocol` (wire format and the enforcer protocol, `no_std`), `tollgate-core` (the decisions, with no input or output of its own, `no_std`) and `tollgate-net` (the node `tollgated`, with `mintd`, `merchantd` and the dashboard `tolltop`). Version 0.1.0-rc.1 is a release candidate: APIs, configuration and wire format may change before 1.0, so pin a tag (`v0.1.0-rc.1`) when depending on it from GitHub.
+
+The design documents in `docs/design/` are the specification. The guides in `docs/guides/` are practical and link to the specification for detail. When code and a design document disagree, the tests in `tollgate-core` are written against the documents' worked examples; check which one is right before changing either.
+
+## Guides
+
+- [Getting TollGate](docs/guides/getting-tollgate.md): clone from GitHub or over Nostr with ngit, build, depend on the crates with a Cargo git dependency pinned to a tag, which crate does what
+- [Quickstart](docs/guides/quickstart.md): run two nodes on one machine, a Linux gateway with the `ip` enforcer, a FIPS node, an external enforcer; named instances; tolltop; what working looks like
+- [Embedding](docs/guides/embedding.md): a buyer session with `tollgate_net::client::run` (time at a speed or pay per use), writing an external enforcer, running a `Node`, reading the control socket snapshot
+
+## Specification
+
+- [Design index](docs/design/README.MD): reading order for all design documents
+- [Introduction](docs/design/core/tollgate-intro.md): goals, architecture, payment model, security
+- [Vouchers](docs/design/core/tollgate-vouchers.md): budgets, reserved rates, the one accounting rule, how a buyer buys
+- [Wire protocol](docs/design/core/tollgate-protocol.md): CBOR messages, Offer, TopUp, Balance
+- [Payment channels](docs/design/core/tollgate-payment-channels.md): Spilman channel lifecycle and rollover
+- [Enforcer protocol](docs/design/core/tollgate-enforcer-protocol.md): the local socket between `tollgated` and an external enforcer
+- [Configuration](docs/design/core/tollgate-configuration.md): `tollgate.yaml`, `mint.yaml`, `merchant.yaml`
+- [Daemons](docs/design/core/tollgate-daemons.md): what `tollgated`, `mintd` and `merchantd` each do and hold
+- [Access control](docs/design/core/tollgate-access-control.md): who is carried, and at what rate
+- [Hazards](docs/design/core/tollgate-hazards.md): constraints that exist because removing them reopens a known abuse
+
+## Code
+
+- [tollgate.cddl](crates/tollgate-protocol/tollgate.cddl): normative schema of the wire protocol
+- [enforcer.cddl](crates/tollgate-protocol/enforcer.cddl): normative schema of the enforcer protocol
+- [stub_enforcer.rs](crates/tollgate-protocol/examples/stub_enforcer.rs): the smallest external enforcer
+- [buy_session.rs](crates/tollgate-net/examples/buy_session.rs): a buyer session against a gateway in the same process
+- [read_snapshot.rs](crates/tollgate-net/examples/read_snapshot.rs): read a running node's control socket
+
+## Optional
+
+- [README](README.md): project overview
+- [CHANGELOG](CHANGELOG.md): what changed in each release
+- [Release notes](RELEASE-NOTES.md): v0.1.0-rc.1, what is in it and its known limits
+- [Contributing](CONTRIBUTING.md): building, testing and submitting changes
+- [Testing](testing/README.md): the Docker topologies that run nodes against each other
+- [Demo](demo/README.md): two nodes on one machine with traffic that ramps
+- [Market](docs/design/market/README.md): how vouchers are bought, sold and priced
+- [IP peering](docs/design/network-peering/peering-ip.md) and [FIPS peering](docs/design/network-peering/peering-fips.md): the built-in network enforcers
