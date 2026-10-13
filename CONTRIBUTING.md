@@ -225,6 +225,10 @@ integration suite. Your in-PR commit history doesn't matter for the
 final landed history — the maintainer rewrites the commit message at
 merge time.
 
+After a merge or a release, `master` and any new tags are pushed to both
+remotes: `origin` (the `nostr://` remote, through ngit) and `gh` (GitHub,
+which is where Cargo fetches the crates from).
+
 ## AI coding assistant policy
 
 Use of AI coding assistants (Claude Code, Copilot, Cursor, Aider, and
