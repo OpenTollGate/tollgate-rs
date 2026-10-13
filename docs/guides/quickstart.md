@@ -1,14 +1,27 @@
 # Quickstart: run TollGate
 
-This guide runs TollGate nodes and shows what a working node looks like. It
-starts with two nodes on one machine, which needs nothing but the build, and
-then covers a real gateway: one on Linux with the `ip` enforcer, one on a FIPS
-mesh, and one behind an external enforcer.
+This guide runs TollGate nodes and shows what a working node looks like.
+
+**You use a TollGate by running TollGate yourself.** The customer runs a
+TollGate node of its own, a **buying node**, and it pays the gateway
+directly over the protocol: it opens a payment channel, buys a rate, and the
+gateway carries it at that rate. A laptop, a home router, a phone app or a
+software agent can all be the customer. The captive portal and proxies of
+tollgate-suite-wrt (`proxyd`, `exitd`) exist so that people **without** such
+a client can still use a TollGate; they buy on the device's behalf.
+
+So the guide starts with the customer's side:
+[run a buying node](#use-a-tollgate-as-a-customer-run-a-buying-node), and
+[try it on one machine](#try-it-on-one-machine-a-gateway-and-a-buying-node)
+against a gateway of your own, which needs nothing but the build. Then it
+covers gateways: one on Linux with the `ip` enforcer, one on a FIPS mesh,
+and one behind an external enforcer.
 
 To get and build TollGate first, see [getting-tollgate.md](getting-tollgate.md).
 For every configuration key, see
 [tollgate-configuration.md](../design/core/tollgate-configuration.md); this
-guide uses only a few.
+guide uses only a few. To buy from inside your own program instead of
+running `tollgated`, see [embedding.md](embedding.md).
 
 > **Before 1.0, configuration keys and behavior may change between releases.**
 > The commands and files here match the tag `v0.1.0-rc.1`.
@@ -53,12 +66,97 @@ If your Cargo puts its builds elsewhere (`build.target-dir` in
 `~/.cargo/config.toml`, or `CARGO_TARGET_DIR`), use that directory instead of
 `target/`.
 
-## Two nodes on one machine
+## Use a TollGate as a customer: run a buying node
 
-Two nodes: a **gateway** that sells, and a **client** that buys from it. Both
-use the `loopback` enforcer, so the bytes bought and sold are filler on a
-local TCP connection, but the payments, the channels and the shaping are
-real. Each node runs its own `mintd` and `merchantd`.
+A buying node is `tollgated` set up to buy from one gateway and sell to
+nobody. It needs:
+
+- **a key of its own** (`identity.secret_key`);
+- **the gateway's public key and address**, under `peers`;
+- **`no_charge: true` on that gateway.** This says the node will not charge
+  the gateway, so the gateway opens no payment channel toward it, and the
+  node needs **no mint and no `mintd`**;
+- **`merchantd`**, which holds the money and supplies the vouchers the node
+  pays with. It needs no market: `market: false`;
+- **something it wants**: `buying.demand`, in bytes a second, or the
+  `--demand` flag. A node buys only while it wants something.
+
+The configuration document specifies `selling: false` for exactly this
+([Selling](../design/core/tollgate-configuration.md#selling)), one switch
+instead of `no_charge` on every peer. **It is not implemented yet:**
+`tollgated` refuses to start with a `selling` key. Use `no_charge` per peer
+until it is.
+
+`tollgate.yaml` for a customer of a gateway on the LAN:
+
+```yaml
+identity: { secret_key: "…" }          # tollgated --show-identity prints a new pair
+merchant: { socket: "/run/merchantd.sock" }
+network: { listen: "0.0.0.0:4747" }
+buying:
+  demand: 2000000                      # want 2 MB/s from the gateway
+peers:
+  "02f383c916faa702f91b5e836ed6f12d5f80fb1752ff4db28e6e77997036befd74":   # the gateway's key
+    endpoint: "192.168.1.1:4747"       # where its tollgated listens
+    no_charge: true                    # buy only: no channel toward us, no mint
+```
+
+and `merchant.yaml`:
+
+```yaml
+socket: "/run/merchantd.sock"
+market: false
+wallet: { file: "/var/lib/tollgate/wallet.sqlite", seed_file: "/var/lib/tollgate/wallet.seed" }
+```
+
+Get the gateway's key from its operator, or from the gateway itself with
+`tollgated -c /etc/tollgate/tollgate.yaml --show-identity`.
+
+**Over FIPS**, name the gateway by its key and reach it over the mesh. The
+endpoint can be its `fips0` address, or its `<npub>.fips` name where your
+FIPS node resolves those names (`tollgated` resolves an endpoint's host name
+like any program; this guide has not tried a `.fips` name):
+
+```yaml
+peers:
+  "02f383c9…":
+    endpoint: "[fde5:b78f:c4ef:a89c:82cd:b05b:8ee7:ed56]:4747"   # or "npub1….fips:4747"
+    no_charge: true
+enforcer:
+  kind: fips          # checks that the gateway is who its key says
+network:
+  listen: "[::]:4747"
+```
+
+On a mesh the buying node must run FIPS with **the same key** as
+`tollgated` (see [A FIPS node](#a-fips-node)).
+
+**Paying with real money.** In this guide the gateway's mint gives its
+vouchers away (`auto_accept`), so the customer's `merchantd` takes what it
+needs for nothing. Against a gateway that sells, `merchantd` must buy the
+gateway's vouchers with money, from the gateway's market. That step is not
+on the funding path in this release (`merchantd` "funds" only from mints
+that give vouchers away), so today a buying node works against gateways with
+`auto_accept` on.
+
+**What to check:**
+
+- `tolltop` (on the customer) shows the gateway with a **bought** budget and
+  a reserved rate, right of the divide.
+- The customer's `link` lines show `down` at the rate it reserved: its
+  demand plus a quarter (`buying.headroom_pct`, 125 by default).
+- Traffic flows at that rate. With the `ip` gateway, that is your real
+  traffic through the router.
+
+The next section does all of this on one machine, with real output.
+
+## Try it on one machine: a gateway and a buying node
+
+Two nodes: a **gateway** that sells, and a **customer** that only buys from
+it. Both use the `loopback` enforcer, so the bytes bought and sold are
+filler on a local TCP connection, but the payments, the channels and the
+shaping are real. The gateway runs `mintd` and `merchantd`; the customer runs
+`merchantd` only.
 
 All the files go in one directory. Keep its path short: Unix socket paths
 are limited to about 100 characters, and the daemons refuse a longer one
@@ -76,53 +174,46 @@ Every node needs a secret key, and a buyer names its seller by public key.
 
 ```sh
 tollgated --show-identity > gateway.id
-tollgated --show-identity > client.id
+tollgated --show-identity > customer.id
 GATEWAY_PUB=$(awk '/pubkey/ {print $2}' gateway.id)
 GATEWAY_SEC=$(awk '/secret_key/ {print $2}' gateway.id)
-CLIENT_SEC=$(awk '/secret_key/ {print $2}' client.id)
+CUSTOMER_SEC=$(awk '/secret_key/ {print $2}' customer.id)
 ```
 
 ```text
 $ cat gateway.id
-pubkey:     0353d4fac76a992b04b492c25ba81abd143424f2a71b80fe4696371d7eb358d0
+pubkey:     0331cb3e2e69d1802c79370f0deec4e60abb542dc1e7d9419e3a2c5526d47f7750
 secret_key: …
 ```
 
-### 2. Configure the mints and merchants
+### 2. Configure the gateway
 
-Each node's mint and merchant need their own ports and files. The gateway's
-mint is on 3338 for peers and 3337 for its merchant; the client's on 3348 and
-3347:
+Its mint, on 3338 for peers and 3337 for its merchant:
 
 ```sh
-for node in gateway:3338:3337:3340 client:3348:3347:3350; do
-  IFS=: read name public private market <<< "$node"
-  cat > $name-mint.yaml <<EOF
-url: "http://127.0.0.1:$public"
-seed_file: "$WORK/$name-mint.seed"
-file: "$WORK/$name-mint.sqlite"
-public: { listen: "127.0.0.1:$public" }
-private: { listen: "127.0.0.1:$private" }
-control_socket: "$WORK/$name-mint.sock"
+cat > gateway-mint.yaml <<EOF
+url: "http://127.0.0.1:3338"
+seed_file: "$WORK/gateway-mint.seed"
+file: "$WORK/gateway-mint.sqlite"
+public: { listen: "127.0.0.1:3338" }
+private: { listen: "127.0.0.1:3337" }
+control_socket: "$WORK/gateway-mint.sock"
 EOF
-  cat > $name-merchant.yaml <<EOF
-listen: "127.0.0.1:$market"
-socket: "$WORK/$name-merchant.sock"
-control: "$WORK/$name-merchant-control.sock"
-mint: { url: "http://127.0.0.1:$public", private: "http://127.0.0.1:$private" }
-wallet: { file: "$WORK/$name-wallet.sqlite", seed_file: "$WORK/$name-wallet.seed" }
-EOF
-done
 ```
 
-`mint.yaml` and `merchant.yaml` are described under
-[mintd](../design/core/tollgate-configuration.md#mintd) and
-[merchantd](../design/core/tollgate-configuration.md#merchantd). Everything
-not written here keeps its default.
+Its merchant:
 
-### 3. Configure the two nodes
+```sh
+cat > gateway-merchant.yaml <<EOF
+listen: "127.0.0.1:3340"
+socket: "$WORK/gateway-merchant.sock"
+control: "$WORK/gateway-merchant-control.sock"
+mint: { url: "http://127.0.0.1:3338", private: "http://127.0.0.1:3337" }
+wallet: { file: "$WORK/gateway-wallet.sqlite", seed_file: "$WORK/gateway-wallet.seed" }
+EOF
+```
 
-The gateway sells. It names its mint and its merchant, and gives every peer a
+And the node. It names its mint and its merchant, and gives every peer a
 small free **minimum flow** of 4096 bytes a second, enough to reach the mint
 before it has paid for anything:
 
@@ -139,24 +230,42 @@ network: { listen: "127.0.0.1:4747" }
 EOF
 ```
 
-`from_payer_weight: 0` makes what the client sends free, so only what it
-downloads is drawn from its budget. The loopback enforcer sends filler both
-ways, and this keeps the numbers easy to read.
+**`from_payer_weight: 0` is needed here, because of the loopback enforcer.**
+It makes what the customer sends free. The loopback enforcer sends filler
+bytes to every peer as fast as it is allowed to, and the customer does not
+limit a peer it does not charge, so it sends the gateway filler as fast as
+the machine can, over a gigabyte a second. With the default weight of 1 the
+gateway draws all of that from the customer's budget: in a test run, each
+1 GiB channel the customer opened was spent in about a second. A real
+gateway carries real traffic instead of filler, and needs no such setting.
 
-The client buys. It names the gateway by its public key and says where to
-reach it:
+`mint.yaml` and `merchant.yaml` are described under
+[mintd](../design/core/tollgate-configuration.md#mintd) and
+[merchantd](../design/core/tollgate-configuration.md#merchantd). Everything
+not written here keeps its default.
+
+### 3. Configure the customer
+
+A merchant with no market, and the buying node from the section above:
 
 ```sh
-cat > client.yaml <<EOF
-identity: { secret_key: "$CLIENT_SEC" }
-mint: { url: "http://127.0.0.1:3348" }
-merchant: { socket: "$WORK/client-merchant.sock" }
-access:
-  minimum_flow: { enabled: true, bytes_per_second: 4096 }
+cat > customer-merchant.yaml <<EOF
+listen: "127.0.0.1:3350"
+socket: "$WORK/customer-merchant.sock"
+control: "$WORK/customer-merchant-control.sock"
+market: false
+wallet: { file: "$WORK/customer-wallet.sqlite", seed_file: "$WORK/customer-wallet.seed" }
+EOF
+cat > customer.yaml <<EOF
+identity: { secret_key: "$CUSTOMER_SEC" }
+merchant: { socket: "$WORK/customer-merchant.sock" }
 network: { listen: "127.0.0.1:4757" }
+buying:
+  demand: 1000000
 peers:
   "$GATEWAY_PUB":
     endpoint: "127.0.0.1:4747"
+    no_charge: true
 EOF
 ```
 
@@ -165,19 +274,16 @@ filler on the next port up (4748 and 4758).
 
 ### 4. Start them
 
-The mints and merchants first, then the gateway, then the client.
-`--demand 1000000` tells the client to want 1 MB/s from its peers, which is
-what makes it buy:
+The mint and the merchants first, then the gateway, then the customer:
 
 ```sh
-for name in gateway client; do
-  mintd -c $name-mint.yaml > $name-mint.log 2>&1 &
-  merchantd -c $name-merchant.yaml > $name-merchant.log 2>&1 &
-done
+mintd -c gateway-mint.yaml > gateway-mint.log 2>&1 &
+merchantd -c gateway-merchant.yaml > gateway-merchant.log 2>&1 &
+merchantd -c customer-merchant.yaml > customer-merchant.log 2>&1 &
 sleep 3
 tollgated -c gateway.yaml --instance gateway > gateway.log 2>&1 &
 sleep 1
-tollgated -c client.yaml --instance client --demand 1000000 > client.log 2>&1 &
+tollgated -c customer.yaml --instance customer > customer.log 2>&1 &
 ```
 
 `--instance` gives each `tollgated` a name, so the two do not share a control
@@ -185,148 +291,156 @@ socket (see [Named instances](#named-instances)).
 
 ### 5. What working looks like
 
-Every log line starts with the instance's name. At start, the gateway says
-where everything is:
+Every log line starts with the instance's name. At start, a node says where
+everything is:
 
 ```text
-[gateway] INFO tollgated: starting instance=gateway runtime_dir=/var/folders/…/T/tollgate-gateway pubkey=0353d4fa…
+[gateway] INFO tollgated: starting instance=gateway runtime_dir=/var/folders/…/T/tollgate-gateway pubkey=0331cb3e…
 [gateway] INFO tollgated: mint at url=http://127.0.0.1:3338 local=http://127.0.0.1:3338
 [gateway] INFO tollgated: funding from merchant=/tmp/tollgate-try/gateway-merchant.sock
 [gateway] INFO tollgated: loopback data plane listen=127.0.0.1:4748
 [gateway] INFO tollgated: payers' budgets kept at budgets=/tmp/tollgate-budgets-gateway.json
 [gateway] INFO tollgated: control socket control=/var/folders/…/T/tollgate-gateway/control.sock
-[gateway] INFO tollgate_net::node: node listening pubkey=0353d4fa.. control=127.0.0.1:4747 identity=address
+[gateway] INFO tollgate_net::node: node listening pubkey=0331cb3e.. control=127.0.0.1:4747 identity=address
 ```
+
+The customer logs the same lines, including a `mint at` line with the
+default URL, `http://127.0.0.1:3338`. It runs no mint and never uses it: the
+line only reports the default.
 
 Then, once a second, a `link` line per peer. `shaped` is the rate this node
 carries the peer at, `down` and `up` what it received from and sent to the
-peer in the last second, in bytes. On the client:
+peer in the last second, in bytes. On the customer:
 
 ```text
-[client] INFO tollgated: link peer=0353d4fa.. shaped=4096 demand=0 down=3846 up=3988
-[client] INFO tollgated: link peer=0353d4fa.. shaped=5100 demand=1000000 down=4080 up=5129
-[client] INFO tollgated: link peer=0353d4fa.. shaped=1531862 demand=1000000 down=813928 up=311621
-[client] INFO tollgated: link peer=0353d4fa.. shaped=1531862 demand=1000000 down=1250000 up=1531856
-[client] INFO tollgated: link peer=0353d4fa.. shaped=1531862 demand=1000000 down=1250000 up=1530323
+[customer] INFO tollgated: wanting demand=1000000
+[customer] INFO tollgated: link peer=0331cb3e.. shaped=18446744073709551615 demand=0 down=3877 up=2111045632
+[customer] INFO tollgated: link peer=0331cb3e.. shaped=18446744073709551615 demand=1000000 down=4089 up=1710948352
+[customer] INFO tollgated: link peer=0331cb3e.. shaped=18446744073709551615 demand=1000000 down=1124154 up=1954545664
+[customer] INFO tollgated: link peer=0331cb3e.. shaped=18446744073709551615 demand=1000000 down=1250000 up=2085355520
+[customer] INFO tollgated: link peer=0331cb3e.. shaped=18446744073709551615 demand=1000000 down=1251250 up=2167537664
 ```
 
 Read it like this:
 
-1. **Before paying, the client gets the minimum flow**: about 4 KB/s down.
-   During these seconds the client's merchant mints vouchers at the gateway's
-   mint, and the client opens a payment channel with them.
-2. **Then it buys.** It wants 1 MB/s and reserves a quarter more
-   (`buying.headroom_pct`, 125 by default), so `down` jumps to 1 250 000 bytes
-   a second, exactly the rate it reserved. The gateway shapes it to that.
-3. **It keeps buying.** A little before its budget runs out, it buys again
-   and adds back what was drawn. Nothing already paid for is lost.
+1. **Before paying, the customer gets the minimum flow**: about 4 KB/s
+   `down`. During these seconds its merchant gets vouchers from the gateway's
+   mint and the customer opens a payment channel with them. Its merchant
+   logs it:
+
+   ```text
+   INFO tollgate_net::merchant: funded a channel mint=http://127.0.0.1:3338 unit=byte amount=1073741824
+   ```
+
+2. **Then it buys.** It wants 1 MB/s and reserves a quarter more, so `down`
+   jumps to 1 250 000 bytes a second, exactly the rate it reserved.
+3. **It keeps buying.** A little before its budget runs out it buys again,
+   and adds back only what was drawn.
+
+`shaped=18446744073709551615` is the largest 64-bit number: the customer
+does not charge the gateway, so it does not limit it. The huge `up` is the
+loopback filler described under step 2; it costs CPU, not money.
 
 The gateway's side of the same seconds:
 
 ```text
-[gateway] INFO tollgated: link peer=03df9622.. shaped=4096 demand=0 down=5118 up=4076
-[gateway] INFO tollgated: link peer=03df9622.. shaped=1250000 demand=0 down=235288 up=752882
-[gateway] INFO tollgated: link peer=03df9622.. shaped=1250000 demand=0 down=1530325 up=1248750
-```
-
-Both nodes sell here, so the gateway also buys from the client: on the
-loopback enforcer, what a node receives counts as something it wants. That is
-the client's `shaped` above, the rate the client carries the gateway at. A
-node that should only buy says `no_charge: true` on each peer it buys from.
-
-`merchantd`'s log shows each channel it funds:
-
-```text
-INFO tollgate_net::merchant: funded a channel mint=http://127.0.0.1:3338 unit=byte amount=1073741824
-```
-
-and the gateway's log shows a settled channel's vouchers being destroyed at
-its own mint, once delivered:
-
-```text
-[gateway] INFO tollgate_net::channel::spilman: burned what a channel paid channel="9b6bbb6c…" mint=http://127.0.0.1:3338 amount=1073741824
+[gateway] INFO tollgated: link peer=02f5cff3.. shaped=4096 demand=0 down=1889009664 up=4081
+[gateway] INFO tollgated: link peer=02f5cff3.. shaped=1250000 demand=0 down=1780350976 up=999766
+[gateway] INFO tollgated: link peer=02f5cff3.. shaped=1250000 demand=0 down=2289631232 up=1252500
+[gateway] INFO tollgated: link peer=02f5cff3.. shaped=1250000 demand=0 down=1926676324 up=1247500
 ```
 
 ### 6. Watch it with tolltop
 
-In another terminal:
+In another terminal, on the customer:
 
 ```sh
-tolltop --instance client
+tolltop --instance customer
 ```
 
 The table has one row per peer. Left of the divide is what the peer bought
-from this node, right is what this node bought from the peer:
+from this node (nothing: the customer sells nothing), right is what this
+node bought from the peer:
 
 ```text
 ┌ peers — left of the divide is what they bought from us, right is what we bought from them ──────────────────────────────────┐
 │  peer     access  speed      budget     ends    reserved     in            bought     ends    reserved     want         w  out…│
-│▶ 03df9622 active  1.19 MiB/s 9.57 MiB   8s      1.19 MiB/s   d3e6b82e 7%   14.40 MiB  9s      1.52 MiB/s   —            1  b2b0…│
+│▶ 0331cb3e free    1717986918 empty      —       —            —             1.66 MiB   1s      1.19 MiB/s   976.6 KiB/s  0  db8d…│
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌ tolltop — instance gateway (2/2) ───────────────────────────────────────────────────────────────────────────────────────────┐
-│0353d4fa  selling byte  up 1m00s  1 peer(s)   ↑↓ selects   enter opens   tab next instance (or i)   q quits                  │
+┌ tolltop — instance customer (1/2) ──────────────────────────────────────────────────────────────────────────────────────────┐
+│02f5cff3  selling byte  up 31s  1 peer(s)   ↑↓ selects   enter opens   tab next instance (or i)   q quits                    │
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-(Above is the gateway's view, `--instance gateway`.) **Tab** (or `i`) moves
-to the next running instance. **Enter** opens a peer's detail, here the
-client's view of the gateway:
+**Enter** opens the gateway's detail. The part that matters to a customer is
+at the bottom:
 
 ```text
-┌ peer 0353d4fa ───────────────────────────────────────────┐
-│access              active   phase established            │
-│                                                          │
-│what this peer bought from us                             │
-│budget              5.55 MiB                              │
-│deadline            in 7s                                 │
-│reserved rate       1.48 MiB/s                            │
-│from-payer weight   1x on what they send us               │
-│speed we allow      1.48 MiB/s                            │
-│authorized          141.96 MiB                            │
-│consumed            136.41 MiB                            │
-│channels on                                               │
-│  b2b05617 13% — 141.96 MiB of 1.00 GiB signed            │
-│                                                          │
-│what we bought from this peer                             │
-│terms               accepted                              │
-│budget, our count   7.65 MiB                              │
+│what we bought from this peer                                        │
+│terms               accepted                                         │
+│budget, our count   7.28 MiB                                         │
+│deadline            in 6s                                            │
+│reserved rate       1.19 MiB/s                                       │
+│their weight        0x on what we send them                          │
+│their last Balance  12.06 MiB left, deadline in 10s, reserved 1.19   │
+│MiB/s — said 3s ago                                                  │
+│demand we observe   976.6 KiB/s                                      │
+│channel we pay on   db8de454 4% — 43.56 MiB of 1.00 GiB signed       │
 ```
 
-`minttop --socket $WORK/gateway-mint.sock` and
-`merchanttop --socket $WORK/gateway-merchant-control.sock` show the mint and
-the merchant.
+Some of what `tolltop` shows for a buying node is not right yet:
+
+- the status line says `selling`, though the node sells nothing;
+- the `speed` column shows `1717986918` and the detail `17179869184.00
+  GiB/s` for the gateway: the "no limit" value printed as a number;
+- the customer's session with the gateway stays in phase `establishing`
+  (the gateway's view says `established`), because no channel is opened
+  toward the customer. Buying is not affected.
+
+**Tab** moves to the gateway (`tolltop --instance gateway`), whose row shows
+what the customer bought, left of the divide:
+
+```text
+│  peer     access  speed      budget     ends    reserved     in            bought     ends    reserved     want         w  out…│
+│▶ 02f5cff3 active  1.19 MiB/s 5.37 MiB   5s      1.19 MiB/s   db8de454 5%   empty      —       —            —            1  —   …│
+```
 
 The same numbers are on the control socket as JSON, for scripts. The
 `read_snapshot` example reads it (see
 [embedding.md](embedding.md#4-the-control-socket-and-the-snapshot)):
 
 ```text
-$ cargo run -p tollgate-net --example read_snapshot -- --instance gateway
-node 0353d4fac76a992b  unit byte  mint http://127.0.0.1:3338  up 41s  (/var/folders/…/T/tollgate-gateway/control.sock)
-peer 03df962210869faa  established  access active
-  sold:   budget 11267500 byte, 9s left, reserved 1250000/s, carried at 1250000/s
-  bought: budget 13004151 byte, 7s left, reserved 2083332/s
-  balance from the peer: 20076959 byte, 10s left, reserved 2083332/s (2s ago)
-  moved:  44503053 to the peer, 64602482 from it
+$ cargo run -p tollgate-net --example read_snapshot -- --instance customer
+node 02f5cff3b4bca87d  unit byte  mint http://127.0.0.1:3338  up 36s  (/var/folders/…/T/tollgate-customer/control.sock)
+peer 0331cb3e2e69d180  establishing  access free
+  sold:   budget 0 byte, 0s left, reserved 0/s, carried at 18446744073709551615/s
+  bought: budget 6565000 byte, 5s left, reserved 1250000/s
+  balance from the peer: 12641250 byte, 10s left, reserved 1250000/s (4s ago)
+  moved:  70502514688 to the peer, 38263550 from it
 ```
+
+`minttop --socket $WORK/gateway-mint.sock` and
+`merchanttop --socket $WORK/gateway-merchant-control.sock` show the
+gateway's mint and merchant.
 
 ### 7. Stop
 
 ```sh
-kill %1 %2 %3 %4 %5 %6      # or: pkill tollgated; pkill mintd; pkill merchantd
+pkill -f 'instance customer'; pkill -f 'instance gateway'; pkill mintd; pkill merchantd
 ```
 
-A payer's budget is kept on disk (`budgets-<instance>.json`, in the state
+A payer's budget is kept on disk (`budgets-<instance>.json` in the state
 directory: the first of `/var/lib/tollgate`, `/usr/local/var/lib/tollgate`
-and `$XDG_DATA_HOME/tollgate` it can use, else `/tmp`). Start the gateway again before the deadline, and the
-client gets back what it had left.
+and `$XDG_DATA_HOME/tollgate` it can use, else `/tmp`). Start the gateway
+again before the deadline, and the customer gets back what it had left.
 
 ### The demo script
 
-[`demo/run.sh`](../../demo/run.sh) runs the same two nodes with traffic that
-ramps up, and prints one line a second. It also runs a sat mint in Docker, so
-it needs Docker, and it looks for the programs in `./target/release`. See
-[demo/README.md](../../demo/README.md) for how to read its output.
+[`demo/run.sh`](../../demo/run.sh) runs two nodes that both sell, with
+traffic that ramps up, and prints one line a second. It also runs a sat mint
+in Docker, so it needs Docker, and it looks for the programs in
+`./target/release`. See [demo/README.md](../../demo/README.md) for how to
+read its output.
 
 ## Named instances
 
@@ -368,7 +482,7 @@ and `tollgated` tells it who has paid for what
 The repository has a **stub enforcer** that controls nothing and logs what it
 is told; with `--carry`, it pretends each open payer used its full rate.
 
-Using the two nodes above, stop the gateway's `tollgated` and add an
+Using the gateway and customer above, stop the gateway's `tollgated` and add an
 `enforcer` block to a copy of its config:
 
 ```sh
@@ -402,7 +516,7 @@ tollgated -c gateway-ext.yaml --instance gateway > gateway-ext.log 2>&1 &
 [gateway] INFO tollgated: enforcing through the external enforcer socket=/tmp/tollgate-try/enforcer.sock identity=address
 ```
 
-The stub logs what it is told. The client is bound by its address
+The stub logs what it is told. The customer is bound by its address
 (`127.0.0.1`, written as IPv6), starts closed (`rate: Some(0)`), gets the
 minimum flow, then the rate it paid for:
 
@@ -414,7 +528,7 @@ stub_enforcer: <- Set(Set { peer: 03df9622.., rate: Some(4096) })
 stub_enforcer: <- Set(Set { peer: 03df9622.., rate: Some(1250000) })
 ```
 
-Here the client came back to the budget it had left: the gateway kept it on
+Here the customer came back to the budget it had left: the gateway kept it on
 disk across its restart.
 
 **An enforcer built for something else stops the node.** Start the stub with
@@ -527,6 +641,13 @@ At start, the gateway says it reached FIPS:
 ```text
 [fips] INFO tollgated: setting transit policy on the FIPS node socket=/run/fips/control.sock allowance=4096
 ```
+
+**Buying a FIPS exit.** tollgate-suite-wrt has a FIPS exit: a router that
+sells a way out of the mesh to the internet. Native clients, buying nodes on
+the mesh, buy from it through its own `tollgated` instance,
+`tollgate-fips-exit`, which runs behind `exitd` as an external enforcer. A
+buying node points at that instance like any other gateway. **This path has
+not been tested end to end yet.**
 
 `enforcer.fips_socket` moves the FIPS control socket if it is not where FIPS
 puts it by default. The `testing/fips` Docker topology runs three such nodes

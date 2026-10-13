@@ -26,6 +26,17 @@ This repo contains:
 A constrained-device variant (`tollgate-net-esp32`) lives in a separate
 project and consumes the same `tollgate-core`.
 
+**How a TollGate is meant to be used:** the customer runs a TollGate node
+of its own, and that node pays the gateway directly, over the protocol. A
+laptop, a phone app, a router or a software agent that wants connectivity
+runs `tollgated` set to buy, or embeds a buyer session from `tollgate-net`.
+The captive portal and the proxies in tollgate-suite-wrt
+(`nostr://npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr/relay.ngit.dev/tollgate-suite-wrt`:
+`proxyd` and `exitd`)
+exist only so that people *without* such a client can still use a TollGate:
+they buy on the device's behalf. See
+[running a buying node](docs/guides/quickstart.md#use-a-tollgate-as-a-customer-run-a-buying-node).
+
 → **Start here:** [tollgate-intro.md](docs/design/core/tollgate-intro.md) — goals, architecture, payment model, security.
 
 → **To run or embed it:** the [guides](docs/guides/) —

@@ -1,7 +1,13 @@
 # Getting TollGate
 
 This guide says how to get the TollGate source, how to build it, and how to
-use its crates from your own Rust project. To run a node once you have it, see
+use its crates from your own Rust project.
+
+**You use a TollGate by running TollGate yourself.** A customer runs a node
+of its own, or a program with a buyer session in it, and that pays the
+gateway directly over the protocol. The same build serves both ends: a
+gateway that sells and a customer that buys. (The captive portal in
+tollgate-suite-wrt is for people who cannot run a client.) To run a node once you have it, see
 [quickstart.md](quickstart.md). To build on the library, see
 [embedding.md](embedding.md).
 
@@ -120,8 +126,8 @@ Take only what you need:
 - **Running TollGate's decisions on your own hardware or runtime**, such as a
   microcontroller? `tollgate-core` and `tollgate-protocol`. You write the part
   that does the input and output.
-- **Running a node, or a buyer session, inside your program?**
-  `tollgate-net`. It brings Tokio, the mint and wallet libraries, and their
+- **Buying connectivity from your app or agent, or running a node inside
+  your program?** `tollgate-net`. Its `client` module is a buyer session. It brings Tokio, the mint and wallet libraries, and their
   dependencies, so the first build takes a while and needs `protoc`.
 
 Cargo fetches Git dependencies over HTTPS from GitHub. It cannot fetch a
@@ -144,9 +150,9 @@ is the oldest checked.
 
 ## Where next
 
-- [quickstart.md](quickstart.md): run two nodes on one machine, then a real
-  gateway.
-- [embedding.md](embedding.md): buy from your own program, write an
-  enforcer, run a node, read its state.
+- [quickstart.md](quickstart.md): run a gateway and a buying node on one
+  machine, then buy from a real gateway.
+- [embedding.md](embedding.md): embed a buyer in your app or agent, write
+  an enforcer, run a node, read its state.
 - [tollgate-intro.md](../design/core/tollgate-intro.md): what TollGate is and
   how it works, the start of the design documents.

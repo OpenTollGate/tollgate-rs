@@ -1,10 +1,22 @@
 # Embedding TollGate
 
-This guide is for people who build TollGate into their own programs. It
-covers four things:
+This guide is for people who build TollGate into their own programs.
 
-1. [A buyer session](#1-a-buyer-session): buy access from a gateway on
-   someone's behalf, with `tollgate_net::client::run`.
+**If your software wants connectivity, embed a buyer.** An app, a daemon or
+an AI agent that needs network access from a TollGate runs a buyer session,
+`tollgate_net::client::run`, and pays the gateway directly over the
+protocol. That is the main way to use a TollGate from software, and part 1
+covers it. The captive portal of tollgate-suite-wrt is the fallback for
+devices that cannot run a client, such as a phone with nothing installed: the
+router's `proxyd` runs a buyer session on the phone's behalf. (The suite's
+FIPS exit sells to native clients on the mesh through its own
+`tollgate-fips-exit` instance; that path has not been tested end to end
+yet.)
+
+The guide covers four things:
+
+1. [Embed a buyer in your app or agent](#1-embed-a-buyer-in-your-app-or-agent):
+   buy access from a gateway with `tollgate_net::client::run`.
 2. [An external enforcer](#2-an-external-enforcer): a program of your own
    that controls traffic for `tollgated`.
 3. [A whole node](#3-a-whole-node): run `Node` inside your program.
@@ -44,14 +56,23 @@ To add the crates to your project, see
 - An **enforcer** is what lets traffic through, slows it to the rate paid
   for, and counts it.
 
-## 1. A buyer session
+## 1. Embed a buyer in your app or agent
 
 **Example:** [`crates/tollgate-net/examples/buy_session.rs`](../../crates/tollgate-net/examples/buy_session.rs)
 
-`tollgate_net::client::run` runs one buyer session: a small node that dials
-one gateway, buys from it, and never sells. It is for a program that buys on
-a device's behalf. For example, a router can buy for a phone that runs no
-TollGate software.
+`tollgate_net::client::run` runs one buyer session: a small node inside your
+program that dials one gateway, buys from it, and never sells. It needs no
+mint and no `merchantd`: you hand it the vouchers to pay with. Two kinds of
+program use it:
+
+- **Software that buys for itself**: an app, a daemon or an agent on a
+  machine that reaches the internet through a TollGate gateway. The session
+  connects from the machine's own address, and under the gateway's usual
+  `enforcer.identity: address` that address is what the gateway lets through
+  at the rate bought.
+- **A proxy that buys for a device without a client**: `proxyd` in
+  tollgate-suite-wrt runs one session per phone on the LAN, with a
+  `connector` so each session's connection comes from the phone's address.
 
 ```rust
 use tollgate_net::client::{self, Buying, ClientSpec, Moved};
@@ -110,7 +131,8 @@ other. Moving to a speed reserves it at once. Moving to pay per use ends the
 reservation at once. Nothing already paid for is lost either way.
 
 **For pay per use, tell the session what moved.** The session carries none of
-the device's traffic, so it cannot count it. Send it a `Moved` with the
+the device's traffic, so it cannot count it. A program buying for itself can
+count its own bytes, or read the machine's interface counters. Send it a `Moved` with the
 **running totals** the gateway carried for the device: `to_device` (download)
 and `from_device` (upload). The session uses the change between reports to
 know when to buy again. A total lower than the last one is read as counting

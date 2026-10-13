@@ -11,6 +11,15 @@ provider's own mint, one voucher per unit (one byte), over a Spilman payment
 channel. The provider carries the payer at what it paid for, and counts what
 it carried.
 
+**You use a TollGate by running TollGate yourself.** The customer runs a node
+of its own, or a program with a buyer session in it, and that pays the
+gateway directly over the protocol. The captive portal and proxies of
+tollgate-suite-wrt (`proxyd`, `exitd`) are there for people without such a
+client. A node that only buys works today, with `no_charge: true` on the
+gateway it buys from, against a gateway whose mint gives its vouchers away;
+see
+[the quickstart](docs/guides/quickstart.md#use-a-tollgate-as-a-customer-run-a-buying-node).
+
 **Before 1.0, everything may change**: the Rust APIs, the configuration keys
 and the wire format. A node on this release makes no promise to talk to one
 built from another commit. If you depend on the crates, pin the tag.
@@ -79,6 +88,14 @@ main points:
   ([Conflicts](docs/design/core/tollgate-enforcer-protocol.md#conflicts)).
 - **Selling over FIPS needs a FIPS build with per-peer transit policy**
   (`set_transit_policy`).
+- **The FIPS exit is untested end to end.** tollgate-suite-wrt's FIPS exit
+  sells to native clients through its `tollgate-fips-exit` instance, behind
+  `exitd` as an external enforcer; a native client buying from it has not yet
+  been tested end to end.
+- **A buying node cannot yet pay a gateway that sells for money.**
+  `merchantd` funds channels only from mints that give their vouchers away;
+  buying a gateway's vouchers from its market is not on the funding path
+  yet.
 - **The market is deferred.** Each mint gives its vouchers away while
   `auto_accept` is on, the default, so service is free to any peer that can
   reach the mint. A node that sells turns it off.

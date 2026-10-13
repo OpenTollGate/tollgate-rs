@@ -2,13 +2,15 @@
 
 > tollgate-rs is the Rust implementation of TollGate, a protocol for one device to pay another for a metered resource, such as network access, delivered to it. A payer prepays a budget with a provider in vouchers issued by the provider's own mint (one voucher buys one unit, such as one byte), over a Spilman payment channel; every second the provider draws from the budget the larger of what the payer moved and the rate it reserved, so reserving a rate buys time at a speed and reserving nothing is pay per use. The workspace has three crates: `tollgate-protocol` (wire format and the enforcer protocol, `no_std`), `tollgate-core` (the decisions, with no input or output of its own, `no_std`) and `tollgate-net` (the node `tollgated`, with `mintd`, `merchantd` and the dashboard `tolltop`). Version 0.1.0-rc.1 is a release candidate: APIs, configuration and wire format may change before 1.0, so pin a tag (`v0.1.0-rc.1`) when depending on it from GitHub.
 
+The intended way to use a TollGate: the customer runs a TollGate node of its own (`tollgated` configured to buy, or a buyer session embedded with `tollgate_net::client::run`) that pays the gateway directly over the protocol. The captive portal and proxies in tollgate-suite-wrt (`proxyd`, `exitd`) exist only so that devices without a TollGate client can still buy. Software that wants connectivity, including AI agents, should embed a buyer rather than go through a portal. A node that only buys sets `no_charge: true` on the gateway it buys from; `selling: false` is specified but not implemented yet. The suite's FIPS exit sells to native clients through its `tollgate-fips-exit` instance; that path has not been tested end to end.
+
 The design documents in `docs/design/` are the specification. The guides in `docs/guides/` are practical and link to the specification for detail. When code and a design document disagree, the tests in `tollgate-core` are written against the documents' worked examples; check which one is right before changing either.
 
 ## Guides
 
 - [Getting TollGate](docs/guides/getting-tollgate.md): clone from GitHub or over Nostr with ngit, build, depend on the crates with a Cargo git dependency pinned to a tag, which crate does what
-- [Quickstart](docs/guides/quickstart.md): run two nodes on one machine, a Linux gateway with the `ip` enforcer, a FIPS node, an external enforcer; named instances; tolltop; what working looks like
-- [Embedding](docs/guides/embedding.md): a buyer session with `tollgate_net::client::run` (time at a speed or pay per use), writing an external enforcer, running a `Node`, reading the control socket snapshot
+- [Quickstart](docs/guides/quickstart.md): run a gateway and a buying node (the customer) on one machine; buy from a real gateway by address or over FIPS; a Linux gateway with the `ip` enforcer, a FIPS node, an external enforcer; named instances; tolltop; what working looks like
+- [Embedding](docs/guides/embedding.md): embed a buyer in an app or agent with `tollgate_net::client::run` (time at a speed or pay per use), writing an external enforcer, running a `Node`, reading the control socket snapshot
 
 ## Specification
 
