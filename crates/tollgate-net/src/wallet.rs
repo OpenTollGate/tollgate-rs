@@ -23,6 +23,14 @@
 //! cannot buy from anyone, where a node short of one upstream's vouchers is
 //! only short with that upstream.
 //!
+//! # Taking money out
+//!
+//! What the node holds is the operator's, and the operator takes it out in
+//! one of two ways: as a token ([`Wallet::export`]), which any Cashu wallet
+//! redeems, or paid over Lightning by the mint that holds it
+//! ([`Wallet::pay_out`]) to an invoice or a Lightning address. `merchantd`
+//! can also do the second by itself, above a threshold: a sweep.
+//!
 //! # Why the node holds anything at all
 //!
 //! It could buy money for each purchase and hold nothing. That is what it did
@@ -31,7 +39,7 @@
 //! and the money it *takes* has nowhere to go. A balance answers both. Buying
 //! becomes local, and payment received is payment kept.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -39,7 +47,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow, bail};
 use cdk::amount::SplitTarget;
 use cdk::nuts::nut00::KnownMethod;
-use cdk::nuts::{CurrencyUnit, MintQuoteState, PaymentMethod, Token};
+use cdk::nuts::{CurrencyUnit, MeltQuoteState, MintQuoteState, PaymentMethod, State, Token};
 use cdk::wallet::{ReceiveOptions, SendOptions, Wallet as CdkWallet};
 use cdk_common::database::WalletDatabase;
 use serde::{Deserialize, Serialize};
@@ -293,6 +301,14 @@ impl Wallet {
     /// from anybody, where a node short of one upstream's vouchers is only
     /// short with that upstream.
     pub async fn balances(&self) -> Vec<Holding> {
+        // Every issuer the database holds paper from, not only those touched
+        // since this process started: after a restart, money held at a mint
+        // nothing has used yet is still money.
+        for (mint, unit) in self.held_issuers().await {
+            if let Err(e) = self.wallet_for(&mint, &unit).await {
+                debug!(%mint, %unit, error = %format!("{e:#}"), "cannot open a held issuer's wallet");
+            }
+        }
         let wallets: Vec<((String, String), CdkWallet)> = self
             .wallets
             .lock()
@@ -317,6 +333,24 @@ impl Wallet {
 
         holdings.sort_by_key(|h| (h.kind != Kind::Money, h.unit.clone(), h.mint.clone()));
         holdings
+    }
+
+    /// Every (mint, unit) the database holds unspent paper of.
+    async fn held_issuers(&self) -> BTreeSet<(String, String)> {
+        match self
+            .store
+            .get_proofs(None, None, Some(vec![State::Unspent]), None)
+            .await
+        {
+            Ok(proofs) => proofs
+                .into_iter()
+                .map(|p| (normalise(&p.mint_url.to_string()), p.unit.to_string()))
+                .collect(),
+            Err(e) => {
+                debug!(error = %e, "cannot list what the wallet holds");
+                BTreeSet::new()
+            }
+        }
     }
 
     /// How much of one issuer's paper is held.
@@ -559,6 +593,150 @@ impl Wallet {
         }
         Ok(claimed)
     }
+
+    /// Take one issuer's paper out as a token: `amount` of it, or with `None`
+    /// everything held. The mint's swap fee comes out of what is held, so a
+    /// token for everything is worth everything less that fee.
+    ///
+    /// The token is money: whoever holds the string can redeem it.
+    pub async fn export(&self, mint: &str, unit: &str, amount: Option<u64>) -> Result<Sent> {
+        let wallet = self.wallet_for(mint, unit).await?;
+        let held: u64 = wallet.total_balance().await.unwrap_or_default().into();
+        if held == 0 {
+            bail!("nothing of {mint}'s {unit} is held");
+        }
+        let want = amount.unwrap_or(held);
+        if want == 0 {
+            bail!("exporting nothing is not a token");
+        }
+        if want > held {
+            bail!("{want} {unit} asked for, {held} held at {mint}");
+        }
+        let sent = send_within(&wallet, want, held)
+            .await
+            .with_context(|| format!("take {want} {unit} out of {mint} as a token"))?;
+        if amount.is_some() && sent.worth != want {
+            bail!(
+                "{want} {unit} and the mint's fee come to more than the {held} held; at most {} can go",
+                sent.worth
+            );
+        }
+        info!(%mint, %unit, worth = sent.worth, fee = sent.fee, "exported as a token");
+        Ok(sent)
+    }
+
+    /// Pay one issuer's money out over Lightning, by having the mint that
+    /// issued it pay `to`.
+    ///
+    /// [`Size::Exactly`] pays that much, its fees on top; [`Size::Within`]
+    /// pays as much as fits in a budget with the fees, which is how the whole
+    /// of a balance is paid out. Paying a Lightning address asks it for an
+    /// invoice of the size wanted, so only a mint that deals in sats (or
+    /// msats) can pay one; an invoice says its own amount, and `Within` only
+    /// checks that it fits.
+    ///
+    /// The mint reserves a fee for routing and returns what it did not use as
+    /// change, so what leaves the wallet is the amount, the fee actually paid
+    /// and the input fee.
+    pub async fn pay_out(
+        &self,
+        mint: &str,
+        unit: &str,
+        to: &Destination,
+        size: Size,
+    ) -> Result<Payout> {
+        let wallet = self.wallet_for(mint, unit).await?;
+        let held: u64 = wallet.total_balance().await.unwrap_or_default().into();
+        let budget = match size {
+            Size::Exactly(0) => bail!("paying out nothing is not a payment"),
+            Size::Exactly(_) => held,
+            Size::Within(budget) => budget.min(held),
+        };
+        if budget == 0 {
+            bail!("nothing of {mint}'s {unit} is held to pay out");
+        }
+
+        let finalized = match to {
+            Destination::Invoice(invoice) => {
+                let quote = wallet
+                    .melt_quote(
+                        PaymentMethod::Known(KnownMethod::Bolt11),
+                        invoice,
+                        None,
+                        None,
+                    )
+                    .await
+                    .map_err(|e| anyhow!("ask {mint} to pay the invoice: {e}"))?;
+                if let Size::Exactly(amount) = size
+                    && u64::from(quote.amount) != amount
+                {
+                    bail!("the invoice is for {}, not {amount}", quote.amount);
+                }
+                melt_within(&wallet, &quote, budget).await?
+            }
+            Destination::Address(address) => {
+                let msat_per_unit = match unit {
+                    "sat" => 1000,
+                    "msat" => 1,
+                    _ => bail!("{mint} deals in {unit}; a Lightning address is paid in sats"),
+                };
+                let mut want = match size {
+                    Size::Exactly(amount) => amount,
+                    Size::Within(_) => budget,
+                };
+                let mut last = anyhow!("nothing to pay");
+                let mut done = None;
+                for _ in 0..8 {
+                    if want == 0 {
+                        break;
+                    }
+                    let quote = wallet
+                        .melt_lightning_address_quote(address, want.saturating_mul(msat_per_unit))
+                        .await
+                        .map_err(|e| anyhow!("ask {mint} to pay {address} {want} {unit}: {e}"))?;
+                    let need = u64::from(quote.amount).saturating_add(quote.fee_reserve.into());
+                    if need > budget {
+                        if matches!(size, Size::Exactly(_)) {
+                            bail!(
+                                "{want} {unit} and a fee reserve of {} come to more than the {budget} held",
+                                quote.fee_reserve
+                            );
+                        }
+                        last = anyhow!("{want} {unit} and its fee reserve come to {need}");
+                        want = want.saturating_sub((need - budget).max(1));
+                        continue;
+                    }
+                    match melt_within(&wallet, &quote, budget).await {
+                        Ok(finalized) => {
+                            done = Some(finalized);
+                            break;
+                        }
+                        Err(e) if matches!(size, Size::Within(_)) => {
+                            // Usually the input fee tipping it over: a little less.
+                            last = e;
+                            want = want.saturating_sub((want / 100).max(1));
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                done.ok_or(last)?
+            }
+        };
+
+        let state = finalized.state();
+        if state != MeltQuoteState::Paid {
+            bail!("{mint} did not pay: the payment is {state}");
+        }
+        let payout = Payout {
+            mint: normalise(mint),
+            unit: unit.to_string(),
+            paid: finalized.amount().into(),
+            fee: finalized.fee_paid().into(),
+            preimage: finalized.payment_proof().map(str::to_owned),
+        };
+        info!(mint = %payout.mint, unit = %payout.unit, paid = payout.paid, fee = payout.fee, to = %to, "paid out");
+        Ok(payout)
+    }
 }
 
 /// How long to leave between claim attempts against one mint.
@@ -589,6 +767,102 @@ impl std::fmt::Debug for Sent {
             .field("fee", &self.fee)
             .finish_non_exhaustive()
     }
+}
+
+/// Where a payout goes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Destination {
+    /// A BOLT11 invoice, which says its own amount.
+    Invoice(String),
+    /// A Lightning address, `user@domain`, which is asked for an invoice.
+    Address(String),
+}
+
+impl std::str::FromStr for Destination {
+    type Err = anyhow::Error;
+
+    fn from_str(text: &str) -> Result<Self> {
+        let text = text.trim();
+        let text = text
+            .strip_prefix("lightning:")
+            .or_else(|| text.strip_prefix("LIGHTNING:"))
+            .unwrap_or(text);
+        if text.is_empty() || text.chars().any(char::is_whitespace) {
+            bail!("not an invoice or a Lightning address: {text:?}");
+        }
+        let lower = text.to_ascii_lowercase();
+        if lower.starts_with("lnbc") || lower.starts_with("lntb") || lower.starts_with("lntbs") {
+            return Ok(Destination::Invoice(lower));
+        }
+        match lower.split_once('@') {
+            Some((user, domain)) if !user.is_empty() && domain.contains('.') => {
+                Ok(Destination::Address(lower))
+            }
+            _ => bail!("not an invoice or a Lightning address: {text:?}"),
+        }
+    }
+}
+
+impl std::fmt::Display for Destination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // An invoice is long; its start says what it is.
+            Destination::Invoice(invoice) => write!(f, "{}…", &invoice[..invoice.len().min(24)]),
+            Destination::Address(address) => f.write_str(address),
+        }
+    }
+}
+
+/// How much a payout pays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Size {
+    /// Exactly this much, the fees on top.
+    Exactly(u64),
+    /// As much as fits in this budget, the fees included.
+    Within(u64),
+}
+
+/// A payment made over Lightning out of what is held.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Payout {
+    /// The mint that paid it.
+    pub mint: String,
+    /// The unit it was paid out of.
+    pub unit: String,
+    /// What the payee got.
+    pub paid: u64,
+    /// The fees the mint took for it.
+    pub fee: u64,
+    /// The Lightning preimage, proof the payment arrived.
+    pub preimage: Option<String>,
+}
+
+/// Melt against `quote` if it, its fee reserve and the input fee fit in
+/// `budget`; otherwise leave everything as it was.
+async fn melt_within(
+    wallet: &CdkWallet,
+    quote: &cdk::wallet::MeltQuote,
+    budget: u64,
+) -> Result<cdk_common::common::FinalizedMelt> {
+    let prepared = wallet
+        .prepare_melt(&quote.id, HashMap::new())
+        .await
+        .map_err(|e| anyhow!("set {} aside to pay with: {e}", quote.amount))?;
+    let total = u64::from(quote.amount)
+        .saturating_add(quote.fee_reserve.into())
+        .saturating_add(prepared.total_fee().into());
+    if total > budget {
+        let _ = prepared.cancel().await;
+        bail!(
+            "{} with its fees comes to {total}, more than {budget}",
+            quote.amount
+        );
+    }
+    prepared
+        .confirm()
+        .await
+        .map_err(|e| anyhow!("pay {}: {e}", quote.amount))
 }
 
 /// A token worth up to `want`, where it and the swap fee for making it
@@ -785,6 +1059,52 @@ mod tests {
         assert!(
             wallet
                 .top_up("https://mint.example", "sat", 0)
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_destination_is_an_invoice_or_a_lightning_address() {
+        assert_eq!(
+            "lightning:LNBC10N1PXYZ"
+                .parse::<Destination>()
+                .expect("invoice"),
+            Destination::Invoice("lnbc10n1pxyz".into())
+        );
+        assert_eq!(
+            " Me@Example.org ".parse::<Destination>().expect("address"),
+            Destination::Address("me@example.org".into())
+        );
+        for bad in ["", "me@localhost", "@example.org", "lnbc 1", "cashuAabc"] {
+            assert!(bad.parse::<Destination>().is_err(), "{bad:?}");
+        }
+        let invoice = Destination::Invoice(format!("lnbc{}", "x".repeat(300)));
+        assert!(
+            invoice.to_string().len() < 40,
+            "an invoice is shortened in logs"
+        );
+    }
+
+    #[tokio::test]
+    async fn taking_out_what_is_not_held_fails() {
+        let (wallet, _dir) = wallet().await;
+        assert!(
+            wallet
+                .export("https://mint.example", "sat", None)
+                .await
+                .is_err()
+        );
+        let to: Destination = "me@example.org".parse().expect("address");
+        assert!(
+            wallet
+                .pay_out("https://mint.example", "sat", &to, Size::Within(u64::MAX))
+                .await
+                .is_err()
+        );
+        assert!(
+            wallet
+                .pay_out("https://mint.example", "sat", &to, Size::Exactly(0))
                 .await
                 .is_err()
         );

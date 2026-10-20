@@ -51,7 +51,9 @@ async fn main() -> Result<()> {
 
     let money = (!file.wallet.mint.is_empty())
         .then(|| (file.wallet.mint.clone(), file.wallet.unit.clone()));
-    let merchant = Merchant::new(file.price.clone(), file.accepts.clone(), wallet, money);
+    let merchant = Merchant::new(file.price.clone(), file.accepts.clone(), wallet, money)
+        .with_sweep(file.sweep.clone());
+    tokio::spawn(merchant::keep_sweeping(merchant.clone()));
 
     // Rates only for currencies a price actually needs converting through: a
     // sat price paid in sats fetches nothing.

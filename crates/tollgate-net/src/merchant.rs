@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
@@ -19,7 +19,7 @@ use tracing::{debug, info};
 use crate::control::Response;
 use crate::market::{Accepted, Prices};
 use crate::pricing::{self, Accept, Price, Rates, Source};
-use crate::wallet::{Holding, TopUp, Wallet};
+use crate::wallet::{Destination, Holding, Kind, Payout, Size, TopUp, Wallet};
 
 /// The whole of `merchant.yaml`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -44,6 +44,8 @@ pub struct MerchantFile {
     pub accepts: Vec<Accept>,
     /// Where the money is kept.
     pub wallet: WalletSection,
+    /// Paying money out by itself, above a threshold.
+    pub sweep: SweepSection,
 }
 
 /// This node's own mint, as `merchantd` sees it.
@@ -87,6 +89,69 @@ pub struct WalletSection {
     pub unit: String,
 }
 
+/// Paying money out by itself: every so often, each mint's sats above
+/// `above` are paid to `to` over Lightning, less `keep`.
+///
+/// Money held at a mint is a claim on that mint, and on the box it sits on;
+/// a sweep keeps both small.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct SweepSection {
+    /// A Lightning address to pay to. Empty: no sweeping.
+    pub to: String,
+    /// Sweep a mint's sats once at least this many are held there.
+    pub above: u64,
+    /// Leave this many at each mint.
+    pub keep: u64,
+    /// How often to look, in minutes.
+    pub every_minutes: u64,
+    /// Only these mints. Empty: every mint sats are held at.
+    pub mints: Vec<String>,
+}
+
+impl Default for SweepSection {
+    fn default() -> Self {
+        Self {
+            to: String::new(),
+            above: 10_000,
+            keep: 0,
+            every_minutes: 60,
+            mints: Vec::new(),
+        }
+    }
+}
+
+impl SweepSection {
+    /// What to sweep out of `holdings`: each mint whose sats reach `above`,
+    /// and how much of them may go, fees included.
+    pub fn plan(&self, holdings: &[Holding]) -> Vec<(String, u64)> {
+        let wanted = |mint: &str| {
+            self.mints.is_empty()
+                || self
+                    .mints
+                    .iter()
+                    .any(|m| m.trim_end_matches('/') == mint.trim_end_matches('/'))
+        };
+        holdings
+            .iter()
+            .filter(|h| h.kind == Kind::Money && h.unit == "sat" && wanted(&h.mint))
+            .filter(|h| h.amount >= self.above.max(1) && h.amount > self.keep)
+            .map(|h| (h.mint.clone(), h.amount - self.keep))
+            .collect()
+    }
+}
+
+/// How one mint's sweep went.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Swept {
+    /// The mint swept.
+    pub mint: String,
+    /// What was paid, if it was.
+    pub payout: Option<Payout>,
+    /// Why not, if it was not.
+    pub error: Option<String>,
+}
+
 impl Default for MerchantFile {
     fn default() -> Self {
         Self {
@@ -99,6 +164,7 @@ impl Default for MerchantFile {
             rates: RatesSection::default(),
             accepts: Vec::new(),
             wallet: WalletSection::default(),
+            sweep: SweepSection::default(),
         }
     }
 }
@@ -196,6 +262,8 @@ pub struct Merchant {
     pub wallet: Wallet,
     /// Where the wallet is topped up, if anywhere: a mint and its unit.
     pub money: Option<(String, String)>,
+    /// Paying money out by itself.
+    pub sweep: SweepSection,
 }
 
 impl Merchant {
@@ -212,9 +280,52 @@ impl Merchant {
             pricing: Arc::new(RwLock::new((price, accepts))),
             wallet,
             money,
+            sweep: SweepSection::default(),
         };
         merchant.reprice();
         merchant
+    }
+
+    /// The same merchant, sweeping as `sweep` says.
+    pub fn with_sweep(mut self, sweep: SweepSection) -> Self {
+        self.sweep = sweep;
+        self
+    }
+
+    /// Pay out, once, every mint's sats the sweep settings say to. A mint
+    /// that cannot pay is reported and skipped; the next sweep tries again.
+    pub async fn sweep_now(&self) -> Result<Vec<Swept>> {
+        let to: Destination = self
+            .sweep
+            .to
+            .parse()
+            .context("sweep.to is not a Lightning address")?;
+        if !matches!(to, Destination::Address(_)) {
+            bail!("sweep.to must be a Lightning address: an invoice pays once");
+        }
+        let mut swept = Vec::new();
+        for (mint, budget) in self.sweep.plan(&self.wallet.balances().await) {
+            match self
+                .wallet
+                .pay_out(&mint, "sat", &to, Size::Within(budget))
+                .await
+            {
+                Ok(payout) => swept.push(Swept {
+                    mint,
+                    payout: Some(payout),
+                    error: None,
+                }),
+                Err(e) => {
+                    tracing::warn!(%mint, error = %format!("{e:#}"), "could not sweep");
+                    swept.push(Swept {
+                        mint,
+                        payout: None,
+                        error: Some(format!("{e:#}")),
+                    })
+                }
+            }
+        }
+        Ok(swept)
     }
 
     /// Recompute the table the market sells by.
@@ -321,6 +432,36 @@ pub enum Request {
     },
     /// Claim a top-up that was paid but not collected.
     Claim,
+    /// Take one mint's paper out as a token: `amount`, or everything held.
+    Export {
+        /// The mint.
+        mint: String,
+        /// Its unit.
+        #[serde(default = "sat")]
+        unit: String,
+        /// How much; none for everything.
+        #[serde(default)]
+        amount: Option<u64>,
+    },
+    /// Have one mint pay its money out over Lightning.
+    Pay {
+        /// The mint.
+        mint: String,
+        /// Its unit.
+        #[serde(default = "sat")]
+        unit: String,
+        /// A BOLT11 invoice or a Lightning address.
+        to: String,
+        /// How much; none for everything held, the fees included.
+        #[serde(default)]
+        amount: Option<u64>,
+    },
+    /// Sweep now, as `sweep` in merchant.yaml says.
+    Sweep,
+}
+
+fn sat() -> String {
+    "sat".into()
 }
 
 /// Which socket a request arrived on, and so what it may ask.
@@ -337,6 +478,14 @@ pub async fn serve(path: &Path, merchant: Merchant, socket: Socket) -> Result<()
     let _ = std::fs::remove_file(path);
     let listener = UnixListener::bind(path)
         .with_context(|| format!("bind {} at {}", socket_name(socket), path.display()))?;
+    // The control socket can take money out: only this daemon's own user may
+    // connect. The funding socket keeps its permissions, since `tollgated`
+    // may run as another user (the suite's FIPS exit does).
+    if socket == Socket::Control {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restrict {}", path.display()))?;
+    }
     info!(path = %path.display(), socket = socket_name(socket), "serving");
     loop {
         let (stream, _) = match listener.accept().await {
@@ -452,6 +601,57 @@ async fn run(request: Request, merchant: &Merchant, socket: Socket) -> Response 
             },
             None => error("no wallet.mint is configured to claim at"),
         },
+        Request::Export { mint, unit, amount } => {
+            match merchant.wallet.export(&mint, &unit, amount).await {
+                Ok(sent) => ok(serde_json::json!({
+                    "mint": mint.trim_end_matches('/'),
+                    "unit": unit,
+                    "worth": sent.worth,
+                    "fee": sent.fee,
+                    "token": sent.token,
+                })),
+                Err(e) => error(format!("{e:#}")),
+            }
+        }
+        Request::Pay {
+            mint,
+            unit,
+            to,
+            amount,
+        } => {
+            let to: Destination = match to.parse() {
+                Ok(to) => to,
+                Err(e) => return error(format!("{e:#}")),
+            };
+            let size = match amount {
+                Some(amount) => Size::Exactly(amount),
+                None => Size::Within(u64::MAX),
+            };
+            match merchant.wallet.pay_out(&mint, &unit, &to, size).await {
+                Ok(payout) => ok(payout),
+                Err(e) => error(format!("{e:#}")),
+            }
+        }
+        Request::Sweep => match merchant.sweep_now().await {
+            Ok(swept) => ok(swept),
+            Err(e) => error(format!("{e:#}")),
+        },
+    }
+}
+
+/// Sweep every `every_minutes` for as long as the process runs, if a
+/// destination is set.
+pub async fn keep_sweeping(merchant: Merchant) {
+    if merchant.sweep.to.is_empty() {
+        return;
+    }
+    let every = std::time::Duration::from_secs(merchant.sweep.every_minutes.max(1) * 60);
+    info!(to = %merchant.sweep.to, above = merchant.sweep.above, keep = merchant.sweep.keep, minutes = merchant.sweep.every_minutes, "sweeping");
+    loop {
+        tokio::time::sleep(every).await;
+        if let Err(e) = merchant.sweep_now().await {
+            tracing::warn!(error = %format!("{e:#}"), "sweep");
+        }
     }
 }
 
@@ -585,6 +785,108 @@ mod tests {
                 .unwrap_or_else(|e| panic!("the {name} merchant config does not parse: {e}"));
             assert!(Path::new(&file.wallet.file).is_absolute(), "{name}");
             assert!(Path::new(&file.wallet.seed_file).is_absolute(), "{name}");
+        }
+    }
+
+    fn held(mint: &str, unit: &str, amount: u64, kind: Kind) -> Holding {
+        Holding {
+            mint: mint.into(),
+            unit: unit.into(),
+            amount,
+            kind,
+        }
+    }
+
+    #[test]
+    fn a_sweep_takes_sats_above_the_threshold_less_what_is_kept() {
+        let sweep = SweepSection {
+            to: "me@example.org".into(),
+            above: 1_000,
+            keep: 100,
+            ..SweepSection::default()
+        };
+        let holdings = [
+            held("https://a", "sat", 5_000, Kind::Money),
+            held("https://b", "sat", 999, Kind::Money),
+            held("https://c", "usd", 5_000, Kind::Money),
+            held("https://up", "byte", 1 << 30, Kind::PrepaidTransit),
+        ];
+        assert_eq!(
+            sweep.plan(&holdings),
+            vec![("https://a".to_string(), 4_900)],
+            "only sats, only above the threshold, only money"
+        );
+
+        let only_b = SweepSection {
+            above: 1,
+            mints: vec!["https://b/".into()],
+            ..sweep
+        };
+        assert_eq!(only_b.plan(&holdings), vec![("https://b".to_string(), 899)]);
+    }
+
+    #[test]
+    fn sweeping_is_off_until_it_has_somewhere_to_go() {
+        let file: MerchantFile = serde_yaml::from_str("{}").expect("parse");
+        assert!(file.sweep.to.is_empty());
+        let file: MerchantFile =
+            serde_yaml::from_str("sweep: { to: 'me@example.org', above: 50000 }").expect("parse");
+        assert_eq!(file.sweep.above, 50_000);
+        assert_eq!(file.sweep.every_minutes, 60);
+    }
+
+    #[test]
+    fn taking_money_out_is_asked_for_in_json() {
+        let export: Request =
+            serde_json::from_str(r#"{"command":"export","params":{"mint":"https://a"}}"#)
+                .expect("parse");
+        match export {
+            Request::Export { unit, amount, .. } => {
+                assert_eq!(unit, "sat");
+                assert_eq!(amount, None, "everything");
+            }
+            other => panic!("{other:?}"),
+        }
+        let pay: Request = serde_json::from_str(
+            r#"{"command":"pay","params":{"mint":"https://a","to":"me@example.org","amount":21}}"#,
+        )
+        .expect("parse");
+        assert!(matches!(
+            pay,
+            Request::Pay {
+                amount: Some(21),
+                ..
+            }
+        ));
+        let sweep: Request = serde_json::from_str(r#"{"command":"sweep"}"#).expect("parse");
+        assert!(matches!(sweep, Request::Sweep));
+    }
+
+    #[tokio::test]
+    async fn money_never_leaves_through_the_funding_socket() {
+        let dir = crate::tempdir::Dir::new();
+        let wallet = Wallet::open(dir.path().join("w.sqlite"), [1; 64], "byte")
+            .await
+            .expect("wallet");
+        let merchant = Merchant::new(None, vec![], wallet, None);
+        for request in [
+            Request::Export {
+                mint: "https://a".into(),
+                unit: "sat".into(),
+                amount: None,
+            },
+            Request::Pay {
+                mint: "https://a".into(),
+                unit: "sat".into(),
+                to: "me@example.org".into(),
+                amount: None,
+            },
+            Request::Sweep,
+        ] {
+            match run(request, &merchant, Socket::Funding).await {
+                Response::Error { message } => assert!(message.contains("not a request for")),
+                other => panic!("tollgated's socket paid out: {other:?}"),
+            }
         }
     }
 

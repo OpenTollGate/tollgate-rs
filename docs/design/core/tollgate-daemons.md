@@ -241,6 +241,7 @@ front of any TollGate resource.
 | Selling | Serves the market endpoints ([market-protocol.md](../market/market-protocol.md)). Takes payment into its wallet, then mints at `mintd`'s private listener |
 | Buying | Acquires whatever issuer's vouchers `tollgated` asks it to fund — any upstream, no fixed list — if it judges them worth the price. It tries the upstream's mint first, which is free where the upstream auto-accepts, then buys at the upstream's market, paying from its wallet at the price in that market's `info` — and hands them to `tollgated` to fund channels |
 | Holding | One wallet: payment tokens taken (sat, usd, eur), other mints' vouchers `tollgated` kept, and any upstream vouchers bought ahead |
+| Paying out | Hands the operator what it holds: as a token, or paid over Lightning by the mint that holds it, on request or by itself above a threshold ([Taking money out](#taking-money-out)) |
 | Pricing | What this node's capacity sells for, and which mints it takes as payment |
 
 The operator's margin — what the node's vouchers sell for minus what its
@@ -343,6 +344,29 @@ seconds, so a `mintd` that hangs rather than refuses does not hold every
 `info` and `swap` for the whole lookup timeout. Meanwhile the market's own
 ceiling applies.
 
+### Taking money out
+
+What `merchantd` holds is the operator's, and most of it is a claim on
+somebody else's mint: sats taken at the market sit at whichever mint the
+buyer paid in. The operator takes them out on the control socket, which only
+`merchantd`'s own user can open:
+
+| Request | What it does |
+|---|---|
+| `export` | One mint's paper as a token, `amount` of it or everything held; the mint's swap fee comes out of what is held. The token is money and never reaches a log |
+| `pay` | Has one mint pay over Lightning, to a BOLT11 invoice or a Lightning address: `amount` with the fees on top, or everything held with the fees included. A Lightning address is paid in sats only, since it is asked for an invoice of a size |
+| `sweep` | Does now what `sweep` in `merchant.yaml` does by itself |
+
+`sweep` pays each mint's sats out to a Lightning address once at least
+`above` are held there, leaving `keep`, every `every_minutes`, optionally only
+at `mints`. Its purpose is to keep small what a mint, or the box the wallet is
+on, could lose. A mint that cannot pay is logged and tried again next time.
+
+`merchanttop holdings`, `merchanttop export`, `merchanttop pay` and
+`merchanttop sweep` make these requests once and print the answer as JSON,
+for scripts. Holdings are read from the wallet's database, so money at a mint
+nothing has touched since a restart is listed and can be taken out.
+
 ### Between tollgated and merchantd
 
 A private interface on a local socket. Two calls:
@@ -394,7 +418,7 @@ find an instance by its name, and `tolltop` finds them all by listing
 |---|---|---|
 | Mint seed and keys | mintd | Its own seed, separate from the node's identity key; neither leaves the process. Losing the seed retires every outstanding voucher |
 | The private listener | merchantd | The power to print vouchers. Loopback only, so nothing off the machine reaches it; every issue is a quote the mint records |
-| Money and kept vouchers | merchantd | Its wallet. `tollgated` and `mintd` hold none |
+| Money and kept vouchers | merchantd | Its wallet. `tollgated` and `mintd` hold none. Only `merchantd`'s user can open its control socket (`0600`), which can take money out |
 | Channel state | tollgated | Loss costs unsettled channel balance, not stored value |
 
 A compromised `tollgated` can refuse service, settle badly, or burn vouchers

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Taking money out of `merchantd`: `export` (one mint's paper as a token, an
+  amount or everything) and `pay` (the mint pays a BOLT11 invoice or a
+  Lightning address, an amount or everything within its fees) on the control
+  socket, and `merchanttop holdings|export|pay|sweep`, which ask once and
+  print JSON.
+- `sweep` in `merchant.yaml`: every `every_minutes`, each mint's sats above
+  `above` are paid to a Lightning address, less `keep`; `merchanttop sweep`
+  runs it now.
+
+### Fixed
+
+- `merchantd` lists money at every mint its wallet holds paper from, not only
+  mints used since it started: after a restart, sats at a mint nothing had
+  touched were missing from the wallet tab.
+
+### Changed
+
+- `merchantd`'s control socket is created `0600`: only its own user can
+  connect, now that it can take money out. The funding socket is unchanged.
+
 ## [0.1.0-rc.2] - 2026-10-13
 
 Documentation: guides for running a buying node, a gateway, and embedding

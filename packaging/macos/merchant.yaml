@@ -23,3 +23,12 @@ wallet:
   # Where the wallet is topped up over Lightning, from merchanttop.
   mint: "https://mint.minibits.cash/Bitcoin"
   unit: sat
+
+# Paying money out by itself: every every_minutes, each mint's sats above
+# `above` go to the Lightning address `to`, less `keep`. Empty `to`: off.
+# `merchanttop export` and `merchanttop pay` take money out by hand.
+sweep:
+  to: ""
+  above: 10000
+  keep: 0
+  every_minutes: 60

@@ -16,12 +16,17 @@
 //! anything of the outside world: topping up produces an invoice somebody has
 //! to pay, so it is shown as a QR as well as a string. The thing paying it is
 //! usually a phone.
+//!
+//! Taking money out is a command rather than a key, so scripts and a gateway's
+//! own tooling can do it: `merchanttop holdings`, `merchanttop export`,
+//! `merchanttop pay` and `merchanttop sweep` ask once, print the answer as
+//! JSON and exit.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -47,6 +52,84 @@ struct Args {
     /// How often to refresh, in milliseconds.
     #[arg(long, default_value_t = 500)]
     interval: u64,
+
+    /// Ask once and print the answer, instead of the live view.
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// One question for `merchantd`, answered as JSON on stdout.
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// What is held, at which mint, in which unit.
+    Holdings,
+    /// Take one mint's paper out as a token, printed on stdout. The token is
+    /// money: whoever holds it can redeem it.
+    Export {
+        /// The mint, as its URL.
+        #[arg(long)]
+        mint: String,
+        /// Its unit.
+        #[arg(long, default_value = "sat")]
+        unit: String,
+        /// How much; everything held if not given.
+        #[arg(long)]
+        amount: Option<u64>,
+    },
+    /// Have one mint pay its money out over Lightning.
+    Pay {
+        /// The mint, as its URL.
+        #[arg(long)]
+        mint: String,
+        /// Its unit.
+        #[arg(long, default_value = "sat")]
+        unit: String,
+        /// A BOLT11 invoice or a Lightning address.
+        #[arg(long)]
+        to: String,
+        /// How much, the fees on top; everything held (fees included) if not
+        /// given.
+        #[arg(long)]
+        amount: Option<u64>,
+    },
+    /// Sweep now, as `sweep` in merchant.yaml says.
+    Sweep,
+}
+
+/// Ask once, print, exit: the answer's data as JSON, or the error on stderr.
+fn one_shot(socket: &std::path::Path, command: Command) -> Result<()> {
+    let request = match command {
+        Command::Holdings => Request::Snapshot,
+        Command::Export { mint, unit, amount } => Request::Export { mint, unit, amount },
+        Command::Pay {
+            mint,
+            unit,
+            to,
+            amount,
+        } => Request::Pay {
+            mint,
+            unit,
+            to,
+            amount,
+        },
+        Command::Sweep => Request::Sweep,
+    };
+    let holdings_only = matches!(request, Request::Snapshot);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    match runtime.block_on(merchant::send(socket, &request))? {
+        Response::Ok { data } => {
+            let data = if holdings_only {
+                data["holdings"].clone()
+            } else {
+                data
+            };
+            println!("{}", serde_json::to_string_pretty(&data)?);
+            Ok(())
+        }
+        Response::Error { message } => Err(anyhow::anyhow!("merchantd: {message}")),
+    }
 }
 
 /// Which tab is showing.
@@ -239,6 +322,9 @@ fn move_cursor(state: &mut TableState, count: usize, delta: isize) {
 fn main() -> Result<()> {
     let args = Args::parse();
     let socket = args.socket.unwrap_or_else(merchant::default_control_path);
+    if let Some(command) = args.command {
+        return one_shot(&socket, command);
+    }
     let interval = Duration::from_millis(args.interval.max(50));
 
     let runtime = tokio::runtime::Builder::new_current_thread()
