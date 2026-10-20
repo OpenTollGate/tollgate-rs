@@ -19,7 +19,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "merchantd", about = "A TollGate node's merchant")]
+#[command(name = "merchantd", version = tollgate_net::VERSION, about = "A TollGate node's merchant")]
 struct Args {
     /// Configuration file. Defaults are used if absent.
     #[arg(short, long)]

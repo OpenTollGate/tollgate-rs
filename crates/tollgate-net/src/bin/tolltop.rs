@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -31,7 +31,7 @@ use tollgate_net::control::{self, PeerSnapshot, Snapshot};
 use tollgate_net::instance;
 
 #[derive(Parser, Debug)]
-#[command(name = "tolltop", about = "Watch a TollGate node")]
+#[command(name = "tolltop", version = tollgate_net::VERSION, about = "Watch a TollGate node")]
 struct Args {
     /// Watch this control socket and nothing else. Without it, every running
     /// instance is found and Tab moves between them.
@@ -302,6 +302,8 @@ fn main() -> Result<()> {
             && key.kind == KeyEventKind::Press
         {
             match key.code {
+                // Raw mode turns Ctrl-C into a key rather than a signal.
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                 KeyCode::Char('q') => break,
                 // Esc backs out of the detail, and quits from the top.
                 KeyCode::Esc if app.detail => app.detail = false,
@@ -772,9 +774,11 @@ fn balance(b: &control::BalanceSnapshot) -> String {
 fn status(app: &App) -> Paragraph<'static> {
     let dim = Style::default().fg(Color::DarkGray);
     // Which instance this is stays in the frame whatever else is on screen.
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" tolltop — {} ", app.instances.title()));
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        " tolltop {} — {} ",
+        tollgate_net::VERSION,
+        app.instances.title()
+    ));
 
     if let Some(message) = &app.error {
         return Paragraph::new(Line::from(Span::styled(

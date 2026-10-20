@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -20,7 +20,7 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use tollgate_net::mintd::{Snapshot, default_control_path};
 
 #[derive(Parser, Debug)]
-#[command(name = "minttop", about = "Watch a TollGate node's mint")]
+#[command(name = "minttop", version = tollgate_net::VERSION, about = "Watch a TollGate node's mint")]
 struct Args {
     /// `mintd`'s control socket.
     #[arg(short, long)]
@@ -44,7 +44,10 @@ fn main() -> Result<()> {
             if event::poll(interval)?
                 && let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
-                && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+                && (matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+                    // Raw mode turns Ctrl-C into a key rather than a signal.
+                    || (key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)))
             {
                 return Ok(());
             }
@@ -128,8 +131,11 @@ fn table(s: &Snapshot) -> Table<'static> {
         row("refused (over limit)", s.refused_quotes.to_string()),
         row("uptime", uptime(s.uptime_secs)),
     ];
-    Table::new(rows, [Constraint::Length(24), Constraint::Min(0)])
-        .block(Block::default().borders(Borders::ALL).title("mint"))
+    Table::new(rows, [Constraint::Length(24), Constraint::Min(0)]).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" minttop {} ", tollgate_net::VERSION)),
+    )
 }
 
 fn uptime(secs: u64) -> String {

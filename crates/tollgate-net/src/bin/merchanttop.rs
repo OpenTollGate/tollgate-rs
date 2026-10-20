@@ -29,7 +29,7 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
 };
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -46,6 +46,7 @@ use tollgate_net::wallet::{Holding, Kind, Payout, TopUp};
 #[derive(Parser, Debug)]
 #[command(
     name = "merchanttop",
+    version = tollgate_net::VERSION,
     about = "Watch a TollGate node's prices and wallet"
 )]
 struct Args {
@@ -458,6 +459,12 @@ fn main() -> Result<()> {
             _ => continue,
         };
         {
+            // Ctrl-C quits from anywhere, half-typed or not: the terminal is in
+            // raw mode, so it arrives as a key rather than as a signal.
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                break;
+            }
+
             // Editing takes every key it can use before anything else looks at
             // one: while a price is half-typed, `q` is not "quit".
             if let Some((what, text)) = app.editing.as_mut() {
@@ -735,7 +742,7 @@ fn tab_bar(app: &App) -> Paragraph<'_> {
     Paragraph::new(Line::from(spans)).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" merchanttop "),
+            .title(format!(" merchanttop {} ", tollgate_net::VERSION)),
     )
 }
 

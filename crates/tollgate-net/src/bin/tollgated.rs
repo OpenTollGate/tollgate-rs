@@ -21,7 +21,7 @@ use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::registry::LookupSpan;
 
 #[derive(Parser, Debug)]
-#[command(name = "tollgated", about = "A TollGate node")]
+#[command(name = "tollgated", version = tollgate_net::VERSION, about = "A TollGate node")]
 struct Args {
     /// Configuration file. Defaults are used if absent.
     #[arg(short, long)]

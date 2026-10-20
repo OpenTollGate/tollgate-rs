@@ -58,5 +58,13 @@ pub mod wire;
 #[cfg(test)]
 mod tempdir;
 
+/// This build: the crate's version and the commit it was built from.
+pub const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("TOLLGATE_COMMIT"),
+    ")"
+);
+
 pub use identity::Identity;
 pub use node::{Node, NodeConfig, PeerConfig};

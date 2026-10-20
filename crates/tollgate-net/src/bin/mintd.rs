@@ -19,7 +19,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "mintd", about = "A TollGate node's mint")]
+#[command(name = "mintd", version = tollgate_net::VERSION, about = "A TollGate node's mint")]
 struct Args {
     /// Configuration file. Defaults are used if absent.
     #[arg(short, long)]

@@ -17,12 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `merchanttop`'s wallet tab takes money out too: pick a holding, `w` pays it
   out to an invoice or Lightning address, `x` takes it out as a token shown as
   a QR and a string.
+- `tolltop`, `merchanttop` and `minttop` show their version and the commit
+  they were built from, and every binary's `--version` prints it. The commit
+  comes from git, or from `TOLLGATE_COMMIT` where the build has no `.git`.
+
 - `sweep` in `merchant.yaml`: every `every_minutes`, each mint's sats above
   `above` are paid to a Lightning address, less `keep`; `merchanttop sweep`
   runs it now.
 
 ### Fixed
 
+- Ctrl-C quits `tolltop`, `merchanttop` and `minttop`; in raw mode it arrived
+  as a key nothing handled.
 - `merchantd` lists money at every mint its wallet holds paper from, not only
   mints used since it started: after a restart, sats at a mint nothing had
   touched were missing from the wallet tab.
