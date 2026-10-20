@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Lightning address, an amount or everything within its fees) on the control
   socket, and `merchanttop holdings|export|pay|sweep`, which ask once and
   print JSON.
+- `merchanttop`'s wallet tab takes money out too: pick a holding, `w` pays it
+  out to an invoice or Lightning address, `x` takes it out as a token shown as
+  a QR and a string.
 - `sweep` in `merchant.yaml`: every `every_minutes`, each mint's sats above
   `above` are paid to a Lightning address, less `keep`; `merchanttop sweep`
   runs it now.

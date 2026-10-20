@@ -366,6 +366,10 @@ on, could lose. A mint that cannot pay is logged and tried again next time.
 `merchanttop sweep` make these requests once and print the answer as JSON,
 for scripts. Holdings are read from the wallet's database, so money at a mint
 nothing has touched since a restart is listed and can be taken out.
+In `merchanttop`'s wallet tab, `w` pays the holding under the cursor out to
+an invoice or a Lightning address (an amount after a space, or nothing for
+everything), and `x` takes it out as a token, shown as a QR and a string
+until dismissed.
 
 ### Between tollgated and merchantd
 

@@ -17,27 +17,31 @@
 //! to pay, so it is shown as a QR as well as a string. The thing paying it is
 //! usually a phone.
 //!
-//! Taking money out is a command rather than a key, so scripts and a gateway's
-//! own tooling can do it: `merchanttop holdings`, `merchanttop export`,
-//! `merchanttop pay` and `merchanttop sweep` ask once, print the answer as
-//! JSON and exit.
+//! Money comes out from the wallet tab too: `w` pays the holding under the
+//! cursor out over Lightning, and `x` takes it out as a token, shown as a QR.
+//! Both are commands as well, so scripts and a gateway's own tooling can do
+//! it: `merchanttop holdings`, `merchanttop export`, `merchanttop pay` and
+//! `merchanttop sweep` ask once, print the answer as JSON and exit.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
+};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
+use serde::Deserialize;
 use tollgate_net::control::Response;
 use tollgate_net::market::Accepted;
 use tollgate_net::merchant::{self, Request, Snapshot};
 use tollgate_net::pricing::{Accept, Price};
-use tollgate_net::wallet::{Holding, Kind, TopUp};
+use tollgate_net::wallet::{Holding, Kind, Payout, TopUp};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -167,6 +171,28 @@ enum Editing {
     DefaultPrice { unit: String },
     /// An amount to top the wallet up by.
     TopUp,
+    /// Where to pay one holding out to — a BOLT11 invoice or a Lightning
+    /// address — and, after a space, how much if not everything.
+    Withdraw { mint: String, unit: String },
+    /// How much of one holding to take out as a token.
+    Export { mint: String, unit: String },
+}
+
+impl Editing {
+    /// Whether what is typed is a destination rather than a number.
+    fn is_text(&self) -> bool {
+        matches!(self, Editing::Withdraw { .. })
+    }
+}
+
+/// A token taken out of the wallet, as the merchant hands it over.
+#[derive(Debug, Clone, Deserialize)]
+struct Exported {
+    mint: String,
+    unit: String,
+    worth: u64,
+    fee: u64,
+    token: String,
 }
 
 /// Everything the display is currently doing, as opposed to what the merchant
@@ -192,6 +218,12 @@ struct App {
     /// An invoice waiting to be paid, held on screen until it is or the
     /// operator dismisses it. The merchant collects what it bought by itself.
     invoice: Option<TopUp>,
+    /// Which money row the cursor is on, over on the wallet tab.
+    held: TableState,
+    /// A token just taken out, held on screen until the operator dismisses
+    /// it. It is money, and nothing else keeps it: dismissed unsaved, it is
+    /// gone.
+    token: Option<Exported>,
 }
 
 impl App {
@@ -260,6 +292,48 @@ impl App {
             None => ("sat".to_string(), String::new()),
         };
         self.editing = Some((Editing::DefaultPrice { unit }, text));
+        self.notice = None;
+    }
+
+    /// Keep the wallet cursor on a money row that exists.
+    fn clamp_held(&mut self) {
+        let count = self.money().len();
+        clamp(&mut self.held, count);
+    }
+
+    fn move_held(&mut self, delta: isize) {
+        let count = self.money().len();
+        move_cursor(&mut self.held, count, delta);
+    }
+
+    /// The money row under the wallet cursor.
+    fn selected_holding(&self) -> Option<Holding> {
+        self.held
+            .selected()
+            .and_then(|i| self.money().into_iter().nth(i))
+    }
+
+    /// Start taking the holding under the cursor out: as a token if
+    /// `export`, otherwise over Lightning.
+    ///
+    /// An export starts from everything held, so Enter alone takes it all; a
+    /// payout starts empty, since there is nowhere to pay to until one is
+    /// typed.
+    fn start_withdraw(&mut self, export: bool) {
+        let Some(h) = self.selected_holding() else {
+            return;
+        };
+        if h.amount == 0 {
+            self.notice = Some(format!("nothing held at {}", h.mint));
+            return;
+        }
+        let (mint, unit) = (h.mint, h.unit);
+        self.editing = Some(if export {
+            (Editing::Export { mint, unit }, h.amount.to_string())
+        } else {
+            (Editing::Withdraw { mint, unit }, String::new())
+        });
+        self.invoice = None;
         self.notice = None;
     }
 
@@ -348,7 +422,12 @@ fn main() -> Result<()> {
         mints: TableState::default(),
         editing: None,
         invoice: None,
+        held: TableState::default(),
+        token: None,
     };
+    // A pasted invoice arrives as one event rather than a few hundred keys,
+    // each of which would otherwise cost a refresh.
+    let _ = crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
 
     loop {
         match runtime.block_on(fetch(&app.socket)) {
@@ -359,12 +438,25 @@ fn main() -> Result<()> {
             Err(e) => app.error = Some(format!("{e:#}")),
         }
         app.clamp_mints();
+        app.clamp_held();
 
         terminal.draw(|frame| draw(frame, &mut app))?;
 
-        if event::poll(interval)?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
+        if !event::poll(interval)? {
+            continue;
+        }
+        let key = match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => key,
+            Event::Paste(pasted) => {
+                if let Some((what, text)) = app.editing.as_mut()
+                    && what.is_text()
+                {
+                    text.push_str(pasted.trim());
+                }
+                continue;
+            }
+            _ => continue,
+        };
         {
             // Editing takes every key it can use before anything else looks at
             // one: while a price is half-typed, `q` is not "quit".
@@ -379,10 +471,18 @@ fn main() -> Result<()> {
                     KeyCode::Backspace => {
                         text.pop();
                     }
+                    // A destination is whatever it is: an invoice or an
+                    // address, and an amount after a space.
+                    KeyCode::Char(c) if what.is_text() => text.push(c),
                     KeyCode::Char(c) if c.is_ascii_digit() => text.push(c),
                     // A price is a decimal — a thousandth of a cent a Mbit is
                     // an ordinary one — and an amount of sats is not.
-                    KeyCode::Char('.') if *what != Editing::TopUp && !text.contains('.') => {
+                    KeyCode::Char('.')
+                        if matches!(
+                            what,
+                            Editing::MintPrice { .. } | Editing::DefaultPrice { .. }
+                        ) && !text.contains('.') =>
+                    {
                         text.push('.')
                     }
                     _ => {}
@@ -398,6 +498,7 @@ fn main() -> Result<()> {
                 }
                 // Esc backs out of whatever is open, and quits from the top.
                 KeyCode::Esc if app.invoice.is_some() => app.invoice = None,
+                KeyCode::Esc if app.token.is_some() => app.token = None,
                 KeyCode::Esc => break,
 
                 KeyCode::Up | KeyCode::Char('k') if app.tab == Tab::Pricing => app.move_mint(-1),
@@ -410,7 +511,16 @@ fn main() -> Result<()> {
                 }
                 KeyCode::Char('d') if app.tab == Tab::Pricing => app.edit_default_price(),
 
-                // Topping up is the only thing to do on the wallet tab, so
+                // While a token is on screen nothing else on the wallet tab
+                // happens: moving on with it unsaved would lose it.
+                _ if app.tab == Tab::Wallet && app.token.is_some() => {}
+
+                KeyCode::Up | KeyCode::Char('k') if app.tab == Tab::Wallet => app.move_held(-1),
+                KeyCode::Down | KeyCode::Char('j') if app.tab == Tab::Wallet => app.move_held(1),
+                KeyCode::Char('w') if app.tab == Tab::Wallet => app.start_withdraw(false),
+                KeyCode::Char('x') if app.tab == Tab::Wallet => app.start_withdraw(true),
+
+                // Topping up is the first thing to do on the wallet tab, so
                 // Enter starts it as well as `t`.
                 KeyCode::Enter | KeyCode::Char('t') if app.tab == Tab::Wallet => {
                     app.editing = Some((Editing::TopUp, String::new()));
@@ -434,6 +544,7 @@ fn main() -> Result<()> {
         }
     }
 
+    let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
     Ok(())
 }
@@ -456,6 +567,32 @@ fn submit(
             return match runtime.block_on(top_up(&app.socket, amount)) {
                 Ok(invoice) => {
                     app.invoice = Some(invoice);
+                    None
+                }
+                Err(e) => Some(format!("{e:#}")),
+            };
+        }
+        Editing::Withdraw { mint, unit } => {
+            let mut words = text.split_whitespace();
+            let to = words.next()?;
+            let amount = match words.next().map(str::parse::<u64>) {
+                None => None,
+                Some(Ok(n)) => Some(n),
+                Some(Err(_)) => return Some("an amount is a whole number".into()),
+            };
+            let paid = runtime.block_on(pay_out(&app.socket, mint, unit, to.into(), amount));
+            return Some(match paid {
+                Ok(p) => format!("paid {} {} from {}, fee {}", p.paid, p.unit, p.mint, p.fee),
+                Err(e) => format!("{e:#}"),
+            });
+        }
+        Editing::Export { mint, unit } => {
+            let Ok(amount) = text.parse::<u64>() else {
+                return None;
+            };
+            return match runtime.block_on(export(&app.socket, mint, unit, amount)) {
+                Ok(token) => {
+                    app.token = Some(token);
                     None
                 }
                 Err(e) => Some(format!("{e:#}")),
@@ -512,6 +649,38 @@ async fn claim(socket: &std::path::Path) -> Result<u64> {
         .get("claimed")
         .and_then(|c| c.as_u64())
         .unwrap_or_default())
+}
+
+/// Ask the merchant to pay some of one holding out over Lightning.
+async fn pay_out(
+    socket: &std::path::Path,
+    mint: String,
+    unit: String,
+    to: String,
+    amount: Option<u64>,
+) -> Result<Payout> {
+    let request = Request::Pay {
+        mint,
+        unit,
+        to,
+        amount,
+    };
+    Ok(serde_json::from_value(ask(socket, &request).await?)?)
+}
+
+/// Ask the merchant to take some of one holding out as a token.
+async fn export(
+    socket: &std::path::Path,
+    mint: String,
+    unit: String,
+    amount: u64,
+) -> Result<Exported> {
+    let request = Request::Export {
+        mint,
+        unit,
+        amount: Some(amount),
+    };
+    Ok(serde_json::from_value(ask(socket, &request).await?)?)
 }
 
 /// Change the default price, or one mint's, and fail loudly if the merchant
@@ -745,6 +914,11 @@ fn wallet_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         invoice_panel(frame, invoice, area);
         return;
     }
+    // And so does a token just taken out, which is money until it is saved.
+    if let Some(token) = &app.token {
+        token_panel(frame, token, area);
+        return;
+    }
 
     // The money held, and the mint it is topped up at whether or not it holds
     // any — an empty row is where a top-up goes.
@@ -789,13 +963,16 @@ fn wallet_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     ])
     .areas(area);
 
-    frame.render_widget(
+    frame.render_stateful_widget(
         holdings_table(
             &money,
             " money — buys from any peer that accepts the mint ",
             Color::Green,
-        ),
+        )
+        .row_highlight_style(SELECTED)
+        .highlight_symbol(CURSOR),
         top,
+        &mut app.held,
     );
     frame.render_widget(
         holdings_table(
@@ -891,7 +1068,48 @@ fn invoice_panel(frame: &mut Frame, invoice: &TopUp, area: Rect) {
     ])
     .wrap(Wrap { trim: false });
 
-    let qr = qr_lines(&invoice.request);
+    qr_body(frame, inner, header, &invoice.request, true);
+}
+
+/// A token taken out, and nothing else on screen.
+///
+/// The same shape as an invoice: a QR for a phone's wallet to scan, the string
+/// for one on this machine. A token carries its proofs, so its QR is often too
+/// big for a terminal, and then the string is all there is.
+fn token_panel(frame: &mut Frame, token: &Exported, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" token — save it, then esc: dismissed unsaved, it is gone ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let dim = Style::default().fg(Color::DarkGray);
+    let header = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled("worth ", dim),
+            Span::styled(
+                format!("{} {}", token.worth, token.unit),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(", fee {}, from ", token.fee), dim),
+            Span::raw(token.mint.clone()),
+        ]),
+        Line::from(Span::styled(
+            "Whoever holds this token can redeem it. Scan it, or paste it into a wallet.",
+            dim,
+        )),
+    ])
+    .wrap(Wrap { trim: false });
+
+    // A cashu token is base64, and its case is part of it.
+    qr_body(frame, inner, header, &token.token, false);
+}
+
+/// A header, then a payload as a QR beside its string — or the string alone,
+/// when the QR does not fit.
+fn qr_body(frame: &mut Frame, inner: Rect, header: Paragraph<'_>, payload: &str, uppercase: bool) {
+    let dim = Style::default().fg(Color::DarkGray);
+    let qr = qr_lines(payload, uppercase);
     // Height first: a QR that does not fit whole is not a QR, so if the pane is
     // too short the string gets the room instead.
     let qr_height = qr.len() as u16;
@@ -903,7 +1121,7 @@ fn invoice_panel(frame: &mut Frame, invoice: &TopUp, area: Rect) {
 
     if !fits {
         let mut lines = vec![Line::from(Span::styled(
-            invoice.request.clone(),
+            payload.to_string(),
             Style::default().fg(Color::Yellow),
         ))];
         lines.push(Line::from(""));
@@ -932,7 +1150,7 @@ fn invoice_panel(frame: &mut Frame, invoice: &TopUp, area: Rect) {
     );
     frame.render_widget(
         Paragraph::new(Span::styled(
-            invoice.request.clone(),
+            payload.to_string(),
             Style::default().fg(Color::Yellow),
         ))
         .wrap(Wrap { trim: false }),
@@ -940,18 +1158,23 @@ fn invoice_panel(frame: &mut Frame, invoice: &TopUp, area: Rect) {
     );
 }
 
-/// A bolt11 invoice as terminal-sized QR rows.
+/// A payload as terminal-sized QR rows.
 ///
-/// Uppercased first. A bech32 invoice is case-insensitive, and uppercase is
-/// what lets the encoder use alphanumeric mode instead of binary — roughly a
-/// third fewer modules, which is the difference between a QR that fits an
-/// ordinary window and one that does not. Two module rows per line of text,
-/// for the same reason.
-fn qr_lines(invoice: &str) -> Vec<String> {
+/// A bolt11 invoice is uppercased first. Bech32 is case-insensitive, and
+/// uppercase is what lets the encoder use alphanumeric mode instead of binary
+/// — roughly a third fewer modules, which is the difference between a QR that
+/// fits an ordinary window and one that does not. Two module rows per line of
+/// text, for the same reason.
+fn qr_lines(payload: &str, uppercase: bool) -> Vec<String> {
     use qrcode::QrCode;
     use qrcode::render::unicode;
 
-    let Ok(code) = QrCode::new(invoice.to_uppercase().as_bytes()) else {
+    let data = if uppercase {
+        payload.to_uppercase()
+    } else {
+        payload.to_string()
+    };
+    let Ok(code) = QrCode::new(data.as_bytes()) else {
         return Vec::new();
     };
     code.render::<unicode::Dense1x2>()
@@ -995,6 +1218,14 @@ fn status(app: &App) -> Paragraph<'static> {
                 format!("default {unit} per Mbit: "),
                 "   enter to set, esc to cancel",
             ),
+            Editing::Withdraw { .. } => (
+                "pay out to: ".to_string(),
+                "   invoice or address, then an amount or nothing for all   enter pays, esc cancels",
+            ),
+            Editing::Export { unit, .. } => (
+                format!("take out as a token ({unit}): "),
+                "   enter to take out, esc to cancel",
+            ),
         };
         return Paragraph::new(Line::from(vec![
             Span::styled(prompt, Style::default().fg(Color::Yellow)),
@@ -1015,12 +1246,15 @@ fn status(app: &App) -> Paragraph<'static> {
         .block(Block::default().borders(Borders::ALL));
     }
 
-    let hints = match (app.tab, app.invoice.is_some()) {
-        (Tab::Pricing, _) => {
+    let hints = match (app.tab, app.invoice.is_some(), app.token.is_some()) {
+        (Tab::Pricing, ..) => {
             "↑↓ selects   e prices this mint   d sets the default   tab switches   q quits"
         }
-        (Tab::Wallet, true) => "esc dismisses   c claims a paid invoice   q quits",
-        (Tab::Wallet, false) => "t tops up   c claims a paid invoice   tab switches   q quits",
+        (Tab::Wallet, true, _) => "esc dismisses   c claims a paid invoice   q quits",
+        (Tab::Wallet, _, true) => "save the token, then esc dismisses it   q quits",
+        (Tab::Wallet, false, false) => {
+            "↑↓ selects   t tops up   w pays out   x takes out a token   c claims   q quits"
+        }
     };
 
     // What the merchant charges and holds stays visible on every tab: the tab
@@ -1079,7 +1313,7 @@ mod tests {
 
     #[test]
     fn an_invoice_becomes_a_square_qr() {
-        let lines = qr_lines(INVOICE);
+        let lines = qr_lines(INVOICE, true);
         assert!(!lines.is_empty(), "an invoice should encode");
 
         // Two module rows per line of text, so the drawing is half as tall as
@@ -1117,7 +1351,7 @@ mod tests {
         // 4 kB is past what any QR version holds. A display that fell over
         // because a mint wrote a long invoice would be worse than one showing
         // the string alone.
-        assert!(qr_lines(&"x".repeat(4096)).is_empty());
+        assert!(qr_lines(&"x".repeat(4096), true).is_empty());
     }
 
     #[test]
@@ -1196,8 +1430,11 @@ mod render_tests {
             mints: TableState::default(),
             editing: None,
             invoice: None,
+            held: TableState::default(),
+            token: None,
         };
         app.clamp_mints();
+        app.clamp_held();
         app
     }
 
@@ -1333,5 +1570,65 @@ mod render_tests {
 
         assert!(screen.contains("buys from any peer"), "{screen}");
         assert!(screen.contains("spendable only there"), "{screen}");
+    }
+
+    #[test]
+    fn taking_money_out_starts_from_the_holding_under_the_cursor() {
+        // A token starts from everything held, so Enter alone takes it all; a
+        // payout starts empty, since it has nowhere to go until one is typed.
+        let mut app = app_with_two_mints();
+        app.tab = Tab::Wallet;
+        let held = app.selected_holding().expect("a money row");
+
+        app.start_withdraw(true);
+        assert_eq!(
+            app.editing,
+            Some((
+                Editing::Export {
+                    mint: held.mint.clone(),
+                    unit: held.unit.clone(),
+                },
+                held.amount.to_string()
+            ))
+        );
+
+        app.start_withdraw(false);
+        assert_eq!(
+            app.editing,
+            Some((
+                Editing::Withdraw {
+                    mint: held.mint,
+                    unit: held.unit,
+                },
+                String::new()
+            ))
+        );
+    }
+
+    #[test]
+    fn an_empty_holding_has_nothing_to_take_out() {
+        let mut app = app_with_two_mints();
+        app.tab = Tab::Wallet;
+        app.snapshot.holdings.retain(|h| h.kind != Kind::Money);
+        app.snapshot.money_mint = Some(Accepted {
+            mint: "https://money.example".into(),
+            unit: "sat".into(),
+            bytes_per_unit: 0,
+        });
+        app.clamp_held();
+
+        app.start_withdraw(false);
+        assert_eq!(app.editing, None);
+        assert!(app.notice.is_some());
+    }
+
+    #[test]
+    fn a_token_keeps_its_case() {
+        // Base64 is not bech32: uppercasing a token would make it another,
+        // worthless one.
+        let lower = qr_lines("cashuBo2Fteaa", false);
+        let upper = qr_lines("cashuBo2Fteaa", true);
+        assert!(!lower.is_empty());
+        assert_ne!(lower, upper);
     }
 }
