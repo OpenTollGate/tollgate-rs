@@ -690,10 +690,29 @@ impl Wallet {
                     if want == 0 {
                         break;
                     }
+                    // The invoice is asked for here rather than by cdk, which
+                    // refuses a callback on any host but the address's own —
+                    // and Wallet of Satoshi's, among others, is on another.
+                    let invoice = lnurl_invoice(address, want.saturating_mul(msat_per_unit))
+                        .await
+                        .map_err(|e| {
+                            anyhow!("ask {address} for an invoice of {want} {unit}: {e:#}")
+                        })?;
                     let quote = wallet
-                        .melt_lightning_address_quote(address, want.saturating_mul(msat_per_unit))
+                        .melt_quote(
+                            PaymentMethod::Known(KnownMethod::Bolt11),
+                            &invoice,
+                            None,
+                            None,
+                        )
                         .await
                         .map_err(|e| anyhow!("ask {mint} to pay {address} {want} {unit}: {e}"))?;
+                    if u64::from(quote.amount) != want {
+                        bail!(
+                            "{address} sent an invoice for {}, not the {want} asked for",
+                            quote.amount
+                        );
+                    }
                     let need = u64::from(quote.amount).saturating_add(quote.fee_reserve.into());
                     if need > budget {
                         if matches!(size, Size::Exactly(_)) {
@@ -836,6 +855,95 @@ pub struct Payout {
     pub fee: u64,
     /// The Lightning preimage, proof the payment arrived.
     pub preimage: Option<String>,
+}
+
+/// What a Lightning address answers at `/.well-known/lnurlp/<user>`, and
+/// its callback: the parts of LUD-06 and LUD-16 a payout needs.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LnurlPay {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    callback: Option<String>,
+    #[serde(default)]
+    min_sendable: Option<u64>,
+    #[serde(default)]
+    max_sendable: Option<u64>,
+    /// The invoice, in the callback's answer.
+    #[serde(default)]
+    pr: Option<String>,
+}
+
+impl LnurlPay {
+    /// The service's own refusal, if this is one.
+    fn refused(&self) -> Option<String> {
+        (self.status.as_deref() == Some("ERROR"))
+            .then(|| self.reason.clone().unwrap_or_else(|| "refused".into()))
+    }
+}
+
+/// Where to ask a Lightning address for an invoice of `msat`: its callback
+/// with the amount added.
+///
+/// Any HTTPS host. LUD-16 does not tie the callback to the address's domain,
+/// and services that put it elsewhere are common.
+fn lnurl_callback(pay: &LnurlPay, msat: u64) -> Result<reqwest::Url> {
+    if let Some(reason) = pay.refused() {
+        bail!("{reason}");
+    }
+    let callback = pay
+        .callback
+        .as_deref()
+        .context("no callback in its answer")?;
+    let mut url = reqwest::Url::parse(callback).context("its callback is not a URL")?;
+    if url.scheme() != "https" {
+        bail!("its callback is not HTTPS: {callback}");
+    }
+    if let Some(min) = pay.min_sendable
+        && msat < min
+    {
+        bail!("it takes at least {} sat", min.div_ceil(1000));
+    }
+    if let Some(max) = pay.max_sendable
+        && msat > max
+    {
+        bail!("it takes at most {} sat", max / 1000);
+    }
+    url.query_pairs_mut()
+        .append_pair("amount", &msat.to_string());
+    Ok(url)
+}
+
+/// An invoice of `msat` from a Lightning address, `user@domain`.
+async fn lnurl_invoice(address: &str, msat: u64) -> Result<String> {
+    let (user, domain) = address.split_once('@').context("not user@domain")?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+    let get = |url: reqwest::Url| {
+        let client = client.clone();
+        async move {
+            let answer = client.get(url.clone()).send().await?;
+            let status = answer.status();
+            let body: LnurlPay = answer
+                .json()
+                .await
+                .with_context(|| format!("{url} answered {status}, not LNURL"))?;
+            anyhow::Ok(body)
+        }
+    };
+    let pay = get(reqwest::Url::parse(&format!(
+        "https://{domain}/.well-known/lnurlp/{user}"
+    ))?)
+    .await?;
+    let answer = get(lnurl_callback(&pay, msat)?).await?;
+    if let Some(reason) = answer.refused() {
+        bail!("{reason}");
+    }
+    answer.pr.context("no invoice in its answer")
 }
 
 /// Melt against `quote` if it, its fee reserve and the input fee fit in
@@ -1062,6 +1170,38 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_lightning_address_may_call_back_on_another_host() {
+        // Wallet of Satoshi's answer, which cdk refuses: the callback is on
+        // livingroomofsatoshi.com, not walletofsatoshi.com.
+        let pay: LnurlPay = serde_json::from_str(
+            r#"{"callback":"https://livingroomofsatoshi.com/api/v1/lnurl/payreq/x?k=v",
+                "maxSendable":100000000000,"minSendable":1000,"tag":"payRequest",
+                "metadata":"[]"}"#,
+        )
+        .expect("parse");
+        let url = lnurl_callback(&pay, 28_000).expect("a callback");
+        assert_eq!(url.host_str(), Some("livingroomofsatoshi.com"));
+        assert_eq!(url.query(), Some("k=v&amount=28000"));
+
+        let err = lnurl_callback(&pay, 500).expect_err("below its minimum");
+        assert!(err.to_string().contains("at least 1 sat"), "{err}");
+    }
+
+    #[test]
+    fn a_lightning_address_that_refuses_says_why() {
+        let pay: LnurlPay =
+            serde_json::from_str(r#"{"status":"ERROR","reason":"no such user"}"#).expect("parse");
+        let err = lnurl_callback(&pay, 1000).expect_err("refused");
+        assert_eq!(err.to_string(), "no such user");
+
+        let plain: LnurlPay = serde_json::from_str(
+            r#"{"callback":"http://example.org/cb","minSendable":1,"maxSendable":10000000}"#,
+        )
+        .expect("parse");
+        assert!(lnurl_callback(&plain, 1000).is_err(), "not HTTPS");
     }
 
     #[test]

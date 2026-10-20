@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Paying out to a Lightning address whose callback is on another host, as
+  Wallet of Satoshi's is: the invoice is now asked for by `merchantd` rather
+  than by cdk, which refused any callback off the address's own domain.
 - Ctrl-C quits `tolltop`, `merchanttop` and `minttop`; in raw mode it arrived
   as a key nothing handled.
 - `merchantd` lists money at every mint its wallet holds paper from, not only
