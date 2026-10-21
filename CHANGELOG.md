@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `merchantd` counts its sales since start, per mint paid in (sales, what
+  they were paid, bytes sold), in the control socket's snapshot as `sales`.
 - Taking money out of `merchantd`: `export` (one mint's paper as a token, an
   amount or everything) and `pay` (the mint pays a BOLT11 invoice or a
   Lightning address, an amount or everything within its fees) on the control

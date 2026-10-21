@@ -1430,6 +1430,7 @@ mod render_tests {
                     },
                 ],
                 money_mint: None,
+                sales: vec![],
             },
             error: None,
             notice: None,

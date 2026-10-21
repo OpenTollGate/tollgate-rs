@@ -42,7 +42,7 @@
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{Context, Result, anyhow, bail};
 use axum::extract::State;
@@ -149,6 +149,57 @@ impl Prices {
     /// a byte at a time and pay for none of it.
     pub fn units_for(&self, mint: &str, unit: &str, bytes: u64) -> Option<u64> {
         price_of(bytes, self.bytes_per_unit(mint, unit)?)
+    }
+}
+
+/// What the market has sold since `merchantd` started, per issuer it was
+/// paid in: the takings, for an operator's dashboard.
+///
+/// Counted in memory. A restart starts again from zero, which is what a
+/// counter scraped over time expects; what is held is the wallet's, and
+/// survives.
+#[derive(Debug, Clone, Default)]
+pub struct Sales(Arc<Mutex<BTreeMap<(String, String), Sold>>>);
+
+/// The sales paid in one issuer's paper.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sold {
+    /// The issuer paid in.
+    pub mint: String,
+    /// Its unit.
+    pub unit: String,
+    /// How many sales.
+    pub count: u64,
+    /// What they were paid, in `unit`.
+    pub paid: u64,
+    /// What they bought, in the market's own unit: bytes.
+    pub sold: u64,
+}
+
+impl Sales {
+    /// One sale: `paid` of an issuer's paper for `sold` of ours.
+    pub fn record(&self, mint: &str, unit: &str, paid: u64, sold: u64) {
+        let mut all = self.0.lock().expect("not poisoned");
+        let row = all
+            .entry((normalise(mint), unit.to_string()))
+            .or_insert_with(|| Sold {
+                mint: normalise(mint),
+                unit: unit.to_string(),
+                ..Sold::default()
+            });
+        row.count += 1;
+        row.paid = row.paid.saturating_add(paid);
+        row.sold = row.sold.saturating_add(sold);
+    }
+
+    /// Every issuer sold for so far.
+    pub fn all(&self) -> Vec<Sold> {
+        self.0
+            .lock()
+            .expect("not poisoned")
+            .values()
+            .cloned()
+            .collect()
     }
 }
 
@@ -376,6 +427,8 @@ struct Market {
     wallet: Wallet,
     /// Ceiling on a single swap, from the mint's own limit.
     max_amount: u64,
+    /// What has been sold, counted as it is.
+    sales: Sales,
 }
 
 /// The market router.
@@ -386,6 +439,7 @@ pub fn router(
     prices: Prices,
     wallet: Wallet,
     max_amount: u64,
+    sales: Sales,
 ) -> Router {
     Router::new()
         .route(INFO_PATH, get(info))
@@ -397,6 +451,7 @@ pub fn router(
             prices,
             wallet,
             max_amount,
+            sales,
         })
 }
 
@@ -504,6 +559,7 @@ async fn swap(
     let cleared_ms = started.elapsed().as_millis();
     match market.issuer.issue(request.outputs).await {
         Ok(signatures) => {
+            market.sales.record(&paid_mint, &paid_unit, paid, bought);
             info!(
                 paid,
                 unit = %paid_unit,
@@ -824,6 +880,33 @@ mod tests {
                 bytes_per_unit: 700_000,
             },
         ])
+    }
+
+    #[test]
+    fn sales_add_up_per_issuer() {
+        let sales = Sales::default();
+        sales.record("https://a.example/", "sat", 21, 1_000);
+        sales.record("https://a.example", "sat", 9, 500);
+        sales.record("https://b.example", "sat", 5, 100);
+        assert_eq!(
+            sales.all(),
+            vec![
+                Sold {
+                    mint: "https://a.example".into(),
+                    unit: "sat".into(),
+                    count: 2,
+                    paid: 30,
+                    sold: 1_500,
+                },
+                Sold {
+                    mint: "https://b.example".into(),
+                    unit: "sat".into(),
+                    count: 1,
+                    paid: 5,
+                    sold: 100,
+                },
+            ]
+        );
     }
 
     #[test]

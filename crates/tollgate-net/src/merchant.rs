@@ -17,7 +17,7 @@ use tokio::net::UnixListener;
 use tracing::{debug, info};
 
 use crate::control::Response;
-use crate::market::{Accepted, Prices};
+use crate::market::{Accepted, Prices, Sales, Sold};
 use crate::pricing::{self, Accept, Price, Rates, Source};
 use crate::wallet::{Destination, Holding, Kind, Payout, Size, TopUp, Wallet};
 
@@ -264,6 +264,8 @@ pub struct Merchant {
     pub money: Option<(String, String)>,
     /// Paying money out by itself.
     pub sweep: SweepSection,
+    /// What the market has sold since start.
+    pub sales: Sales,
 }
 
 impl Merchant {
@@ -281,6 +283,7 @@ impl Merchant {
             wallet,
             money,
             sweep: SweepSection::default(),
+            sales: Sales::default(),
         };
         merchant.reprice();
         merchant
@@ -375,6 +378,7 @@ impl Merchant {
                 unit: unit.clone(),
                 bytes_per_unit: 0,
             }),
+            sales: self.sales.all(),
         }
     }
 }
@@ -394,6 +398,9 @@ pub struct Snapshot {
     pub holdings: Vec<Holding>,
     /// Where the wallet is topped up.
     pub money_mint: Option<Accepted>,
+    /// What the market has sold since `merchantd` started, per issuer.
+    #[serde(default)]
+    pub sales: Vec<Sold>,
 }
 
 /// A line of JSON asking `merchantd` for something.

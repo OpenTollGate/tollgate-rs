@@ -468,6 +468,7 @@ async fn shop(issuing: bool, takings_seed: u8) -> Shop {
         prices,
         takings.clone(),
         1 << 30,
+        tollgate_net::market::Sales::default(),
     );
     let listener = tokio::net::TcpListener::bind(market)
         .await

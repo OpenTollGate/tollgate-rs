@@ -80,6 +80,7 @@ async fn main() -> Result<()> {
             merchant.prices.clone(),
             merchant.wallet.clone(),
             file.mint.max_amount.max(1),
+            merchant.sales.clone(),
         );
         let listener = tokio::net::TcpListener::bind(&file.listen)
             .await
