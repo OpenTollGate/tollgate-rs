@@ -366,6 +366,17 @@ on, could lose. A mint that cannot pay is logged and tried again next time.
 `merchanttop sweep` make these requests once and print the answer as JSON,
 for scripts. Holdings are read from the wallet's database, so money at a mint
 nothing has touched since a restart is listed and can be taken out.
+### Vouchers to hand out
+
+`merchanttop voucher 1GB --count 20` makes vouchers of the node's own
+capacity for the operator to give away: tickets at a booth, a QR on a
+poster. merchantd issues each the way it issues a sale, through mintd's
+private listener where a quote is paid as it is made, and in parts when it
+is more than the mint issues against one quote. Each is labelled with the
+mint's public URL, so a gate takes it like a bought one. Nothing is kept:
+the printed tokens are the only copies, and they are counted apart from
+sales (`issued` in the snapshot), so a giveaway never reads as takings.
+
 In `merchanttop`'s wallet tab, `w` pays the holding under the cursor out to
 an invoice or a Lightning address (an amount after a space, or nothing for
 everything), and `x` takes it out as a token, shown as a QR and a string

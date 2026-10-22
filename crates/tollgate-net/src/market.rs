@@ -839,6 +839,73 @@ pub fn active_keyset(mint_url: &str, unit: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("{mint_url} has no active {unit} keyset"))
 }
 
+/// A mint's active keyset for `unit`, as cdk-spilman's blinding and
+/// unblinding read it: `{keysetId, unit, keys, inputFeePpk}`.
+pub fn keyset_info(mint_url: &str, unit: &str) -> Result<String> {
+    let id = active_keyset(mint_url, unit)?;
+    let body = http("GET", &format!("{mint_url}/v1/keys/{id}"), "")
+        .map_err(|e| anyhow!("read keyset {id} at {mint_url}: {e}"))?;
+    let listing: serde_json::Value =
+        serde_json::from_str(&body).with_context(|| format!("keys from {mint_url}"))?;
+    let fee = keysets(mint_url)?
+        .iter()
+        .find(|k| k.id.to_string() == id)
+        .map_or(0, |k| k.input_fee_ppk);
+    Ok(serde_json::json!({
+        "keysetId": id,
+        "unit": unit,
+        "keys": listing["keysets"][0]["keys"],
+        "inputFeePpk": fee,
+    })
+    .to_string())
+}
+
+/// A voucher worth `amount` of this node's capacity, issued for the operator
+/// to hand out: blinded here, signed through `issuer` (the mint's private
+/// listener, where a quote is paid as it is made), unblinded, and labelled
+/// with `public_url`, the mint's address as buyers know it, so it is
+/// accepted wherever a bought one is. Nothing is paid for it and nothing is
+/// kept: the token returned is the only copy.
+///
+/// More than the mint issues against one quote is issued in parts, and the
+/// parts go in the one token.
+pub async fn issue_voucher(issuer: &Issuer, public_url: &str, amount: u64) -> Result<String> {
+    if amount == 0 {
+        bail!("a voucher for nothing is not a voucher");
+    }
+    let info = {
+        let (url, unit) = (issuer.url.clone(), issuer.unit.clone());
+        tokio::task::spawn_blocking(move || keyset_info(&url, &unit))
+            .await
+            .context("read the keyset")??
+    };
+    let part = issuer.limit().await.unwrap_or(amount).max(1);
+    let mut proofs: Vec<serde_json::Value> = Vec::new();
+    let mut left = amount;
+    while left > 0 {
+        let this = left.min(part);
+        let blinded = cdk_spilman::create_plain_blinded_messages(this, &info)
+            .map_err(|e| anyhow!("blind {this} {}: {e}", issuer.unit))?;
+        let blinded: serde_json::Value =
+            serde_json::from_str(&blinded).context("blinded messages")?;
+        let outputs: Vec<BlindedMessage> =
+            serde_json::from_value(blinded["blinded_messages"].clone())
+                .context("blinded messages")?;
+        let signatures = issuer.issue(outputs).await?;
+        let made = cdk_spilman::construct_proofs(
+            &serde_json::to_string(&signatures)?,
+            &blinded["secrets_with_blinding"].to_string(),
+            &info,
+        )
+        .map_err(|e| anyhow!("unblind {this} {}: {e}", issuer.unit))?;
+        let made: Vec<serde_json::Value> = serde_json::from_str(&made).context("proofs")?;
+        proofs.extend(made);
+        left -= this;
+    }
+    cdk_spilman::build_cashu_b_token(public_url, &issuer.unit, &serde_json::to_string(&proofs)?)
+        .map_err(|e| anyhow!("build a token: {e}"))
+}
+
 /// A blocking HTTP call, for the paths the synchronous channel backend drives.
 ///
 /// The node runs every backend call on a blocking thread, so a blocking client

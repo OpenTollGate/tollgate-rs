@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Vouchers for the operator to hand out: `merchanttop voucher 1GB --count 20`
+  (control socket `voucher {amount, count}`). merchantd issues each like a
+  sale, through mintd's private listener (in parts past the mint's limit on
+  one quote), labelled with the mint's public address, and prints the
+  tokens; nothing is kept. Counted apart from sales, as `issued` in the
+  snapshot.
 - `merchantd` counts its sales since start, per mint paid in (sales, what
   they were paid, bytes sold), in the control socket's snapshot as `sales`.
 - Taking money out of `merchantd`: `export` (one mint's paper as a token, an

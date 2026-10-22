@@ -52,7 +52,11 @@ async fn main() -> Result<()> {
     let money = (!file.wallet.mint.is_empty())
         .then(|| (file.wallet.mint.clone(), file.wallet.unit.clone()));
     let merchant = Merchant::new(file.price.clone(), file.accepts.clone(), wallet, money)
-        .with_sweep(file.sweep.clone());
+        .with_sweep(file.sweep.clone())
+        .with_vouchers(
+            Issuer::new(&file.mint.private, &file.mint.unit),
+            file.mint.url.clone(),
+        );
     tokio::spawn(merchant::keep_sweeping(merchant.clone()));
 
     // Rates only for currencies a price actually needs converting through: a

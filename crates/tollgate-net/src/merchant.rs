@@ -17,7 +17,7 @@ use tokio::net::UnixListener;
 use tracing::{debug, info};
 
 use crate::control::Response;
-use crate::market::{Accepted, Prices, Sales, Sold};
+use crate::market::{Accepted, Issuer, Prices, Sales, Sold};
 use crate::pricing::{self, Accept, Price, Rates, Source};
 use crate::wallet::{Destination, Holding, Kind, Payout, Size, TopUp, Wallet};
 
@@ -266,7 +266,25 @@ pub struct Merchant {
     pub sweep: SweepSection,
     /// What the market has sold since start.
     pub sales: Sales,
+    /// Where vouchers for the operator to hand out are issued, and the
+    /// mint's address they are labelled with; `None` issues none.
+    pub vouchers: Option<(Issuer, String)>,
+    /// What has been issued that way since start.
+    pub issued: Arc<std::sync::Mutex<Issued>>,
 }
+
+/// Vouchers issued for the operator to hand out, since `merchantd` started:
+/// given away, so counted apart from [`Sold`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Issued {
+    /// How many.
+    pub count: u64,
+    /// What they are worth together, in the mint's unit (bytes).
+    pub amount: u64,
+}
+
+/// The most vouchers one request makes.
+pub const MOST_VOUCHERS: u32 = 500;
 
 impl Merchant {
     /// A merchant selling at `price` for `accepts`, holding `wallet`.
@@ -284,9 +302,48 @@ impl Merchant {
             money,
             sweep: SweepSection::default(),
             sales: Sales::default(),
+            vouchers: None,
+            issued: Arc::default(),
         };
         merchant.reprice();
         merchant
+    }
+
+    /// The same merchant, issuing vouchers through `issuer` labelled with
+    /// `public_url`, the mint's address as buyers know it.
+    pub fn with_vouchers(mut self, issuer: Issuer, public_url: String) -> Self {
+        self.vouchers = Some((issuer, public_url));
+        self
+    }
+
+    /// `count` vouchers of `amount` each, for the operator to hand out. Stops
+    /// at the first that cannot be made, keeping those made before it:
+    /// every one returned is a voucher nobody else has.
+    pub async fn issue_vouchers(&self, amount: u64, count: u32) -> Result<Vec<String>> {
+        let Some((issuer, public_url)) = &self.vouchers else {
+            anyhow::bail!("this merchant issues no vouchers (no mint configured)");
+        };
+        if count == 0 || count > MOST_VOUCHERS {
+            anyhow::bail!("between 1 and {MOST_VOUCHERS} vouchers at a time");
+        }
+        let mut made = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            match crate::market::issue_voucher(issuer, public_url, amount).await {
+                Ok(token) => {
+                    let mut issued = self.issued.lock().expect("not poisoned");
+                    issued.count += 1;
+                    issued.amount = issued.amount.saturating_add(amount);
+                    made.push(token);
+                }
+                Err(e) if made.is_empty() => return Err(e),
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), made = made.len(), "stopped issuing vouchers");
+                    break;
+                }
+            }
+        }
+        info!(count = made.len(), amount, "issued vouchers to hand out");
+        Ok(made)
     }
 
     /// The same merchant, sweeping as `sweep` says.
@@ -379,6 +436,7 @@ impl Merchant {
                 bytes_per_unit: 0,
             }),
             sales: self.sales.all(),
+            issued: *self.issued.lock().expect("not poisoned"),
         }
     }
 }
@@ -401,6 +459,9 @@ pub struct Snapshot {
     /// What the market has sold since `merchantd` started, per issuer.
     #[serde(default)]
     pub sales: Vec<Sold>,
+    /// Vouchers issued for the operator to hand out since start.
+    #[serde(default)]
+    pub issued: Issued,
 }
 
 /// A line of JSON asking `merchantd` for something.
@@ -465,6 +526,19 @@ pub enum Request {
     },
     /// Sweep now, as `sweep` in merchant.yaml says.
     Sweep,
+    /// Vouchers of this node's capacity for the operator to hand out:
+    /// `count` of `amount` each, in the mint's unit (bytes).
+    Voucher {
+        /// What each is worth.
+        amount: u64,
+        /// How many; one if not given.
+        #[serde(default = "one")]
+        count: u32,
+    },
+}
+
+fn one() -> u32 {
+    1
 }
 
 fn sat() -> String {
@@ -639,6 +713,10 @@ async fn run(request: Request, merchant: &Merchant, socket: Socket) -> Response 
                 Err(e) => error(format!("{e:#}")),
             }
         }
+        Request::Voucher { amount, count } => match merchant.issue_vouchers(amount, count).await {
+            Ok(vouchers) => ok(serde_json::json!({ "amount": amount, "vouchers": vouchers })),
+            Err(e) => error(format!("{e:#}")),
+        },
         Request::Sweep => match merchant.sweep_now().await {
             Ok(swept) => ok(swept),
             Err(e) => error(format!("{e:#}")),

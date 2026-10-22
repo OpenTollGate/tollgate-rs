@@ -362,6 +362,9 @@ struct Shop {
     takings: Wallet,
     /// The mint the money comes from.
     money: Seller,
+    /// The seller's mint: where buyers know it, and where it issues.
+    public: SocketAddr,
+    private: SocketAddr,
     _dirs: (TempDir, TempDir),
 }
 
@@ -496,8 +499,43 @@ async fn shop(issuing: bool, takings_seed: u8) -> Shop {
         stats,
         takings,
         money,
+        public,
+        private,
         _dirs: (dir, takings_dir),
     }
+}
+
+/// A voucher for the operator to hand out: issued through the private
+/// listener, in parts when it is more than one quote may be, labelled with
+/// the public address, and good wherever a bought one is.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_voucher_is_issued_privately_and_spends_publicly() {
+    let shop = shop(true, 12).await;
+    let issuer = tollgate_net::market::Issuer::new(format!("http://{}", shop.private), UNIT);
+    let public = format!("http://{}", shop.public);
+    let amount = (1u64 << 20) + 5;
+
+    let token = tollgate_net::market::issue_voucher(&issuer, &public, amount)
+        .await
+        .expect("a voucher");
+    assert_eq!(
+        shop.stats.private_quotes.load(Ordering::Relaxed),
+        2,
+        "over the mint's ceiling for one quote: two parts"
+    );
+
+    let dir = TempDir::new();
+    let holder = buyer_wallet(&dir, 13).await;
+    holder.deposit(&token).await.expect("the voucher is good");
+    assert_eq!(
+        holder.balance_of(&public, UNIT).await,
+        amount,
+        "all of it, at the public address"
+    );
+    assert!(
+        holder.deposit(&token).await.is_err(),
+        "and it is spent once"
+    );
 }
 
 /// A sale on the market: the buyer pays with one mint's tokens, and what it

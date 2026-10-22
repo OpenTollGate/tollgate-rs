@@ -22,6 +22,10 @@
 //! Both are commands as well, so scripts and a gateway's own tooling can do
 //! it: `merchanttop holdings`, `merchanttop export`, `merchanttop pay` and
 //! `merchanttop sweep` ask once, print the answer as JSON and exit.
+//!
+//! `merchanttop voucher 1GB --count 20` makes vouchers of this node's own
+//! capacity for the operator to hand out, issued like the ones it sells and
+//! printed as tokens.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -99,6 +103,42 @@ enum Command {
     },
     /// Sweep now, as `sweep` in merchant.yaml says.
     Sweep,
+    /// Make vouchers of this node's capacity to hand out, printed as tokens.
+    /// Each is money's worth of data: whoever holds one can use it.
+    Voucher {
+        /// What each is worth: `1GB`, `500MB`, or a number of bytes.
+        /// Decimal, as the portal shows it (1 GB = 1,000,000,000 bytes).
+        #[arg(value_parser = parse_size)]
+        size: u64,
+        /// How many.
+        #[arg(long, default_value_t = 1)]
+        count: u32,
+    },
+}
+
+/// `1GB`, `1.5 GB`, `500MB`, `250kB` or plain bytes, in decimal units.
+fn parse_size(text: &str) -> Result<u64, String> {
+    let text = text.trim();
+    let split = text
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let number: f64 = number
+        .parse()
+        .map_err(|_| format!("not a size: {text:?} (try 1GB or 500MB)"))?;
+    let scale = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "kb" | "k" => 1e3,
+        "mb" | "m" => 1e6,
+        "gb" | "g" => 1e9,
+        "tb" | "t" => 1e12,
+        other => return Err(format!("not a unit: {other:?} (B, kB, MB, GB, TB)")),
+    };
+    let bytes = (number * scale).round();
+    if !(bytes >= 1.0 && bytes < u64::MAX as f64) {
+        return Err(format!("not a size worth a voucher: {text:?}"));
+    }
+    Ok(bytes as u64)
 }
 
 /// Ask once, print, exit: the answer's data as JSON, or the error on stderr.
@@ -118,6 +158,10 @@ fn one_shot(socket: &std::path::Path, command: Command) -> Result<()> {
             amount,
         },
         Command::Sweep => Request::Sweep,
+        Command::Voucher { size, count } => Request::Voucher {
+            amount: size,
+            count,
+        },
     };
     let holdings_only = matches!(request, Request::Snapshot);
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1431,6 +1475,7 @@ mod render_tests {
                 ],
                 money_mint: None,
                 sales: vec![],
+                issued: Default::default(),
             },
             error: None,
             notice: None,
@@ -1628,6 +1673,17 @@ mod render_tests {
         app.start_withdraw(false);
         assert_eq!(app.editing, None);
         assert!(app.notice.is_some());
+    }
+
+    #[test]
+    fn sizes_read_as_the_portal_writes_them() {
+        assert_eq!(parse_size("1GB"), Ok(1_000_000_000));
+        assert_eq!(parse_size("1.5 GB"), Ok(1_500_000_000));
+        assert_eq!(parse_size("500mb"), Ok(500_000_000));
+        assert_eq!(parse_size("2500"), Ok(2_500));
+        assert!(parse_size("0GB").is_err());
+        assert!(parse_size("1 GiB").is_err());
+        assert!(parse_size("lots").is_err());
     }
 
     #[test]
