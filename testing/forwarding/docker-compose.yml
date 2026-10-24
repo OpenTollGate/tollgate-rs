@@ -54,8 +54,8 @@ services:
         cd /srv && exec python3 -m http.server 8080 --bind ::
     networks:
       transit:
-        ipv4_address: 172.29.0.10
-        ipv6_address: fd00:29::10
+        ipv4_address: 172.30.0.10
+        ipv6_address: fd00:30::10
 
   gateway:
     image: tollgate-test:${IMAGE_TAG:-latest}
@@ -74,7 +74,7 @@ services:
     command:
       - >
         edge=$$(ip -o -4 addr show | awk '$$4 ~ /^172\.28\.0\.20\// {print $$2}') &&
-        transit=$$(ip -o -4 addr show | awk '$$4 ~ /^172\.29\.0\.20\// {print $$2}') &&
+        transit=$$(ip -o -4 addr show | awk '$$4 ~ /^172\.30\.0\.20\// {print $$2}') &&
         [ -n "$$edge" ] && [ -n "$$transit" ] &&
         sed "s/EDGE_INTERFACE/$$edge/" /etc/tollgate/gateway.yaml > /run/gateway.yaml &&
         nft add table inet tollgate_nat &&
@@ -97,8 +97,8 @@ services:
         ipv4_address: 172.28.0.20
         ipv6_address: fd00:28::20
       transit:
-        ipv4_address: 172.29.0.20
-        ipv6_address: fd00:29::20
+        ipv4_address: 172.30.0.20
+        ipv6_address: fd00:30::20
 
   client:
     image: tollgate-test:${IMAGE_TAG:-latest}
@@ -107,7 +107,7 @@ services:
     # single argument rather than being split into words.
     command:
       - >
-        ip route replace 172.29.0.0/24 via 172.28.0.20 &&
+        ip route replace 172.30.0.0/24 via 172.28.0.20 &&
         exec tollgate-node -c /etc/tollgate/client.yaml
         --demand 2000000
     volumes:
@@ -131,8 +131,8 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >
-        ip route replace 172.29.0.0/24 via 172.28.0.20 &&
-        ip -6 route replace fd00:29::/64 via fd00:28::20 &&
+        ip route replace 172.30.0.0/24 via 172.28.0.20 &&
+        ip -6 route replace fd00:30::/64 via fd00:28::20 &&
         exec sleep infinity
     init: true
     cap_add: [NET_ADMIN]
@@ -189,5 +189,5 @@ networks:
       com.docker.network.bridge.gateway_mode_ipv6: routed
     ipam:
       config:
-        - subnet: 172.29.0.0/24
-        - subnet: fd00:29::/64
+        - subnet: 172.30.0.0/24
+        - subnet: fd00:30::/64

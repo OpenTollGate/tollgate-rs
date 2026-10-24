@@ -51,7 +51,7 @@ docker compose -f "$COMPOSE" exec -T gateway ip -br addr show "$edge" | grep "17
 
 # Every packet has to cross the gateway, or the measurement below would be of
 # a path that was never shaped.
-docker compose -f "$COMPOSE" exec -T client ip route get 172.29.0.10 | grep "via 172.28.0.20" >/dev/null \
+docker compose -f "$COMPOSE" exec -T client ip route get 172.30.0.10 | grep "via 172.28.0.20" >/dev/null \
   || tollgate::fail "the client is not routing to the origin through the gateway"
 
 # The kernel is really doing the work: rules and a class exist for this peer.
@@ -78,7 +78,7 @@ DURATION=20
 read -r code bytes speed <<<"$(docker compose -f "$COMPOSE" exec -T client curl -s \
   --max-time "$DURATION" -o /dev/null \
   -w '%{http_code} %{size_download} %{speed_download}' \
-  http://172.29.0.10:8080/blob)"
+  http://172.30.0.10:8080/blob)"
 
 echo "  http $code, $bytes bytes at $speed B/s"
 
@@ -113,7 +113,7 @@ echo "  ok: IPv4 forwarding"
 # IPv6 against the same budget. What is asserted is what crosses the gateway, not
 # what the node believes.
 PHONE6="fd00:28::40"
-ORIGIN6="http://[fd00:29::10]:8080/blob"
+ORIGIN6="http://[fd00:30::10]:8080/blob"
 p=(docker compose -f "$COMPOSE" exec -T phone)
 gw=(docker compose -f "$COMPOSE" exec -T gateway)
 
@@ -136,7 +136,7 @@ fetch6() {
 # gateway has a neighbour entry tying the address to the phone's MAC.
 "${p[@]}" ping -6 -c 2 -W 1 fd00:28::20 >/dev/null \
   || tollgate::fail "the phone cannot reach the gateway over IPv6"
-"${p[@]}" ip -6 route get fd00:29::10 | grep "via fd00:28::20" >/dev/null \
+"${p[@]}" ip -6 route get fd00:30::10 | grep "via fd00:28::20" >/dev/null \
   || tollgate::fail "the phone is not routing to the origin through the gateway"
 phone_mac="$("${p[@]}" cat /sys/class/net/eth0/address)"
 
