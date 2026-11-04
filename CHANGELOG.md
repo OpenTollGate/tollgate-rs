@@ -40,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A session that started again paid for all its key had moved before: the `ip`
+  enforcer kept a key's counters when it left, and the new session's meter
+  counted them as new. A payer could be left holding nothing, shaped to
+  the minimum, while the proxy that bought for it still showed credit. Its
+  counters now start from zero, and go when it does.
 - Paying out to a Lightning address whose callback is on another host, as
   Wallet of Satoshi's is: the invoice is now asked for by `merchantd` rather
   than by cdk, which refused any callback off the address's own domain.

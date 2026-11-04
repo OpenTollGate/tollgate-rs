@@ -984,6 +984,9 @@ impl Enforcer for Ip {
         // walk over rule handles.
         for name in [&delivered, &received] {
             let _ = nft(&["add", "counter", "inet", TABLE, name]);
+            // From zero, as the session's new meter does: a count left from
+            // this key's last session would be drawn from its budget again.
+            let _ = nft(&["reset", "counter", "inet", TABLE, name]);
         }
         // Counted by IP until a refresh shows it is an upstream.
         let metering = Metering::Addr;
@@ -1191,6 +1194,10 @@ impl Enforcer for Ip {
             .concat(),
             &[],
         );
+        // Nothing points at them now, and keys come and go.
+        for name in [&delivered, &received] {
+            let _ = nft(&["delete", "counter", "inet", TABLE, name]);
+        }
         let ip = entry.addr.to_string();
         for set in ["allowed", "known"] {
             let _ = nft(&[
