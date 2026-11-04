@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The control socket's `move_budget {from, to}`: put the budget one payer left
+  behind under another. For a host whose customer came back at a new address
+  (proxyd's claim codes). `client::Buying::SignOver` and
+  `BuyerPolicy::SIGN_ALL`, to sign all a session's channels will take over to
+  the gateway before it ends.
 - Vouchers for the operator to hand out: `merchanttop voucher 1GB --count 20`
   (control socket `voucher {amount, count}`). merchantd issues each like a
   sale, through mintd's private listener (in parts past the mint's limit on

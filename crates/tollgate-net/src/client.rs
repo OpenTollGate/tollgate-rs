@@ -80,6 +80,11 @@ pub enum Buying {
         /// can be.
         renew_lead_ms: u64,
     },
+    /// The session is about to end and what it paid is moving on: sign all
+    /// its channels will take over to the gateway, reserving nothing. What a
+    /// channel has not signed is lost with the session; what the gateway holds
+    /// is kept for the payer ([`crate::control::Request::MoveBudget`]).
+    SignOver,
 }
 
 impl Buying {
@@ -102,6 +107,12 @@ impl Buying {
                 window_ms: PAY_PER_USE_WINDOW_MS,
                 renew_lead_ms,
                 budget,
+                ..base
+            },
+            Buying::SignOver => BuyerPolicy {
+                reserve: false,
+                window_ms: PAY_PER_USE_WINDOW_MS,
+                budget: BuyerPolicy::SIGN_ALL,
                 ..base
             },
         }

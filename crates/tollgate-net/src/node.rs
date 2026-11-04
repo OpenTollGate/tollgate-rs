@@ -5,7 +5,7 @@
 //! that would stop the crate below from running on an ESP32 lives here.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -175,6 +175,9 @@ pub struct Node {
     started: Instant,
     /// How the node buys, when its owner changes it while it runs.
     buying: Option<watch::Receiver<BuyerPolicy>>,
+    /// What the control socket asks of the node ([`Self::commands`]).
+    commands_tx: control::Commands,
+    commands_rx: Option<mpsc::Receiver<control::Command>>,
 }
 
 impl Node {
@@ -184,6 +187,7 @@ impl Node {
         channels: Arc<dyn ChannelBackend>,
         enforcer: Arc<dyn Enforcer>,
     ) -> Self {
+        let (commands_tx, commands_rx) = mpsc::channel(16);
         let mut sessions = Sessions::new(
             config.identity.pubkey(),
             config.policy.clone(),
@@ -214,6 +218,8 @@ impl Node {
             published: Default::default(),
             started: Instant::now(),
             buying: None,
+            commands_tx,
+            commands_rx: Some(commands_rx),
         }
     }
 
@@ -237,6 +243,12 @@ impl Node {
     /// read, so a watcher never holds the event loop up.
     pub fn published(&self) -> control::Published {
         Arc::clone(&self.published)
+    }
+
+    /// Where the control socket sends what only the event loop can carry out
+    /// ([`control::serve_commands`]).
+    pub fn commands(&self) -> control::Commands {
+        self.commands_tx.clone()
     }
 
     /// The enforcer, so a demo or a test can set demand and read counters.
@@ -320,8 +332,10 @@ impl Node {
 
         let mut shutdown = std::pin::pin!(shutdown);
         let mut buying = self.buying.take();
+        let mut commands = self.commands_rx.take().expect("a node runs once");
         loop {
             tokio::select! {
+                Some(command) = commands.recv() => self.on_command(command, &done_tx).await,
                 Some(policy) = buying_changed(&mut buying) => {
                     info!(reserve = policy.reserve, "buying changed");
                     self.sessions.set_buyer_policy(policy);
@@ -365,6 +379,47 @@ impl Node {
             self.settler
                 .drain(SHUTDOWN_SETTLE_GRACE + Duration::from_secs(1)),
         );
+    }
+
+    async fn on_command(&mut self, command: control::Command, done: &mpsc::Sender<Event>) {
+        match command {
+            control::Command::MoveBudget { from, to, answer } => {
+                let moved = self.move_budget(from, to, done).await;
+                match &moved {
+                    Ok(units) => info!(payer = %from.0, to = %to.0, units, "a budget moved"),
+                    Err(e) => debug!(payer = %from.0, error = %e, "a budget did not move"),
+                }
+                let _ = answer.send(moved);
+            }
+        }
+    }
+
+    /// Put what the payer `from` left behind under `to`. A connected payer's
+    /// budget is live in its session, and would be written over when that
+    /// ends, so both must have gone; one held after an unclean disconnect is
+    /// ended here, as it is when a key comes back from another address.
+    async fn move_budget(
+        &mut self,
+        from: (PubKey, IpAddr),
+        to: (PubKey, IpAddr),
+        done: &mpsc::Sender<Event>,
+    ) -> Result<u64, String> {
+        for (peer, _) in [from, to] {
+            if self.sessions.peer(&peer).is_some() {
+                return Err(format!("{peer} is still connected"));
+            }
+            if self.sessions.parked(&peer).is_some() {
+                let now = self.now();
+                for action in self.sessions.forget(peer, now) {
+                    self.execute(action, done).await;
+                }
+            }
+        }
+        let from = budgets::key(from.0, from.1, self.peer_identity);
+        let to = budgets::key(to.0, to.1, self.peer_identity);
+        self.budgets
+            .transfer(&from, &to)
+            .map_err(|e| format!("{e:#}"))
     }
 
     async fn on_wire(&mut self, event: Wire, done: &mpsc::Sender<Event>) {
@@ -1017,6 +1072,60 @@ mod tests {
             budget_file: None,
         };
         Node::new(&config, channels, enforcer)
+    }
+
+    #[tokio::test]
+    async fn a_moved_budget_follows_the_customer_only_when_the_control_socket_says_so() {
+        let mut node = node(Arc::new(Registry::default()));
+        let (done, _done_rx) = mpsc::channel(256);
+        let (old, new) = (Identity::generate().pubkey(), Identity::generate().pubkey());
+        let (here, there): (IpAddr, IpAddr) =
+            ("10.0.0.7".parse().unwrap(), "10.0.0.8".parse().unwrap());
+        let old_key = budgets::key(old, here, PeerIdentity::Address);
+        let new_key = budgets::key(new, there, PeerIdentity::Address);
+        let budget = tollgate_core::grant::Budget {
+            remaining: 5_000,
+            deadline: node.now() + 600_000,
+        };
+        let now = node.now();
+        node.budgets.put(&old_key, budget, now).unwrap();
+
+        // Connecting from the new address with the old key takes nothing: a
+        // key proves nothing about an address. It is the payer's own session
+        // that has to be gone before anything moves.
+        let (tx, _rx) = mpsc::channel(64);
+        let conn = Connection::next();
+        node.on_wire(
+            Wire::PeerUp {
+                peer: old,
+                conn,
+                addr: "10.0.0.7:40001".parse().unwrap(),
+                tx,
+            },
+            &done,
+        )
+        .await;
+        let refused = node.move_budget((old, here), (new, there), &done).await;
+        assert!(refused.unwrap_err().contains("still connected"));
+        assert!(node.budgets.get(&new_key, now).is_none());
+
+        // Gone uncleanly it is held; the move ends that and keeps its budget.
+        node.on_wire(Wire::PeerDown { peer: old, conn }, &done)
+            .await;
+        assert_eq!(
+            node.move_budget((old, here), (new, there), &done).await,
+            Ok(5_000)
+        );
+        assert!(node.sessions.parked(&old).is_none());
+        let now = node.now();
+        assert!(node.budgets.get(&old_key, now).is_none());
+        assert_eq!(node.budgets.get(&new_key, now).unwrap().remaining, 5_000);
+
+        // Moved once.
+        assert_eq!(
+            node.move_budget((old, here), (new, there), &done).await,
+            Ok(0)
+        );
     }
 
     #[tokio::test]

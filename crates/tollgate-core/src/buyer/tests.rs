@@ -1149,3 +1149,35 @@ fn without_a_replacement_the_expiring_channel_is_used_until_it_is_settled() {
     buyer.confirmed(channel(2));
     assert_eq!(buyer.active().expect("active").id, channel(2));
 }
+
+#[test]
+fn a_buyer_signing_everything_fills_its_channels_however_much_it_holds() {
+    let policy = BuyerPolicy {
+        reserve: false,
+        budget: BuyerPolicy::SIGN_ALL,
+        window_ms: 30 * DAY,
+        renew_lead_ms: 500,
+        ..BuyerPolicy::default()
+    };
+    let idle = Demand {
+        observed_rate: 0,
+        terms: terms(),
+    };
+    let mut buyer = opened(1_000);
+    let holding = BuyerPolicy {
+        budget: 100,
+        ..policy
+    };
+    // It holds a tenth of the channel and nothing has drained: no reason to buy.
+    let bought = buy(&mut buyer, &holding, demand(1), Millis(0));
+    assert_eq!(bought.grant, 100);
+    assert!(poll(&buyer, &holding, idle, Millis(5_000)).is_none());
+
+    let all = buy(&mut buyer, &policy, idle, Millis(5_000));
+    assert_eq!(all.grant, 900, "all the channel had left");
+    assert_eq!(all.first.cumulative, 1_000);
+    assert!(
+        poll(&buyer, &policy, idle, Millis(10_000)).is_none(),
+        "nothing left to sign is not a purchase"
+    );
+}

@@ -298,11 +298,17 @@ async fn main() -> Result<()> {
     // it is operational state for a local tool, not something a peer acts on.
     {
         let published = node.published();
+        let commands = node.commands();
         let path = file.control_socket_path(&runtime_dir);
         info!(control = %path.display(), "control socket");
         tokio::spawn(async move {
-            if let Err(e) =
-                tollgate_net::control::serve(&path, published, std::future::pending()).await
+            if let Err(e) = tollgate_net::control::serve_commands(
+                &path,
+                published,
+                Some(commands),
+                std::future::pending(),
+            )
+            .await
             {
                 tracing::warn!(error = %format!("{e:#}"), "the control socket stopped");
             }

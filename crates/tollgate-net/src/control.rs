@@ -13,6 +13,7 @@
 //! Local-only by construction: a Unix socket has no port to expose, and
 //! nothing here is reachable by a peer.
 
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,8 +22,10 @@ use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
+use tokio::sync::{mpsc, oneshot};
 use tollgate_core::access::AccessLevel;
 use tollgate_core::session::{Phase, Sessions};
+use tollgate_protocol::PubKey;
 use tracing::debug;
 
 use crate::enforcer::Enforcer;
@@ -296,7 +299,46 @@ pub enum Request {
     /// Everything the node is doing. The same thing a caller gets by saying
     /// nothing at all.
     Snapshot,
+    /// Put the budget one payer left behind under another, which is how it
+    /// follows a customer to a new address: under `enforcer.identity: address`
+    /// a budget comes back only to the same key from the same address, and
+    /// nothing a peer says over the wire may change that, since an address
+    /// proves nothing. Whoever holds this socket runs the gate, and vouches
+    /// for it. Neither payer may be connected. Answers `{"moved": units}`;
+    /// from a payer to itself, it moves nothing and says what is kept there.
+    MoveBudget {
+        /// Who left it.
+        from: Payer,
+        /// Who it is for.
+        to: Payer,
+    },
 }
+
+/// A payer as a budget is kept: its key, and the address it pays from.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Payer {
+    /// Its key, compressed and hex-encoded, as the snapshot writes it.
+    pub pubkey: String,
+    /// The address it pays from.
+    pub address: IpAddr,
+}
+
+/// What the control socket asks of the node that serves it.
+#[derive(Debug)]
+pub enum Command {
+    /// [`Request::MoveBudget`], and where the answer goes: the units moved.
+    MoveBudget {
+        /// Who left it: the payer's key and address.
+        from: (PubKey, IpAddr),
+        /// Who it is for: the payer's key and address.
+        to: (PubKey, IpAddr),
+        /// Told the units moved, or why not.
+        answer: oneshot::Sender<std::result::Result<u64, String>>,
+    },
+}
+
+/// Where the control socket sends what only the node can carry out.
+pub type Commands = mpsc::Sender<Command>;
 
 /// What came back.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -324,6 +366,17 @@ pub async fn serve(
     published: Published,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> Result<()> {
+    serve_commands(path, published, None, shutdown).await
+}
+
+/// [`serve`], carrying out commands through `commands` ([`crate::node::Node::commands`]).
+/// Without it, every command is answered with an error.
+pub async fn serve_commands(
+    path: &Path,
+    published: Published,
+    commands: Option<Commands>,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+) -> Result<()> {
     // A socket left behind by a previous run would make bind fail. Removing it
     // is safe because binding is what proves nobody else is listening.
     let _ = std::fs::remove_file(path);
@@ -342,8 +395,9 @@ pub async fn serve(
                     }
                 };
                 let published = Arc::clone(&published);
+                let commands = commands.clone();
                 tokio::spawn(async move {
-                    let _ = answer(stream, published).await;
+                    let _ = answer(stream, published, commands).await;
                 });
             }
             _ = &mut shutdown => break,
@@ -359,7 +413,11 @@ pub async fn serve(
 /// The request is optional: a caller that closes its writing half without
 /// sending anything is asking for the snapshot, which is what every reader of
 /// this socket did before it could be asked anything else.
-async fn answer(stream: tokio::net::UnixStream, published: Published) -> Result<()> {
+async fn answer(
+    stream: tokio::net::UnixStream,
+    published: Published,
+    commands: Option<Commands>,
+) -> Result<()> {
     let (rx, mut tx) = stream.into_split();
     let mut line = String::new();
 
@@ -379,6 +437,7 @@ async fn answer(stream: tokio::net::UnixStream, published: Published) -> Result<
             Ok(Request::Snapshot) => Response::Ok {
                 data: serde_json::to_value(&**published.load())?,
             },
+            Ok(Request::MoveBudget { from, to }) => move_budget(commands, from, to).await,
             Err(e) => Response::Error {
                 message: format!("not a request this node understands: {e}"),
             },
@@ -396,6 +455,40 @@ async fn answer(stream: tokio::net::UnixStream, published: Published) -> Result<
     tx.write_all(&body).await?;
     tx.shutdown().await?;
     Ok(())
+}
+
+/// Hand a [`Request::MoveBudget`] to the node, and say how it went.
+async fn move_budget(commands: Option<Commands>, from: Payer, to: Payer) -> Response {
+    let refused = |message: String| Response::Error { message };
+    let Some(commands) = commands else {
+        return refused("this node takes no commands".into());
+    };
+    let (from, to) = match (from.parsed(), to.parsed()) {
+        (Ok(from), Ok(to)) => (from, to),
+        (Err(e), _) | (_, Err(e)) => return refused(e),
+    };
+    let (answer, answered) = oneshot::channel();
+    let asked = Command::MoveBudget { from, to, answer };
+    if commands.send(asked).await.is_err() {
+        return refused("the node is stopping".into());
+    }
+    match answered.await {
+        Ok(Ok(moved)) => Response::Ok {
+            data: serde_json::json!({ "moved": moved }),
+        },
+        Ok(Err(e)) => refused(e),
+        Err(_) => refused("the node is stopping".into()),
+    }
+}
+
+impl Payer {
+    fn parsed(&self) -> std::result::Result<(PubKey, IpAddr), String> {
+        let bytes = hex::decode(&self.pubkey).map_err(|e| format!("{}: {e}", self.pubkey))?;
+        let key: [u8; 33] = bytes
+            .try_into()
+            .map_err(|_| format!("{}: not a 33-byte compressed key", self.pubkey))?;
+        Ok((PubKey(key), self.address))
+    }
 }
 
 /// Read one snapshot from a node's control socket.

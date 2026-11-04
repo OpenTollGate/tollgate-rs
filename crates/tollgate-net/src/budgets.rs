@@ -133,6 +133,30 @@ impl BudgetStore {
         self.write()
     }
 
+    /// Put what is kept under `from` under `to`, on top of anything already
+    /// there and with the later of the two deadlines. What moved, in units;
+    /// the same key twice moves nothing and says what is kept there.
+    pub fn transfer(&mut self, from: &str, to: &str) -> Result<u64> {
+        let unix = unix_now();
+        self.prune(unix);
+        if from == to {
+            return Ok(self.records.get(from).map_or(0, |r| r.remaining));
+        }
+        let Some(moved) = self.records.remove(from) else {
+            return Ok(0);
+        };
+        let merged = match self.records.get(to) {
+            Some(there) => Record {
+                remaining: there.remaining.saturating_add(moved.remaining),
+                deadline_unix_ms: there.deadline_unix_ms.max(moved.deadline_unix_ms),
+            },
+            None => moved,
+        };
+        self.records.insert(to.to_owned(), merged);
+        self.write()?;
+        Ok(moved.remaining)
+    }
+
     /// How many budgets are kept.
     pub fn len(&self) -> usize {
         self.records.len()
@@ -272,6 +296,33 @@ mod tests {
             key(peer(1), a, PeerIdentity::Pubkey),
             key(peer(2), a, PeerIdentity::Pubkey)
         );
+    }
+
+    #[test]
+    fn a_budget_moved_to_another_payer_is_theirs_and_no_longer_the_first_ones() {
+        let dir = crate::tempdir::Dir::new();
+        let path = dir.path().join("budgets.json");
+        let mut store = BudgetStore::open(&path);
+        let now = Millis::ZERO;
+        let budget = |remaining, left: u64| Budget {
+            remaining,
+            deadline: now + left,
+        };
+        store.put("old", budget(700, 60_000), now).unwrap();
+        store.put("new", budget(50, 600_000), now).unwrap();
+
+        assert_eq!(store.transfer("old", "old").unwrap(), 700, "only says");
+        assert_eq!(store.transfer("old", "new").unwrap(), 700);
+        assert!(store.get("old", now).is_none());
+        let there = store.get("new", now).unwrap();
+        assert_eq!(there.remaining, 750, "on top of what it had");
+        assert!(there.deadline.saturating_since(now) > 60_000, "the later");
+        assert_eq!(store.transfer("old", "new").unwrap(), 0, "moved once");
+
+        // And it stays moved across a restart.
+        let store = BudgetStore::open(&path);
+        assert!(store.get("old", now).is_none());
+        assert_eq!(store.get("new", now).unwrap().remaining, 750);
     }
 
     #[test]

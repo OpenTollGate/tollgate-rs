@@ -77,6 +77,12 @@ pub struct BuyerPolicy {
 }
 
 impl BuyerPolicy {
+    /// Without [`Self::reserve`], a [`Self::budget`] that asks for everything:
+    /// each purchase signs all the channels in use will take, at once and
+    /// whatever is held already. For a buyer about to leave, so that what it
+    /// locked into channels is with the provider, where it outlives them.
+    pub const SIGN_ALL: u64 = u64::MAX;
+
     /// A renewal lead below this is asking for a lapsed budget.
     ///
     /// The lead is how late a purchase may be and still land before the budget

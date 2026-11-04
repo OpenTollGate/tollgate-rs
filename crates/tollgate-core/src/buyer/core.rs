@@ -58,7 +58,8 @@ pub fn poll(buyer: &Buyer, policy: &BuyerPolicy, demand: Demand, now: Millis) ->
     } else {
         0
     };
-    if wanted_rate == 0 && resume == 0 {
+    let sign_all = !policy.reserve && policy.budget == BuyerPolicy::SIGN_ALL;
+    if wanted_rate == 0 && resume == 0 && !sign_all {
         return None;
     }
 
@@ -100,7 +101,7 @@ pub fn poll(buyer: &Buyer, policy: &BuyerPolicy, demand: Demand, now: Millis) ->
         }
     } else if !policy.reserve && buyer.reserved() > reserve {
         Trigger::StopReserving
-    } else if running_out {
+    } else if running_out || sign_all {
         if buyer.started {
             Trigger::Renewal
         } else {
