@@ -35,8 +35,10 @@
 //! one at all, so the bridge must be told what a deposit is worth and will
 //! refuse to guess.
 
+pub mod exchange;
 pub mod funding;
 
+pub use exchange::{PricePolicy, Refusal, V1Purchase, V1Receipt, accept};
 pub use funding::BridgeFunding;
 
 use std::collections::BTreeMap;
