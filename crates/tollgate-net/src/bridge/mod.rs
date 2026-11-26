@@ -38,6 +38,7 @@
 pub mod admit;
 pub mod admit_enforcer;
 pub mod admit_fips;
+pub mod enforcer_daemon;
 pub mod exchange;
 pub mod funding;
 pub mod http;
