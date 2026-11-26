@@ -73,8 +73,31 @@ impl BridgeFunding {
 }
 
 impl Funding for BridgeFunding {
+    /// Fund a channel, but only out of credit a v1 buyer created.
+    ///
+    /// This is the bound the bridge exists for. `merchantd` holds its own wallet
+    /// and will print vouchers for whatever it is asked, so calling it directly
+    /// would be unbounded: a v2 session could fund itself from the node's mint
+    /// without any v1 buyer having paid. So the credit is spent FIRST, and only
+    /// what was actually released is asked for.
+    ///
+    /// If merchantd then fails, the released credit is returned: the money never
+    /// arrived, so the ledger must not keep it. A failure here is therefore
+    /// neutral on the ledger, which is what lets a session retry.
     fn vouchers(&self, mint: &str, unit: &str, amount: u64) -> Result<String> {
-        self.merchant.vouchers(mint, unit, amount)
+        let released = self.credit.take(mint, unit, amount);
+        if released == 0 {
+            anyhow::bail!(
+                "no credit for {amount} {unit} from {mint}: a v1 buyer has not paid for it"
+            );
+        }
+        match self.merchant.vouchers(mint, unit, released) {
+            Ok(token) => Ok(token),
+            Err(e) => {
+                self.credit.refund(mint, unit, released);
+                Err(e).context("fund a channel from credit merchantd had already taken")
+            }
+        }
     }
 
     fn deposit(&self, token: &str) -> Result<()> {
@@ -185,6 +208,76 @@ mod tests {
         );
     }
 
+    /// The bound this bridge exists for: a session must not be able to fund more
+    /// than a v1 buyer paid, even though merchantd would happily mint it.
+    ///
+    /// merchantd holds its own wallet and can print vouchers on demand, so asking
+    /// it directly is unbounded. The ledger is what makes the bridge a bridge
+    /// rather than a free pass to the node's mint: funding must spend credit.
+    #[test]
+    fn funding_cannot_exceed_what_a_buyer_paid() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (sock, handle) = fake_merchantd(
+            Response::Ok {
+                data: serde_json::json!({ "token": "cashuBvouchers" }),
+            },
+            Arc::clone(&seen),
+        );
+        let credit = Arc::new(Credit::new());
+        credit
+            .deposit("https://m", "sat", 100)
+            .expect("a buyer paid");
+        let funding = BridgeFunding::new(MerchantClient::new(&sock), Arc::clone(&credit));
+
+        // A session asks for far more than was paid. The bridge funds what the
+        // ledger holds and no more - it does not error, because a session asking
+        // for a capacity the deposits do not yet cover is normal, and the honest
+        // answer is the smaller number.
+        let got = funding
+            .vouchers("https://m", "sat", 10_000)
+            .expect("funds what it has");
+        assert_eq!(got, "cashuBvouchers");
+
+        // What matters is that merchantd was asked for 100, not 10_000: the bound
+        // is in what was requested, not in what was returned.
+        match seen.lock().expect("not poisoned").first() {
+            Some(Request::Fund { amount, .. }) => assert_eq!(
+                *amount, 100,
+                "asked merchantd for more vouchers than the buyer paid for"
+            ),
+            other => panic!("expected a fund request, saw {other:?}"),
+        }
+        drop(handle);
+        // And the whole payment was spent, exactly once.
+        assert_eq!(credit.available("https://m", "sat"), 0);
+    }
+
+    /// What the ledger can pay for, it does pay for — and it spends the credit,
+    /// so a second channel cannot spend the same money.
+    #[test]
+    fn funding_spends_the_credit_it_used() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (sock, handle) = fake_merchantd(
+            Response::Ok {
+                data: serde_json::json!({ "token": "cashuBvouchers" }),
+            },
+            Arc::clone(&seen),
+        );
+        let credit = Arc::new(Credit::new());
+        credit
+            .deposit("https://m", "sat", 100)
+            .expect("a buyer paid");
+        let funding = BridgeFunding::new(MerchantClient::new(&sock), Arc::clone(&credit));
+
+        funding.vouchers("https://m", "sat", 60).expect("fund");
+        handle.join().expect("thread");
+        assert_eq!(
+            credit.available("https://m", "sat"),
+            40,
+            "funding must spend the credit it used"
+        );
+    }
+
     /// Funding a channel asks merchantd for exactly the vouchers the session
     /// asked for, in the mint and unit it named.
     #[test]
@@ -197,6 +290,9 @@ mod tests {
             Arc::clone(&seen),
         );
         let credit = Arc::new(Credit::new());
+        credit
+            .deposit("https://m", "sat", 500)
+            .expect("a buyer paid");
         let funding = BridgeFunding::new(MerchantClient::new(&sock), Arc::clone(&credit));
 
         let token = funding.vouchers("https://m", "sat", 500).expect("fund");
