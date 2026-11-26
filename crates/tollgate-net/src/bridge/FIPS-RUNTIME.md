@@ -1,65 +1,95 @@
-# Why the FIPS path cannot be run on this host yet
+# The FIPS transit-policy API does not exist in any build I can find
 
-Recorded because the bridge's FIPS admission is written, tested against the
-enforcer protocol, and **cannot be exercised here** — and a future reader
-deserves to know that from evidence rather than discovering it by trying.
+This file records a documentation-versus-code contradiction that blocks the FIPS half
+of the paid exit. It replaces an earlier note that said only "this host's FIPS is too
+old". That was wrong, and being wrong in that direction matters: it implied a version
+bump would fix it.
 
-## What the code requires
+## What `tollgate-rs` says exists
 
-`tollgate-net`'s `fips` enforcer drives a mesh through two control commands:
+`docs/design/FIPS_FEATURE_REQUESTS.md` states:
 
-- `set_transit_policy {npub, admitted, rate_bytes_per_sec}` — admission and rate
-  for one peer, in one call;
-- `show_transit_policy` — the per-peer counters.
+> **Status**: available in the FIPS build TollGate targets, as the transit-policy
+> commands: `set_transit_policy {npub, admitted, rate_bytes_per_sec}` per peer,
+> `set_default_transit_policy` for peers not yet named, `clear_transit_policy` on
+> removal, and `show_transit_policy` for the per-peer counters.
 
-`docs/guides/quickstart.md` states the consequence directly:
+and `docs/guides/quickstart.md` repeats the consequence:
 
-> `fipsd` running, built with per-peer transit policy (`set_transit_policy`); a
-> FIPS daemon without it refuses the node at start.
+> `fipsd` running, built with per-peer transit policy (`set_transit_policy`); a FIPS
+> daemon without it refuses the node at start.
 
-## What this host has
+`crates/tollgate-net/src/enforcer/fips.rs` implements exactly that: it sends
+`set_transit_policy {npub, admitted, rate_bytes_per_sec}` and reads counters from
+`show_transit_policy`.
 
-```
-$ /usr/bin/fips --version
-fips 0.5.3 (rev f4a5b4a8e6)
-$ ip link show fips0
-417: fips0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1280 ...
-$ ls -l /run/fips/control.sock
-srwxrwx--- 1 root fips 0 ... /run/fips/control.sock
-```
+## What the code actually contains
 
-A FIPS daemon is running, `fips0` is up, and the control socket is reachable by a
-member of the `fips` group. The mesh exists.
+Three places checked, all negative.
 
-Probing its control socket for the commands above:
+**1. This host's daemon** — `fips 0.5.3`, `fips0` up at MTU 1280, control socket
+reachable:
 
 ```
-show_transit_policy -> {"status":"error","message":"unknown command: show_transit_policy"}
 set_transit_policy  -> {"status":"error","message":"unknown command: set_transit_policy"}
-show_peers          -> {"status":"ok","data":{"peers":[...]}}
-show_links          -> {"status":"ok","data":{"links":[...]}}
+show_transit_policy -> {"status":"error","message":"unknown command: show_transit_policy"}
+show_peers          -> {"status":"ok", ...}
+show_links          -> {"status":"ok", ...}
 ```
 
-So this build answers `show_peers` and `show_links` and does **not** implement the
-transit-policy pair. It is a FIPS that forwards by whatever policy it was built
-with, not one that lets a node set per-peer admission at runtime.
+**2. Upstream `jmcorgan/fips`, master** — no occurrence of `transit_policy` anywhere in
+the tree. The control socket dispatches `connect`, `disconnect` and status queries;
+the gateway module adds `show_gateway` and `show_mappings`. There is no transit-policy
+command and no per-peer forwarding-rate concept.
+
+**3. `Amperstrand/fips`, branch `archive/feat-tollgate-peer-policy`** — the only
+TollGate-specific FIPS fork, and the closest thing to "the FIPS build TollGate
+targets". It does have a peer policy, under a different name and with a different
+shape:
+
+```rust
+"set_peer_policy" => set_peer_policy(node, params),
+...
+let policy = match policy_str {
+    "full" => ForwardingPolicy::Full,
+    "local_only" => ForwardingPolicy::LocalOnly,
+    _ => return Response::error(...expected 'full' or 'local_only'),
+};
+```
+
+That is a **two-valued enum: forwarded or not**. It carries no rate, no byte budget,
+no per-peer counter reading, and there is no `show_transit_policy` on that branch
+either. `rate_bytes_per_sec` appears only in the BLE transport's token bucket, which
+is unrelated.
 
 ## What follows
 
-- **The FIPS admission path in this branch is unproven on a live mesh**, and no
-  amount of local testing changes that. The trait path and the protocol encoding
-  are proven (see `crates/tollgate-net/tests/bridge_enforcer_live.rs` and the
-  fixture daemon); whether FIPS honours the resulting policy is not.
-- **`tollgated` with `enforcer.kind: fips` would refuse to start against this
-  daemon**, by the behaviour the quickstart describes. That is the correct
-  behaviour and not a bug to work around.
-- **The address-based path is unaffected.** `admit_enforcer` and the loopback
-  enforcer do not need transit policy, which is why the fixture daemon run is
-  meaningful evidence for the protocol and none at all for FIPS.
+- **A paid FIPS exit needs per-peer admission AND a rate**, because what is being sold
+  is shaped transit. `set_peer_policy`'s two values can express "admitted" but not "at
+  what speed", so it cannot bill or meter. The missing piece is not a version bump; it
+  is the shaping half of the feature.
+- **The `fips` enforcer kind in `tollgate-rs` cannot work against any FIPS I can
+  find**, and would refuse to start, as the quickstart says it should.
+- **`docs/design/FIPS_FEATURE_REQUESTS.md`'s "Status: available" is inaccurate as of
+  this writing.** That is a documentation defect in a design document other code plans
+  against. It should be corrected, or the feature built.
 
-## What would close it
+## What this does not change
 
-A FIPS build carrying `set_transit_policy`. The feature is documented as available
-in the build TollGate targets (`docs/design/FIPS_FEATURE_REQUESTS.md`), so this is a
-version or build-flag question, not a missing feature in the design — but it must be
-answered by installing such a build and re-running, not by assuming.
+The bridge's own logic is unaffected in principle and unproven in practice for FIPS.
+`admit_fips` drives the `Enforcer` trait, and that trait's FIPS backend is the part
+with no working counterpart. The address-based path needs no transit policy, so the
+fixture-daemon evidence stays meaningful for the protocol and silent about FIPS.
+
+## How to close it
+
+Either:
+
+1. build a FIPS carrying `set_transit_policy` with a real rate, then re-run the proof;
+   or
+2. accept `set_peer_policy` as the available primitive and shape elsewhere — which for
+   transit is the problem the design document opens with: *"Transit never traverses the
+   TUN… the enforcement point has to be the forwarding path itself."*
+
+Option 2 is not a workaround this branch can perform. It is a decision about where
+enforcement lives, and it belongs to whoever owns the FIPS build.
