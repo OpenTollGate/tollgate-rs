@@ -300,4 +300,85 @@ mod tests {
     }
 
     const SERVED_ROUTES: [&str; 1] = ["/"];
+
+    // Over HTTP, through the router — not just the string it is built from.
+    // ---------------------------------------------------------------------
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::util::ServiceExt;
+
+    async fn call(req: Request<Body>) -> (StatusCode, String) {
+        let router = router(state_with(config()));
+        let resp = router.oneshot(req).await.expect("the router answers");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .expect("a body");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[tokio::test]
+    async fn a_v1_client_gets_json_on_the_root() {
+        // The module learned this the hard way (#628): without an explicit
+        // Content-Type, Go sniffs the body and strict clients warn on every
+        // probe. A v1 client negotiating on Content-Type must get JSON here.
+        let (status, body) = call(
+            Request::builder()
+                .uri("/")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(v["kind"], 10021);
+        assert_eq!(v["tags"][0][0], "metric");
+    }
+
+    #[tokio::test]
+    async fn a_wrong_method_on_the_root_is_not_a_silent_200() {
+        let (status, _) = call(
+            Request::builder()
+                .method("DELETE")
+                .uri("/")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn a_balance_request_is_404_because_the_bridge_has_none() {
+        // The claim in the module docs, exercised rather than restated: a v1
+        // device asking for a balance gets nothing, because this component does
+        // not count bytes and a number it made up would be worse than a 404.
+        for route in ["/balance", "/usage", "/whoami", "/ln-invoice"] {
+            let (status, _) = call(
+                Request::builder()
+                    .uri(route)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{route} must not be served");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_body_is_a_400_not_a_purchase() {
+        let (status, body) = call(
+            Request::builder()
+                .method("POST")
+                .uri("/?amount=0")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(v["accepted"], false);
+        assert!(v["refusal"].as_str().is_some(), "a refusal says why");
+    }
 }
