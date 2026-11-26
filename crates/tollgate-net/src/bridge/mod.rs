@@ -35,6 +35,10 @@
 //! one at all, so the bridge must be told what a deposit is worth and will
 //! refuse to guess.
 
+pub mod funding;
+
+pub use funding::BridgeFunding;
+
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
