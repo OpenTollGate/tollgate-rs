@@ -25,7 +25,23 @@ and `docs/guides/quickstart.md` repeats the consequence:
 
 ## What the code actually contains
 
-Three places checked, all negative.
+Four places checked, all negative.
+
+**0. The fallback does not exist either.** Before concluding, the obvious retreat was
+tried: if there is no rate, could the bridge at least use the boolean
+`ForwardingPolicy` that the fork does have — admit a paying peer, drop an unpaid one,
+and bill nothing? On this host's daemon:
+
+```
+set_peer_policy -> {"status":"error","message":"unknown command: set_peer_policy"}
+show_peers      -> ok, and its per-peer objects carry authenticated_at_ms,
+                   connectivity, mmp{...}, ipv6_addr, node_addr, link_id —
+                   and no forwarding_policy field at all
+```
+
+So this build has **no per-peer admission surface of any kind**: not a rate, not a
+boolean, not even a readable policy. A bridge cannot admit or refuse a peer through it,
+only observe that one connected.
 
 **1. This host's daemon** — `fips 0.5.3`, `fips0` up at MTU 1280, control socket
 reachable:
