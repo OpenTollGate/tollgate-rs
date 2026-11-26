@@ -36,6 +36,7 @@
 //! refuse to guess.
 
 pub mod admit;
+pub mod admit_enforcer;
 pub mod exchange;
 pub mod funding;
 pub mod http;
