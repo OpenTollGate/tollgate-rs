@@ -533,6 +533,49 @@ impl crate::channel::Funding for MerchantClient {
     }
 }
 
+/// What `merchantd` reports it actually took from a deposit.
+///
+/// A v1 buyer hands over a token, but the token's face value is not the answer:
+/// `merchantd` swaps it at the mint and holds what survived the swap. Anything
+/// that credits a buyer must credit *this*, or the ledger would disagree with the
+/// wallet that actually holds the money.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Held {
+    /// The mint whose paper is now held.
+    pub mint: String,
+    /// Its unit.
+    pub unit: String,
+    /// How much of it is held.
+    pub amount: u64,
+}
+
+impl MerchantClient {
+    /// Deposit a token and report what `merchantd` says it took.
+    ///
+    /// This is `Funding::deposit` with the answer kept. It exists because a
+    /// bridge must credit a buyer at the mint's answer rather than at the token's
+    /// advertised value, and reading that answer out of untyped JSON at the call
+    /// site is how the two get mixed up.
+    pub fn deposit_held(&self, token: &str) -> Result<Held> {
+        let data = self.call(&Request::Deposit {
+            token: token.to_owned(),
+        })?;
+        let field = |name: &str| {
+            data[name]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("merchantd's deposit answer has no {name}: {data}"))
+        };
+        Ok(Held {
+            mint: field("mint")?,
+            unit: field("unit")?,
+            amount: data["amount"]
+                .as_u64()
+                .ok_or_else(|| anyhow!("merchantd's deposit answer has no amount: {data}"))?,
+        })
+    }
+}
+
 /// Ask `merchantd`'s control socket for something, from `merchanttop`.
 pub async fn send(path: &Path, request: &Request) -> Result<Response> {
     let body = crate::control::exchange(path, Some(serde_json::to_string(request)?)).await?;

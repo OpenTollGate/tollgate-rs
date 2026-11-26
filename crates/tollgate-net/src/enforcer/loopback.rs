@@ -68,6 +68,19 @@ impl Loopback {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// The access level recorded for a peer, or `None` when it is not tracked.
+    ///
+    /// Exposed so a test can assert what was *applied*, not merely what a rate
+    /// happens to read back as. Without this, a `set_access` that did nothing at
+    /// all would be indistinguishable from a correct one.
+    pub fn recorded_access(&self, peer: PubKey) -> Option<AccessLevel> {
+        self.links
+            .lock()
+            .expect("not poisoned")
+            .get(&peer)
+            .map(|l| l.access)
+    }
 }
 
 impl Enforcer for Loopback {
